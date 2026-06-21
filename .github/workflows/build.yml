@@ -37,8 +37,6 @@ jobs:
         with:
           combine: true
           target: ${{ matrix.config.target }}
-          # FORCE FIX: Forcefully hand the SDK path to CMake internally
-          args: "-DCMAKE_PREFIX_PATH=${{ env.GEODE_SDK }}"
 
   package:
     name: Package builds
