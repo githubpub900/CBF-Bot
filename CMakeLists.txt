@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# CRITICAL FIX: Manually force CMake to find the Geode SDK package
+find_package(Geode REQUIRED)
+
 add_library(${PROJECT_NAME} SHARED)
 
 # Modern Geode setup command
