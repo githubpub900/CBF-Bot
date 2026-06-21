@@ -7,7 +7,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# CRITICAL FIX: Manually force CMake to find the Geode SDK package
+# FORCED PATH FIX: Tell CMake exactly where the GitHub Action robot puts the Geode SDK
+if(DEFINED ENV{GEODE_SDK})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{GEODE_SDK}")
+endif()
+
 find_package(Geode REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED)
