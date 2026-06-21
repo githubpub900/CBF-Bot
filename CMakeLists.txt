@@ -9,12 +9,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(${PROJECT_NAME} SHARED)
 
-# Geode's helper function that wires up:
-#  - Geode SDK headers
-#  - cocos2d-x headers
-#  - Geometry Dash bindings
-#  - The .geode package output
-geode_mod(${PROJECT_NAME})
+# Geode v4.0.0 macro setup command
+setup_geode_mod(${PROJECT_NAME})
 
 # All sources live under src/.
 file(GLOB_RECURSE PROJECT_SOURCES
