@@ -61,7 +61,7 @@
     "dependencies": {
         "syzzi.cbf": {
             "version": ">=1.0.0",
-            "importance": "optional",
+            "importance": "suggested",
             "description": "Optional: enables sub-frame tick precision for macros."
         }
     }
