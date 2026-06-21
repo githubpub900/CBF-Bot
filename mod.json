@@ -58,12 +58,11 @@
             "description": "Key name (e.g. F6, F7, SPACE, KEY_A)."
         }
     },
-    "dependencies": [
-        {
-            "id": "syzzi.cbf",
+    "dependencies": {
+        "syzzi.cbf": {
             "version": ">=1.0.0",
             "importance": "optional",
             "description": "Optional: enables sub-frame tick precision for macros."
         }
-    ]
+    }
 }
