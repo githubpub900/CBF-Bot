@@ -65,8 +65,5 @@
             "importance": "optional",
             "description": "Optional: enables sub-frame tick precision for macros."
         }
-    ],
-    "resources": {
-        "spritesheets": {}
-    }
+    ]
 }
