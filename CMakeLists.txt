@@ -9,8 +9,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(${PROJECT_NAME} SHARED)
 
-# Geode v4.0.0 macro setup command
-setup_geode_mod(${PROJECT_NAME})
+# Modern Geode setup command
+geode_mod(${PROJECT_NAME})
 
 # All sources live under src/.
 file(GLOB_RECURSE PROJECT_SOURCES
