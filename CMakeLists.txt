@@ -14,7 +14,7 @@ add_library(${PROJECT_NAME} SHARED)
 #  - cocos2d-x headers
 #  - Geometry Dash bindings
 #  - The .geode package output
-setup_geode_mod(${PROJECT_NAME})
+geode_mod(${PROJECT_NAME})
 
 # All sources live under src/.
 file(GLOB_RECURSE PROJECT_SOURCES
