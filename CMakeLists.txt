@@ -8,10 +8,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(${PROJECT_NAME} SHARED)
 
-# This will work perfectly once we fix the workflow file
-find_package(Geode REQUIRED)
-geode_mod(${PROJECT_NAME})
+# FORCE LINK: Pull the SDK directory directly since find_package is removed in v5
+if(NOT DEFINED ENV{GEODE_SDK})
+    message(FATAL_ERROR "Please define GEODE_SDK environment variable")
+else()
+    add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
+endif()
 
+# Setup the mod using the loaded subdirectory tools
+setup_geode_mod(${PROJECT_NAME})
+
+# All sources live under src/.
 file(GLOB_RECURSE PROJECT_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
@@ -24,8 +31,22 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+# On Windows we want a console-less DLL so the mod loads cleanly.
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:WINDOWS"
     )
+endif()
+
+# Optimize for size on release builds.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O2 -fdata-sections -ffunction-sections>
+        $<$<CXX_COMPILER_ID:MSVC>:/O2 /Gy /Gw>
+    )
+    if(WIN32)
+        target_link_options(${PROJECT_NAME} PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wl,--gc-sections>
+        )
+    endif()
 endif()
