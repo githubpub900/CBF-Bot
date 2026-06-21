@@ -1,0 +1,20 @@
+# Build artifacts
+/build/
+/out/
+*.geode
+
+# IDE
+.vscode/
+.idea/
+.cache/
+
+# Compiled objects
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+
+# OS
+.DS_Store
+Thumbs.db
