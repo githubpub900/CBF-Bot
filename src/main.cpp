@@ -17,7 +17,7 @@ enum class CBFStatus {
 // Determine which CBF is actively running on the client by checking settings
 CBFStatus getCBFStatus() {
     auto syzziMod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
-    if (syzziMod && syzziMod->isEnabled()) {
+    if (syzziMod) {
         bool isActive = true; // Fallback assume true if setting lookup fails
         if (syzziMod->hasSetting("cbf-enabled")) {
             isActive = syzziMod->getSettingValue<bool>("cbf-enabled");
@@ -352,6 +352,11 @@ class $modify(MyPauseLayer, PauseLayer) {
 // PLAYBACK, LOGIC, & CHECKPOINT HOOKS
 // ==========================================
 class $modify(MyPlayLayer, PlayLayer) {
+    // Add custom fields for Geode to safely track state variables
+    struct Fields {
+        unsigned int lastCheckpointCount = 0;
+    };
+
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
@@ -363,6 +368,8 @@ class $modify(MyPlayLayer, PlayLayer) {
             bot.currentState = BotManager::State::Recording;
             bot.clearMacro();
         }
+        
+        m_fields->lastCheckpointCount = 0;
 
         return true;
     }
@@ -370,6 +377,23 @@ class $modify(MyPlayLayer, PlayLayer) {
     // Process commands BEFORE physics update for flawless Playback accuracy
     void update(float dt) {
         auto& bot = BotManager::get();
+        
+        // Dynamically track checkpoint deletion to clear macro actions
+        unsigned int currentCheckpoints = this->m_checkpointArray ? this->m_checkpointArray->count() : 0;
+        if (currentCheckpoints < m_fields->lastCheckpointCount) {
+            if (this->m_isPracticeMode && bot.currentState == BotManager::State::Recording) {
+                if (currentCheckpoints > 0) {
+                    auto lastCp = this->m_checkpointArray->lastObject();
+                    if (bot.checkpointData.contains(lastCp)) {
+                        bot.removeInputsAfterX(bot.checkpointData[lastCp].p1XPos);
+                    }
+                } else {
+                    bot.clearMacro();
+                }
+            }
+        }
+        m_fields->lastCheckpointCount = currentCheckpoints;
+
         if (bot.currentState == BotManager::State::Playing && !bot.macro.empty()) {
             while (bot.playbackIndex < bot.macro.size()) {
                 BotAction& action = bot.macro[bot.playbackIndex];
@@ -393,24 +417,6 @@ class $modify(MyPlayLayer, PlayLayer) {
         PlayLayer::destroyPlayer(p, g);
         // Mark player as dead to prevent overlapping jump registrations in the macro
         BotManager::get().isDead = true;
-    }
-
-    void removeLastCheckpoint() {
-        PlayLayer::removeLastCheckpoint();
-        
-        auto& bot = BotManager::get();
-        if (this->m_isPracticeMode && bot.currentState == BotManager::State::Recording) {
-            if (this->m_checkpointArray->count() > 0) {
-                // Fetch the new last checkpoint's position and truncate any inputs beyond it
-                auto lastCp = this->m_checkpointArray->lastObject();
-                if (bot.checkpointData.contains(lastCp)) {
-                    bot.removeInputsAfterX(bot.checkpointData[lastCp].p1XPos);
-                }
-            } else {
-                // If there are no checkpoints left, clear the entire macro buffer
-                bot.clearMacro();
-            }
-        }
     }
 
     // --- PRACTICE MODE SNAPSHOTS ---
