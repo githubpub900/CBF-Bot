@@ -40,7 +40,6 @@ void Bot::updatePlayback(PlayLayer* pl) {
         if (!p) break;
         
         if (p->m_position.x >= action.xPos) {
-            // Using modern 2.2081 handleButton API instead of nonexistent pushButton
             pl->handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
@@ -54,9 +53,8 @@ void Bot::updatePlayback(PlayLayer* pl) {
 PlayerState Bot::captureState(PlayerObject* p) {
     PlayerState s;
     s.position = p->m_position;
-    s.rotation = p->m_playerRotation;
+    s.rotation = p->getRotation();
     s.yVelocity = p->m_yVelocity;
-    s.xVelocity = p->m_xVelocity;
     s.isUpsideDown = p->m_isUpsideDown;
     s.isOnGround = p->m_isOnGround;
     s.isDashing = p->m_isDashing;
@@ -75,9 +73,8 @@ PlayerState Bot::captureState(PlayerObject* p) {
 
 void Bot::applyState(PlayerObject* p, const PlayerState& s) {
     p->m_position = s.position;
-    p->m_playerRotation = s.rotation;
+    p->setRotation(s.rotation);
     p->m_yVelocity = s.yVelocity;
-    p->m_xVelocity = s.xVelocity;
     p->m_isUpsideDown = s.isUpsideDown;
     p->m_isOnGround = s.isOnGround;
     p->m_isDashing = s.isDashing;
@@ -98,7 +95,7 @@ void Bot::saveCheckpoint(PlayLayer* pl) {
     cp.actionIndex = actions.size(); 
     cp.p1 = captureState(pl->m_player1);
     if (pl->m_player2) cp.p2 = captureState(pl->m_player2);
-    cp.isDual = pl->m_dualMode; // Fixed field name
+    cp.isDual = pl->m_isDualMode; 
     checkpoints.push_back(cp);
 }
 
@@ -109,11 +106,11 @@ void Bot::removeLastCheckpoint() {
 void Bot::restoreCheckpoint(PlayLayer* pl) {
     if (!checkpoints.empty()) {
         auto& cp = checkpoints.back();
-        actions.resize(cp.actionIndex); // Truncate split timeline inputs
+        actions.resize(cp.actionIndex); 
         
         applyState(pl->m_player1, cp.p1);
         if (pl->m_player2) applyState(pl->m_player2, cp.p2);
-        pl->m_dualMode = cp.isDual;
+        pl->m_isDualMode = cp.isDual;
     } else {
         clearMacro();
     }
@@ -199,7 +196,6 @@ class $modify(BotScheduler, CCScheduler) {
 };
 
 // --- User Interface Layer ---
-// Inheriting directly from FLAlertLayer solves all missing template setup errors cleanly
 
 class BotUI : public FLAlertLayer {
 public:
@@ -218,19 +214,16 @@ public:
 
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
         
-        // Add a background layer
         auto bg = CCScale9Sprite::create("GJ_square01.png");
         bg->setContentSize({400.f, 250.f});
         bg->setPosition(winSize / 2);
         this->m_mainLayer->addChild(bg);
 
-        // Title
         auto title = cocos2d::CCLabelBMFont::create("Macro Bot 2.2081", "goldFont.fnt");
         title->setPosition(winSize.width / 2, winSize.height / 2 + 100);
         title->setScale(0.8f);
         this->m_mainLayer->addChild(title);
 
-        // Status Label
         auto statusLabel = cocos2d::CCLabelBMFont::create("", "bigFont.fnt");
         statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 50);
         statusLabel->setScale(0.5f);
@@ -246,14 +239,13 @@ public:
                 statusLabel->setColor({255, 255, 0});
                 break;
             case EngineType::None:
-default:
+            default:
                 statusLabel->setString("Status: Disabled (No CBF/CBS)");
                 statusLabel->setColor({255, 0, 0});
                 break;
         }
         this->m_mainLayer->addChild(statusLabel);
 
-        // Menu buttons
         auto menu = cocos2d::CCMenu::create();
         menu->setPosition(winSize.width / 2, winSize.height / 2 - 20);
         
@@ -272,7 +264,6 @@ default:
         
         this->m_mainLayer->addChild(menu);
 
-        // Close Button
         auto closeMenu = cocos2d::CCMenu::create();
         closeMenu->setPosition(winSize.width / 2, winSize.height / 2 - 90);
         auto closeBtn = CCMenuItemSpriteExtra::create(ButtonSprite::create("Close"), this, menu_selector(BotUI::onClose));
@@ -334,11 +325,11 @@ void Bot::toggleUI() {
 }
 
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool arr) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool repeat, double timestamp) {
         if (down && key == cocos2d::KEY_F8) {
             Bot::get().toggleUI();
             return true;
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, arr);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
     }
 };

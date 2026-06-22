@@ -10,12 +10,10 @@ enum class EngineType {
     SyzziCBF   // Syzzi's Click Between Frames Mod
 };
 
-// State representation for exact deterministic checkpoint restoration
 struct PlayerState {
     cocos2d::CCPoint position;
     float rotation;
     double yVelocity;
-    double xVelocity;
     bool isUpsideDown;
     bool isOnGround;
     bool isDashing;
@@ -31,11 +29,10 @@ struct PlayerState {
     bool isSwing;
 };
 
-// Practice Mode bug-fix checkpoint storage
 struct CheckpointData {
     PlayerState p1;
     PlayerState p2;
-    size_t actionIndex; // Truncation index for dead-input cleanup
+    size_t actionIndex; 
     bool isDual;
 };
 
@@ -64,14 +61,12 @@ public:
     void recordAction(float xPos, int button, bool player2, bool push);
     void updatePlayback(PlayLayer* pl);
     
-    // Checkpoint & Death Management
     void saveCheckpoint(PlayLayer* pl);
     void removeLastCheckpoint();
     void restoreCheckpoint(PlayLayer* pl);
     void clearCheckpoints();
     void clearMacro();
 
-    // Serialization
     void saveMacro(const std::string& filename);
     void loadMacro(const std::string& filename);
 
