@@ -6,22 +6,25 @@
 namespace cbf {
 
 // ============================================================================
-//  MacroLayer — v5 Popup (non-templated)
+//  MacroLayer — Geode v5 Popup (non-templated)
 // ----------------------------------------------------------------------------
-//  In Geode v5, Popup is no longer templated. Use Popup::init(width, height)
-//  instead of initAnchored. The create() pattern stays the same.
+//  v5 changes:
+//    - Popup is non-templated. Override init() and call Popup::init(w, h).
+//    - No more setup() virtual method.
+//    - geode::Slider no longer exists — use buttons instead.
+//    - Use <Geode/ui/GeodeUI.hpp> umbrella header for all UI components.
 // ============================================================================
 class MacroLayer : public geode::Popup {
 protected:
-    bool init();
-    bool setup() override { return true; } // setup() is called by init(); we do everything in init()
+    bool init() override;
 
     void onRecordBtn(cocos2d::CCObject*);
     void onPlayBtn(cocos2d::CCObject*);
     void onStopBtn(cocos2d::CCObject*);
     void onSaveBtn(cocos2d::CCObject*);
     void onLoadBtn(cocos2d::CCObject*);
-    void onSpeedSlider(cocos2d::CCObject*);
+    void onSpeedDownBtn(cocos2d::CCObject*);
+    void onSpeedUpBtn(cocos2d::CCObject*);
     void onPracticeFixToggle(cocos2d::CCObject*);
     void onCloseBtn(cocos2d::CCObject*);
 
@@ -32,14 +35,12 @@ protected:
     cocos2d::CCLabelBMFont* m_speedLabel     = nullptr;
     cocos2d::CCLabelBMFont* m_cbfLabel       = nullptr;
     cocos2d::CCLabelBMFont* m_physRateLabel  = nullptr;
-    geode::Slider*          m_speedSlider    = nullptr;
-    geode::TextInput*       m_filenameInput  = nullptr;
     CCMenuItemSpriteExtra*  m_practiceFixBtn = nullptr;
 
 public:
     static MacroLayer* create();
     static void toggle();
-    void keyBackClicked() override { this->onCloseBtn(nullptr); }
+    void keyBackClicked() override;
 };
 
 } // namespace cbf

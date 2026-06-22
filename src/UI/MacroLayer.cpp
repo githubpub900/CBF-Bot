@@ -4,10 +4,9 @@
 #include "../Speedhack.hpp"
 #include "../PracticeFix.hpp"
 
-#include <Geode/ui/Popup.hpp>
-#include <Geode/ui/TextInput.hpp>
-#include <Geode/ui/Slider.hpp>
+#include <Geode/Geode.hpp>
 #include <Geode/ui/GeodeUI.hpp>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -39,7 +38,7 @@ void MacroLayer::toggle() {
 }
 
 bool MacroLayer::init() {
-    // Geode v5: Popup::init(width, height) replaces initAnchored.
+    // Geode v5: Popup::init(width, height) sets up the popup background.
     if (!Popup::init(380.f, 340.f)) return false;
 
     setTitle("CBF Macro Bot");
@@ -93,39 +92,44 @@ bool MacroLayer::init() {
     actionMenu->addChild(stopBtn);
     m_mainLayer->addChild(actionMenu);
 
-    // ---- Filename input + Save/Load ----
-    m_filenameInput = geode::TextInput::create(180.f, "macro filename");
-    m_filenameInput->setPosition({cx - 50.f, winSize.height - 190.f});
-    m_filenameInput->setScale(0.9f);
-    m_mainLayer->addChild(m_filenameInput);
-
+    // ---- Save / Load buttons (uses fixed "macro.cbfm" filename) ----
     auto saveBtn = CCMenuItemSpriteExtra::create(
         ButtonSprite::create("Save", "bigFont.fnt", "GJ_button_01.png", 0.7f),
         this, menu_selector(MacroLayer::onSaveBtn));
-    saveBtn->setPosition({50.f, -5.f});
+    saveBtn->setPosition({-45.f, 0.f});
 
     auto loadBtn = CCMenuItemSpriteExtra::create(
         ButtonSprite::create("Load", "bigFont.fnt", "GJ_button_01.png", 0.7f),
         this, menu_selector(MacroLayer::onLoadBtn));
-    loadBtn->setPosition({50.f, -35.f});
+    loadBtn->setPosition({45.f, 0.f});
 
     auto fileMenu = cocos2d::CCMenu::create();
-    fileMenu->setPosition({cx + 90.f, winSize.height - 185.f});
+    fileMenu->setPosition({cx, winSize.height - 185.f});
     fileMenu->addChild(saveBtn);
     fileMenu->addChild(loadBtn);
     m_mainLayer->addChild(fileMenu);
 
-    // ---- Speedhack slider ----
+    // ---- Speed control: label + Speed- / Speed+ buttons ----
     m_speedLabel = cocos2d::CCLabelBMFont::create("Speed: 1.00x", "chatFont.fnt");
-    m_speedLabel->setPosition({cx, winSize.height - 225.f});
+    m_speedLabel->setPosition({cx, winSize.height - 215.f});
     m_speedLabel->setScale(0.9f);
     m_mainLayer->addChild(m_speedLabel);
 
-    m_speedSlider = geode::Slider::create(
-        this, menu_selector(MacroLayer::onSpeedSlider), 0.5f);
-    m_speedSlider->setPosition({cx, winSize.height - 245.f});
-    m_speedSlider->setScale(0.8f);
-    m_mainLayer->addChild(m_speedSlider);
+    auto speedDownBtn = CCMenuItemSpriteExtra::create(
+        ButtonSprite::create("Speed-", "bigFont.fnt", "GJ_button_05.png", 0.7f),
+        this, menu_selector(MacroLayer::onSpeedDownBtn));
+    speedDownBtn->setPosition({-60.f, 0.f});
+
+    auto speedUpBtn = CCMenuItemSpriteExtra::create(
+        ButtonSprite::create("Speed+", "bigFont.fnt", "GJ_button_05.png", 0.7f),
+        this, menu_selector(MacroLayer::onSpeedUpBtn));
+    speedUpBtn->setPosition({60.f, 0.f});
+
+    auto speedMenu = cocos2d::CCMenu::create();
+    speedMenu->setPosition({cx, winSize.height - 240.f});
+    speedMenu->addChild(speedDownBtn);
+    speedMenu->addChild(speedUpBtn);
+    m_mainLayer->addChild(speedMenu);
 
     // ---- Practice fix toggle ----
     m_practiceFixBtn = CCMenuItemSpriteExtra::create(
@@ -194,7 +198,6 @@ void MacroLayer::refreshUI(float /*dt*/) {
         cbf.getTicksPerSecond()
     ).c_str());
 
-    // Show the effective physics rate (changes with speed for slow-mo).
     double effRate = Speedhack::get().getEffectiveBaseRate();
     double maxRate = cbf.getMaxPhysicsRate();
     m_physRateLabel->setString(fmt::format(
@@ -202,7 +205,9 @@ void MacroLayer::refreshUI(float /*dt*/) {
         effRate, maxRate
     ).c_str());
 
-    // Update practice fix button label.
+    float speed = Speedhack::get().getSpeed();
+    m_speedLabel->setString(fmt::format("Speed: {:.3f}x", speed).c_str());
+
     if (m_practiceFixBtn) {
         bool en = PracticeFix::get().isEnabled();
         auto sprite = ButtonSprite::create(
@@ -235,35 +240,37 @@ void MacroLayer::onStopBtn(CCObject*) {
 }
 
 void MacroLayer::onSaveBtn(CCObject*) {
-    std::string name = m_filenameInput->getString();
-    if (name.empty()) name = "macro";
-    MacroBot::get().saveLastRecorded(name);
-    FLAlertLayer::create("Saved", fmt::format("Saved as {}.cbfm", name).c_str(), "OK")->show();
+    if (MacroBot::get().saveLastRecorded("macro")) {
+        FLAlertLayer::create("Saved", "Saved as macro.cbfm", "OK")->show();
+    } else {
+        FLAlertLayer::create("Error", "Nothing to save.", "OK")->show();
+    }
     refreshUI(0.f);
 }
 
 void MacroLayer::onLoadBtn(CCObject*) {
-    std::string name = m_filenameInput->getString();
-    if (name.empty()) {
-        FLAlertLayer::create("Load", "Enter a filename first.", "OK")->show();
-        return;
-    }
-    auto path = MacroBot::get().macroDir() / (name + ".cbfm");
+    auto path = MacroBot::get().macroDir() / "macro.cbfm";
     if (MacroBot::get().playFromFile(path.string())) {
-        FLAlertLayer::create("Loaded", fmt::format("Loaded {}.cbfm", name).c_str(), "OK")->show();
+        FLAlertLayer::create("Loaded", "Loaded macro.cbfm", "OK")->show();
     } else {
-        FLAlertLayer::create("Error", fmt::format("Could not load {}.cbfm", name).c_str(), "OK")->show();
+        FLAlertLayer::create("Error", "Could not load macro.cbfm", "OK")->show();
     }
     refreshUI(0.f);
 }
 
-void MacroLayer::onSpeedSlider(CCObject*) {
-    // Slider value is 0..1; map to 0.001x .. 100x logarithmically.
-    float t = m_speedSlider->getValue();
-    // Map [0,1] -> [0.001, 100] via log scale: speed = 0.001 * 100000^t
-    float speed = 0.001f * std::pow(100000.0f, t);
+void MacroLayer::onSpeedDownBtn(CCObject*) {
+    float speed = Speedhack::get().getSpeed();
+    // Multiply by 0.75 for fine-grained control. Min 0.001x.
+    speed = std::max(0.001f, speed * 0.75f);
     MacroBot::get().setSpeed(speed);
-    m_speedLabel->setString(fmt::format("Speed: {:.3f}x", speed).c_str());
+    refreshUI(0.f);
+}
+
+void MacroLayer::onSpeedUpBtn(CCObject*) {
+    float speed = Speedhack::get().getSpeed();
+    // Multiply by 1.33 for fine-grained control. Max 1000x.
+    speed = std::min(1000.0f, speed * 1.33f);
+    MacroBot::get().setSpeed(speed);
     refreshUI(0.f);
 }
 
@@ -275,6 +282,10 @@ void MacroLayer::onPracticeFixToggle(CCObject*) {
 
 void MacroLayer::onCloseBtn(CCObject*) {
     this->removeFromParent();
+}
+
+void MacroLayer::keyBackClicked() {
+    this->onCloseBtn(nullptr);
 }
 
 } // namespace cbf

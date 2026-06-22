@@ -37,6 +37,7 @@
 #include "UI/MacroLayer.hpp"
 
 using namespace geode::prelude;
+using namespace cbf; // MacroBot, Speedhack, CBFIntegration, PracticeFix, etc.
 
 // ---------------------------------------------------------------------------
 //  Mod entry point
