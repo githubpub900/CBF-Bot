@@ -49,28 +49,28 @@ class $modify(CCScheduler) {
 // INPUT RECORDING (GJBaseGameLayer Hooks)
 // ==========================================
 class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
-    void pushButton(int playerNum, PlayerButton button) {
-        GJBaseGameLayer::pushButton(playerNum, button);
+    void pushButton(PlayerButton button, bool isPlayer2) {
+        GJBaseGameLayer::pushButton(button, isPlayer2);
 
         auto& bot = BotManager::get();
         if (bot.currentState == BotManager::State::Recording) {
-            PlayerObject* player = (playerNum == 1) ? this->m_player2 : this->m_player1;
+            PlayerObject* player = isPlayer2 ? this->m_player2 : this->m_player1;
             if (player) {
                 float delta = CCDirector::sharedDirector()->getDeltaTime();
-                bot.addAction(player->m_position.x, delta, static_cast<int>(button), true, (playerNum == 1));
+                bot.addAction(player->m_position.x, delta, static_cast<int>(button), true, isPlayer2);
             }
         }
     }
 
-    void releaseButton(int playerNum, PlayerButton button) {
-        GJBaseGameLayer::releaseButton(playerNum, button);
+    void releaseButton(PlayerButton button, bool isPlayer2) {
+        GJBaseGameLayer::releaseButton(button, isPlayer2);
 
         auto& bot = BotManager::get();
         if (bot.currentState == BotManager::State::Recording) {
-            PlayerObject* player = (playerNum == 1) ? this->m_player2 : this->m_player1;
+            PlayerObject* player = isPlayer2 ? this->m_player2 : this->m_player1;
             if (player) {
                 float delta = CCDirector::sharedDirector()->getDeltaTime();
-                bot.addAction(player->m_position.x, delta, static_cast<int>(button), false, (playerNum == 1));
+                bot.addAction(player->m_position.x, delta, static_cast<int>(button), false, isPlayer2);
             }
         }
     }
