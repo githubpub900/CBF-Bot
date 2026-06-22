@@ -1,17 +1,17 @@
 #pragma once
 
 #include <Geode/Geode.hpp>
-#include <cstdint>
-#include <filesystem>
-#include <string>
-#include <unordered_map>
+#include <Geode/binding/PlayLayer.hpp>
+#include <Geode/binding/PlayerObject.hpp>
+#include <Geode/binding/CheckpointObject.hpp>
+
 #include <vector>
+#include <unordered_map>
+#include <filesystem>
+#include <cstdint>
 
 namespace geode::prelude {
-    class PlayLayer;
-    class PlayerObject;
-    class CheckpointObject;
-    enum class PlayerButton : int;
+    enum PlayerButton : int; // Fixed: Changed from enum class to plain enum to match Geode bindings
 }
 
 namespace bot {
@@ -99,8 +99,6 @@ namespace bot {
         int maybeSlidingTime = 0;
         int nextColorKey = 0;
 
-        // Object references are intentionally not serialized; vanilla checkpoint loading
-        // already reconstructs them, and persisting raw pointers would be unsafe.
         cocos2d::CCPoint lastGroundedPos{};
         cocos2d::CCPoint lastPortalPos{};
         cocos2d::CCPoint shipRotation{};
@@ -185,8 +183,7 @@ namespace bot {
         BotManager() = default;
 
         std::filesystem::path defaultMacroPath() const;
-        void writeMacroToDisk();
-        bool readMacroFromDisk();
+        bool readMacroFromDisk(); // Match with your boolean implementation
 
         static std::uint64_t zigZagEncode(std::int64_t value);
         static std::int64_t zigZagDecode(std::uint64_t value);
@@ -218,6 +215,4 @@ namespace bot {
         BotOverlay* m_overlay = nullptr;
         std::filesystem::path m_macroPath;
     };
-
-    class BotOverlay;
 }
