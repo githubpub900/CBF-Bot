@@ -1,9 +1,10 @@
-// Bot.hpp (unchanged except for comment updates)
+// Bot.hpp
 #pragma once
 #include <Geode/Geode.hpp>
 #include <vector>
 #include <string>
 #include <fstream>
+#include <algorithm>
 
 using namespace geode::prelude;
 
@@ -66,7 +67,7 @@ public:
     enum class CBSMode { None, RobTop, Syzzi };
     static CBSMode getCBSMode();
 
-    // UI callbacks (static, will be wrapped in lambdas)
+    // UI callbacks (static, kept for use by ButtonWrapper)
     static void onRecordButton(CCObject*);
     static void onPlayButton(CCObject*);
     static void onSaveButton(CCObject*);
@@ -87,6 +88,8 @@ private:
     // UI
     static inline bool m_uiVisible = false;
     static inline CCNode* m_uiNode = nullptr;
+    // Keep wrapper objects alive
+    static inline std::vector<CCObject*> m_uiHelpers;
 
     // Speedhack
     static inline float m_speed = 1.0f;

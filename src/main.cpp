@@ -7,25 +7,37 @@
 
 using namespace geode::prelude;
 
+// ---------------------------------------------------------------------------
+// Helper class to wrap static functions into CCObject member callbacks
+// (required by CCMenuItemSpriteExtra's SEL_MenuHandler)
+// ---------------------------------------------------------------------------
+class ButtonWrapper : public CCObject {
+public:
+    std::function<void()> callback;
+    ButtonWrapper(std::function<void()> cb) : callback(cb) {
+        this->retain(); // prevent premature deletion
+    }
+    void onTrigger(CCObject*) {
+        callback();
+    }
+};
+
 // =========================================================================
 // Hooks
 // =========================================================================
 
 class PlayLayerHook : public Modify<PlayLayerHook, PlayLayer> {
 public:
-    // storeCheckpoint now fills the provided CheckpointObject*
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         Bot::checkpointStored(checkpoint);
     }
 
-    // checkpointActivated receives a CheckpointGameObject* (the visual object)
     void checkpointActivated(CheckpointGameObject* object) {
         PlayLayer::checkpointActivated(object);
-        // GD 2.2’s CheckpointGameObject already restores full player state.
+        // GD 2.2's checkpoint restores all required player state.
     }
 
-    // Update: manual step‑based playback
     void update(float dt) {
         auto* pl = static_cast<PlayLayer*>(this);
         if (Bot::isPlaying()) {
@@ -41,7 +53,6 @@ public:
         PlayLayer::update(dt);
     }
 
-    // Input recording – handleButton is the single entry point for CBS/CBF.
     void handleButton(bool down, int button, bool player1) {
         PlayLayer::handleButton(down, button, player1);
         if (Bot::isRecording()) {
@@ -50,7 +61,6 @@ public:
         }
     }
 
-    // Dead‑input cleanup
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
         Bot::onDeath();
@@ -62,7 +72,6 @@ public:
     }
 };
 
-// Speedhack: multiply non‑playback frames. Playback uses its own scaling.
 class SchedulerHook : public Modify<SchedulerHook, CCScheduler> {
 public:
     void update(float dt) {
@@ -72,7 +81,6 @@ public:
     }
 };
 
-// K‑key toggle – signature includes double timestamp
 class KeyboardHook : public Modify<KeyboardHook, CCKeyboardDispatcher> {
 public:
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
@@ -220,7 +228,14 @@ void Bot::loadMacro(const std::string& path) {
 // ---------- UI ----------
 void Bot::toggleUI(PlayLayer* pl) {
     if (m_uiVisible) {
-        if (m_uiNode) m_uiNode->removeFromParent();
+        if (m_uiNode) {
+            m_uiNode->removeFromParent();
+            m_uiNode = nullptr;
+        }
+        // Release stored helpers
+        for (auto* obj : m_uiHelpers)
+            obj->release();
+        m_uiHelpers.clear();
         m_uiVisible = false;
         return;
     }
@@ -252,32 +267,35 @@ void Bot::toggleUI(PlayLayer* pl) {
     speedLabel->setPosition(ccp(100, -130));
     bg->addChild(speedLabel);
 
-    // Buttons – use CCMenuItemSpriteExtra with lambdas
+    // Create menu
     auto* menu = CCMenu::create();
     menu->setPosition(ccp(100, 160));
 
-    auto addBtn = [&](const char* title, std::function<void(CCObject*)> cb, float y) {
+    // Helper lambda to create a button that calls a Bot static function
+    auto addBtn = [&](const char* title, std::function<void()> action, float y) {
+        auto* wrapper = new ButtonWrapper(action); // retained
+        m_uiHelpers.push_back(wrapper);
         auto* btn = CCMenuItemSpriteExtra::create(
             CCLabelBMFont::create(title, "bigFont.fnt"),
-            nullptr,
-            nullptr,
-            cb
+            nullptr,                     // no selected sprite
+            wrapper,
+            menu_selector(ButtonWrapper::onTrigger)
         );
         btn->setPosition(ccp(0, y));
         menu->addChild(btn);
     };
 
-    addBtn("Record", [](CCObject*){ Bot::onRecordButton(nullptr); },  30);
-    addBtn("Play",   [](CCObject*){ Bot::onPlayButton(nullptr); },   -10);
-    addBtn("Save",   [](CCObject*){ Bot::onSaveButton(nullptr); },   -50);
-    addBtn("Load",   [](CCObject*){ Bot::onLoadButton(nullptr); },   -90);
+    addBtn("Record", []{ Bot::onRecordButton(nullptr); },  30);
+    addBtn("Play",   []{ Bot::onPlayButton(nullptr); },   -10);
+    addBtn("Save",   []{ Bot::onSaveButton(nullptr); },   -50);
+    addBtn("Load",   []{ Bot::onLoadButton(nullptr); },   -90);
 
     bg->addChild(menu);
     m_uiNode = bg;
     m_uiVisible = true;
 }
 
-// Static UI callbacks remain empty, called only via lambdas
+// UI callbacks (called from ButtonWrapper)
 void Bot::onRecordButton(CCObject*) {
     if (isRecording()) stopRecording();
     else startRecording();
@@ -287,7 +305,6 @@ void Bot::onPlayButton(CCObject*) {
     else startPlayback();
 }
 void Bot::onSaveButton(CCObject*) {
-    // Convert gd::string to std::string
     std::string path = std::string(CCFileUtils::sharedFileUtils()->getWritablePath().c_str()) + "macro.gdmb";
     saveMacro(path);
 }
