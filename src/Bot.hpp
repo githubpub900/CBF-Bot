@@ -1,16 +1,19 @@
 #pragma once
 
 #include <Geode/Geode.hpp>
-#include <Geode/binding/PlayLayer.hpp>
-#include <Geode/binding/PlayerObject.hpp>
-#include <Geode/binding/CheckpointObject.hpp>
-
-#include <vector>
-#include <unordered_map>
-#include <filesystem>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
-// REMOVED: Manual conflicting forward-declaration of PlayerButton
+namespace geode::prelude {
+    class PlayLayer;
+    class PlayerObject;
+    class CheckpointObject;
+    enum class PlayerButton : int;
+}
 
 namespace bot {
     enum class TimingMode : std::uint8_t {
@@ -79,7 +82,7 @@ namespace bot {
         bool reverseSync = false;
         bool wasTeleported = false;
 
-        // State buckets
+        // State buckets that govern custom physics behavior in different gamemodes.
         int stateOnGround = 0;
         std::uint8_t stateUnk = 0;
         std::uint8_t stateNoStickX = 0;
@@ -97,6 +100,8 @@ namespace bot {
         int maybeSlidingTime = 0;
         int nextColorKey = 0;
 
+        // Object references are intentionally not serialized; vanilla checkpoint loading
+        // already reconstructs them, and persisting raw pointers would be unsafe.
         cocos2d::CCPoint lastGroundedPos{};
         cocos2d::CCPoint lastPortalPos{};
         cocos2d::CCPoint shipRotation{};
@@ -156,22 +161,22 @@ namespace bot {
         void loadMacro();
         void setSpeedhack(double value);
 
-        void onGameUpdate(PlayLayer* layer, float dt);
-        void onButton(PlayerObject* player, geode::prelude::PlayerButton button, bool down);
-        void onDeath(PlayLayer* layer);
-        void onRestartPre(PlayLayer* layer);
-        void onRestartPost(PlayLayer* layer);
-        void onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint);
-        void onCheckpointLoad(PlayLayer* layer, CheckpointObject* checkpoint);
-        void onLevelComplete(PlayLayer* layer);
-        void onSceneEnter(PlayLayer* layer);
+        void onGameUpdate(geode::prelude::PlayLayer* layer, float dt, std::function<void(float)> const& originalUpdate);
+        void onButton(geode::prelude::PlayerObject* player, geode::prelude::PlayerButton button, bool down);
+        void onDeath(geode::prelude::PlayLayer* layer);
+        void onRestartPre(geode::prelude::PlayLayer* layer);
+        void onRestartPost(geode::prelude::PlayLayer* layer);
+        void onCheckpointStore(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onCheckpointLoad(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onLevelComplete(geode::prelude::PlayLayer* layer);
+        void onSceneEnter(geode::prelude::PlayLayer* layer);
         void onSceneExit();
 
-        void trimAfterCurrentTime(PlayLayer* layer);
+        void trimAfterCurrentTime(geode::prelude::PlayLayer* layer);
         void clearDeadState();
-        void refreshPlayers(PlayLayer* layer);
-        PlayerObject* player1() const;
-        PlayerObject* player2() const;
+        void refreshPlayers(geode::prelude::PlayLayer* layer);
+        geode::prelude::PlayerObject* player1() const;
+        geode::prelude::PlayerObject* player2() const;
 
         const std::vector<MacroEvent>& events() const;
         std::size_t playbackIndex() const;
@@ -187,8 +192,8 @@ namespace bot {
         static std::int64_t zigZagDecode(std::uint64_t value);
         static void writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value);
         static bool readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value);
-        static PlayerSnapshot captureSnapshot(PlayerObject* player);
-        static void applySnapshot(PlayerObject* player, PlayerSnapshot const& snapshot);
+        static PlayerSnapshot captureSnapshot(geode::prelude::PlayerObject* player);
+        static void applySnapshot(geode::prelude::PlayerObject* player, PlayerSnapshot const& snapshot);
 
         TimingMode m_mode = TimingMode::None;
         bool m_recording = false;
@@ -203,14 +208,16 @@ namespace bot {
 
         std::vector<MacroEvent> m_events;
         std::vector<CheckpointSnapshot> m_checkpoints;
-        std::unordered_map<CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
+        std::unordered_map<geode::prelude::CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
         std::size_t m_playbackIndex = 0;
 
-        PlayLayer* m_layer = nullptr;
-        PlayerObject* m_cachedP1 = nullptr;
-        PlayerObject* m_cachedP2 = nullptr;
+        geode::prelude::PlayLayer* m_layer = nullptr;
+        geode::prelude::PlayerObject* m_cachedP1 = nullptr;
+        geode::prelude::PlayerObject* m_cachedP2 = nullptr;
 
         BotOverlay* m_overlay = nullptr;
         std::filesystem::path m_macroPath;
     };
+
+    class BotOverlay;
 }

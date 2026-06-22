@@ -1,4 +1,4 @@
-#include "bot.hpp"
+#include "Bot.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/MenuLayer.hpp>
@@ -48,49 +48,13 @@ namespace bot {
             return static_cast<double>(ns) / static_cast<double>(kNanosPerSecond);
         }
 
-        void scanForPlayers(cocos2d::CCNode* node, PlayerObject*& p1, PlayerObject*& p2) {
-            if (!node) return;
-
-            if (auto* player = dynamic_cast<PlayerObject*>(node)) {
-                if (player->isPlayer1()) p1 = player;
-                if (player->isPlayer2()) p2 = player;
-            }
-
-            auto* children = node->getChildren();
-            if (!children) return;
-
-            for (int i = 0; i < children->count(); ++i) {
-                scanForPlayers(static_cast<cocos2d::CCNode*>(children->objectAtIndex(i)), p1, p2);
-            }
-        }
-
         CCMenuItemSpriteExtra* makeButton(const char* title, CCObject* target, SEL_MenuHandler handler) {
             auto* sprite = ButtonSprite::create(title);
             return CCMenuItemSpriteExtra::create(sprite, target, handler);
         }
 
         std::int64_t currentLayerTimeNs(PlayLayer* layer) {
-            return layer ? toNs(layer->m_currentTime) : 0;
-        }
-
-        void writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value) {
-            while (value >= 0x80) {
-                out.push_back(static_cast<std::uint8_t>(value | 0x80));
-                value >>= 7;
-            }
-            out.push_back(static_cast<std::uint8_t>(value));
-        }
-
-        bool readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value) {
-            value = 0;
-            int shift = 0;
-            while (cursor < end && shift < 64) {
-                std::uint8_t byte = *cursor++;
-                value |= static_cast<std::uint64_t>(byte & 0x7F) << shift;
-                if ((byte & 0x80) == 0) return true;
-                shift += 7;
-            }
-            return false;
+            return layer ? toNs(layer->m_time) : 0;
         }
     }
 
@@ -107,7 +71,7 @@ namespace bot {
         }
 
         bool init() override {
-            if (!CCLayerColor::init()) return false;
+            if (!CCLayer::init()) return false;
             setColor(ccc3(0, 0, 0));
             setOpacity(160);
 
@@ -258,7 +222,7 @@ namespace bot {
             return true;
         }
 
-        void keyDown(cocos2d::enumKeyCodes key, double) override {
+        void keyDown(cocos2d::enumKeyCodes key) override {
             if (key == cocos2d::enumKeyCodes::KEY_K) {
                 BotManager::get().toggleOverlay();
             }
@@ -336,7 +300,7 @@ namespace bot {
         m_events.clear();
         m_checkpoints.clear();
         m_checkpointLookup.clear();
-        m_recordBaseNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
+        m_recordBaseNs = m_layer ? toNs(m_layer->m_time) : 0;
         m_playbackStartNs = 0;
         m_deathCutoffNs = 0;
     }
@@ -356,7 +320,7 @@ namespace bot {
         m_playback = true;
         m_recording = false;
         m_playbackIndex = 0;
-        m_playbackStartNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
+        m_playbackStartNs = m_layer ? toNs(m_layer->m_time) : 0;
         m_inPlaybackInjection = false;
         m_dead = false;
         refreshPlayers(m_layer);
@@ -396,7 +360,7 @@ namespace bot {
         m_layer = layer;
         refreshPlayers(layer);
         if (m_recording && !m_recordBaseNs) {
-            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+            m_recordBaseNs = layer ? toNs(layer->m_time) : 0;
         }
     }
 
@@ -417,19 +381,14 @@ namespace bot {
             return;
         }
 
-        if (m_cachedP1 && m_cachedP2) {
-            if (m_cachedP1->getParent() && m_cachedP2->getParent()) return;
-        }
-
-        m_cachedP1 = nullptr;
-        m_cachedP2 = nullptr;
-        scanForPlayers(layer, m_cachedP1, m_cachedP2);
+        m_cachedP1 = layer->m_player1;
+        m_cachedP2 = layer->m_player2;
     }
 
     PlayerObject* BotManager::player1() const { return m_cachedP1; }
     PlayerObject* BotManager::player2() const { return m_cachedP2; }
 
-    void BotManager::onButton(PlayerObject* player, geode::prelude::PlayerButton button, bool down) {
+    void BotManager::onButton(PlayerObject* player, PlayerButton button, bool down) {
         if (!m_recording || m_inPlaybackInjection) return;
         if (!m_layer) return;
         if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = currentLayerTimeNs(m_layer);
@@ -437,7 +396,7 @@ namespace bot {
         MacroEvent ev;
         ev.timeNs = currentLayerTimeNs(m_layer) - m_recordBaseNs;
         ev.button = static_cast<std::uint8_t>(button);
-        ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player->isPlayer1()) ? 2 : 0));
+        ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player == m_cachedP1) ? 2 : 0));
         m_events.push_back(ev);
     }
 
@@ -469,7 +428,7 @@ namespace bot {
     void BotManager::onRestartPost(PlayLayer* layer) {
         clearDeadState();
         if (m_recording) {
-            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+            m_recordBaseNs = layer ? toNs(layer->m_time) : 0;
         }
     }
 
@@ -629,7 +588,27 @@ namespace bot {
         return static_cast<std::int64_t>((value >> 1) ^ (~(value & 1) + 1));
     }
 
-    void BotManager::onGameUpdate(PlayLayer* layer, float dt) {
+    void BotManager::writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value) {
+        while (value >= 0x80) {
+            out.push_back(static_cast<std::uint8_t>(value | 0x80));
+            value >>= 7;
+        }
+        out.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    bool BotManager::readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value) {
+        value = 0;
+        int shift = 0;
+        while (cursor < end && shift < 64) {
+            std::uint8_t byte = *cursor++;
+            value |= static_cast<std::uint64_t>(byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) return true;
+            shift += 7;
+        }
+        return false;
+    }
+
+    void BotManager::onGameUpdate(PlayLayer* layer, float dt, std::function<void(float)> const& originalUpdate) {
         m_layer = layer;
         refreshPlayers(layer);
 
@@ -639,33 +618,44 @@ namespace bot {
 
         const double scaledDt = static_cast<double>(dt) * m_speedhack;
         if (!m_playback || !canPlayBack() || !hasPlaybackData()) {
+            originalUpdate(static_cast<float>(scaledDt));
             return;
         }
 
         if (m_inUpdateSplit) {
+            originalUpdate(static_cast<float>(scaledDt));
             return;
         }
 
         m_inUpdateSplit = true;
-        const double startTime = layer->m_currentTime;
+        const double startTime = layer->m_time;
         const double endTime = startTime + scaledDt;
         const std::int64_t endNs = toNs(endTime);
 
         while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeNs <= endNs) {
             const auto& ev = m_events[m_playbackIndex];
             const double eventTime = fromNs(ev.timeNs);
-            
+            const double delta = std::max(0.0, eventTime - layer->m_time);
+            if (delta > 0.0) {
+                originalUpdate(static_cast<float>(delta / m_speedhack));
+            }
+
             refreshPlayers(layer);
             m_inPlaybackInjection = true;
             auto* targetPlayer = (ev.flags & 2) ? m_cachedP1 : m_cachedP2;
             if (targetPlayer) {
-                auto button = static_cast<geode::prelude::PlayerButton>(ev.button);
+                auto button = static_cast<PlayerButton>(ev.button);
                 if (ev.flags & 1) targetPlayer->pushButton(button);
                 else targetPlayer->releaseButton(button);
             }
             m_inPlaybackInjection = false;
 
             ++m_playbackIndex;
+        }
+
+        const double remaining = std::max(0.0, endTime - layer->m_time);
+        if (remaining > 0.0) {
+            originalUpdate(static_cast<float>(remaining / m_speedhack));
         }
 
         m_inUpdateSplit = false;
@@ -683,7 +673,6 @@ namespace bot {
     }
 }
 
-// Fixed: Removed 'override' keywords from custom macro modify blocks
 class $modify(BotMenuLayer, MenuLayer) {
     void onEnter() {
         MenuLayer::onEnter();
@@ -694,62 +683,61 @@ class $modify(BotMenuLayer, MenuLayer) {
 class $modify(BotPlayLayer, PlayLayer) {
     void onEnter() {
         PlayLayer::onEnter();
-        bot::BotManager::get().onSceneEnter(this);
+        BotManager::get().onSceneEnter(this);
         bot::addKeyboardLayer(this);
     }
 
     void onExit() {
-        bot::BotManager::get().onSceneExit();
+        BotManager::get().onSceneExit();
         PlayLayer::onExit();
     }
 
     void update(float dt) {
-        bot::BotManager::get().onGameUpdate(this, dt);
-        PlayLayer::update(dt);
+        BotManager::get().onGameUpdate(this, dt, [this](float step) {
+            PlayLayer::update(step);
+        });
     }
 
     void resetLevel() {
-        bot::BotManager::get().onRestartPre(this);
+        BotManager::get().onRestartPre(this);
         PlayLayer::resetLevel();
-        bot::BotManager::get().onRestartPost(this);
+        BotManager::get().onRestartPost(this);
     }
 
     void fullReset() {
-        bot::BotManager::get().onRestartPre(this);
+        BotManager::get().onRestartPre(this);
         PlayLayer::fullReset();
-        bot::BotManager::get().onRestartPost(this);
+        BotManager::get().onRestartPost(this);
     }
 
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
-        bot::BotManager::get().onCheckpointStore(this, checkpoint);
+        BotManager::get().onCheckpointStore(this, checkpoint);
     }
 
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
-        bot::BotManager::get().onCheckpointLoad(this, checkpoint);
+        BotManager::get().onCheckpointLoad(this, checkpoint);
     }
 
     void levelComplete() {
-        bot::BotManager::get().onLevelComplete(this);
+        BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
     }
 };
 
 class $modify(BotPlayerObject, PlayerObject) {
-    bool pushButton(geode::prelude::PlayerButton button) {
-        auto ret = PlayerObject::pushButton(button);
-        if (!bot::BotManager::get().isInjectingPlayback()) {
-            bot::BotManager::get().onButton(this, button, true);
+    void pushButton(PlayerButton button) {
+        PlayerObject::pushButton(button);
+        if (!BotManager::get().isInjectingPlayback()) {
+            BotManager::get().onButton(this, button, true);
         }
-        return ret;
     }
 
-    bool releaseButton(geode::prelude::PlayerButton button) {
-        auto ret = PlayerObject::releaseButton(button);
-        if (!bot::BotManager::get().isInjectingPlayback()) {
-            bot::BotManager::get().onButton(this, button, false);
+    void releaseButton(PlayerButton button) {
+        PlayerObject::releaseButton(button);
+        if (!BotManager::get().isInjectingPlayback()) {
+            BotManager::get().onButton(this, button, false);
         }
-        return ret;
     }
 };
