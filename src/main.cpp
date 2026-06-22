@@ -14,26 +14,18 @@ enum class CBFStatus {
     Syzzi
 };
 
-// Determine which CBF is actively running on the client by checking settings
 CBFStatus getCBFStatus() {
     auto syzziMod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
     if (syzziMod) {
-        bool isActive = true; // Fallback assume true if setting lookup fails
+        bool isActive = true;
         if (syzziMod->hasSetting("cbf-enabled")) {
             isActive = syzziMod->getSettingValue<bool>("cbf-enabled");
         } else if (syzziMod->hasSetting("enabled")) {
             isActive = syzziMod->getSettingValue<bool>("enabled");
         }
-        
-        if (isActive) {
-            return CBFStatus::Syzzi;
-        }
+        if (isActive) return CBFStatus::Syzzi;
     }
-    
-    if (GameManager::sharedState()->getGameVariable("0115")) {
-        return CBFStatus::RobTop;
-    }
-    
+    if (GameManager::sharedState()->getGameVariable("0115")) return CBFStatus::RobTop;
     return CBFStatus::None;
 }
 
@@ -45,17 +37,14 @@ class $modify(CCScheduler) {
         float speed = BotManager::get().speedMultiplier;
         if (speed < 0.01f) speed = 0.01f;
 
-        // Ensure speedhack does NOT affect players during death/respawn animations
         if (auto playLayer = PlayLayer::get()) {
             if (playLayer->m_player1 && playLayer->m_player1->m_isDead) {
                 speed = 1.0f;
             }
         }
 
-        // Scale game update ticks (engine speed)
         CCScheduler::update(dt * speed);
 
-        // Scale background music pitch (audio speed)
         if (auto engine = FMODAudioEngine::sharedEngine()) {
             if (engine->m_backgroundMusicChannel) {
                 engine->m_backgroundMusicChannel->setPitch(speed);
@@ -83,7 +72,7 @@ class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
 };
 
 // ==========================================
-// CUSTOM UI MENU FOR MANAGING THE MACRO BOT
+// CUSTOM UI MENU (Rewritten to fix Desyncs)
 // ==========================================
 class BotMenuLayer : public FLAlertLayer, public TextInputDelegate {
 private:
@@ -91,9 +80,10 @@ private:
     CCTextInputNode* m_speedInput = nullptr;
     CCLabelBMFont* m_statusLabel = nullptr;
     CCLabelBMFont* m_macroSizeLabel = nullptr;
-    CCMenuItemToggler* m_recordToggle = nullptr;
-    CCMenuItemToggler* m_playToggle = nullptr;
-    bool m_ignoreCallbacks = false; // Flag to prevent programmatic state cascades
+    
+    // Using explicit buttons instead of Toggles to guarantee sync
+    CCMenuItemSpriteExtra* m_recordBtn = nullptr;
+    CCMenuItemSpriteExtra* m_playBtn = nullptr;
 
 public:
     static BotMenuLayer* create() {
@@ -126,26 +116,18 @@ public:
         this->addChild(menu);
 
         auto closeSprite = CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png");
-        auto closeBtn = CCMenuItemSpriteExtra::create(
-            closeSprite, this, menu_selector(BotMenuLayer::onClose)
-        );
+        auto closeBtn = CCMenuItemSpriteExtra::create(closeSprite, this, menu_selector(BotMenuLayer::onClose));
         closeBtn->setPosition(winSize.width / 2 - width / 2 + 15.0f, winSize.height / 2 + height / 2 - 15.0f);
         menu->addChild(closeBtn);
 
         auto& bot = BotManager::get();
 
-        // Status
-        std::string statusText = "Status: ";
-        if (bot.currentState == BotManager::State::Recording) statusText += "Recording";
-        else if (bot.currentState == BotManager::State::Playing) statusText += "Playing";
-        else statusText += "Idle";
-
-        m_statusLabel = CCLabelBMFont::create(statusText.c_str(), "chatFont.fnt");
+        m_statusLabel = CCLabelBMFont::create("Status: Idle", "chatFont.fnt");
         m_statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 75.0f);
         m_statusLabel->setScale(0.6f);
         this->addChild(m_statusLabel);
 
-        // CBF Indicator inside GUI
+        // CBF Indicator
         std::string cbfText = "CBF: ";
         ccColor3B cbfColor = {255, 0, 0};
         auto status = getCBFStatus();
@@ -166,45 +148,39 @@ public:
         cbfLabel->setColor(cbfColor);
         this->addChild(cbfLabel);
 
-        std::string sizeText = "Recorded Inputs: " + std::to_string(bot.macro.size());
-        m_macroSizeLabel = CCLabelBMFont::create(sizeText.c_str(), "chatFont.fnt");
+        m_macroSizeLabel = CCLabelBMFont::create("Recorded Inputs: 0", "chatFont.fnt");
         m_macroSizeLabel->setPosition(winSize.width / 2, winSize.height / 2 + 35.0f);
         m_macroSizeLabel->setScale(0.55f);
         this->addChild(m_macroSizeLabel);
 
-        // Action Toggles (Checkboxes)
-        auto offRec = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
-        auto onRec = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
-        m_recordToggle = CCMenuItemToggler::create(offRec, onRec, this, menu_selector(BotMenuLayer::onToggleRecord));
-        m_recordToggle->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 + 5.0f);
-        menu->addChild(m_recordToggle);
+        // Record Button Initialization
+        auto dummyRec = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
+        m_recordBtn = CCMenuItemSpriteExtra::create(dummyRec, this, menu_selector(BotMenuLayer::onToggleRecord));
+        m_recordBtn->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 + 5.0f);
+        menu->addChild(m_recordBtn);
 
         auto recLabel = CCLabelBMFont::create("Record", "chatFont.fnt");
         recLabel->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 - 20.0f);
         recLabel->setScale(0.5f);
         this->addChild(recLabel);
 
-        auto offPlay = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
-        auto onPlay = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
-        m_playToggle = CCMenuItemToggler::create(offPlay, onPlay, this, menu_selector(BotMenuLayer::onTogglePlay));
-        m_playToggle->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 + 5.0f);
-        menu->addChild(m_playToggle);
+        // Play Button Initialization
+        auto dummyPlay = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
+        m_playBtn = CCMenuItemSpriteExtra::create(dummyPlay, this, menu_selector(BotMenuLayer::onTogglePlay));
+        m_playBtn->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 + 5.0f);
+        menu->addChild(m_playBtn);
 
         auto playLabel = CCLabelBMFont::create("Play", "chatFont.fnt");
         playLabel->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 - 20.0f);
         playLabel->setScale(0.5f);
         this->addChild(playLabel);
 
-        // Force set the checkboxes visually to current global manager states
-        updateToggles();
-
-        // Speedhack Box Label
+        // Engine Speed Hack Input
         auto speedLabel = CCLabelBMFont::create("Engine Speed:", "chatFont.fnt");
         speedLabel->setPosition(winSize.width / 2 - 60.0f, winSize.height / 2 - 40.0f);
         speedLabel->setScale(0.55f);
         this->addChild(speedLabel);
 
-        // Input text box for Speedhack speed values
         m_speedInput = CCTextInputNode::create(70.0f, 30.0f, "speed", "chatFont.fnt");
         m_speedInput->setPosition(winSize.width / 2 + 40.0f, winSize.height / 2 - 40.0f);
         m_speedInput->setLabelPlaceholderColor({150, 150, 150});
@@ -216,7 +192,7 @@ public:
         m_speedInput->setString(speedStream.str());
         this->addChild(m_speedInput);
 
-        // File Operations
+        // File Management fields
         m_fileNameInput = CCTextInputNode::create(140.0f, 30.0f, "macro_name", "chatFont.fnt");
         m_fileNameInput->setPosition(winSize.width / 2 - 35.0f, winSize.height / 2 - 80.0f);
         m_fileNameInput->setString("my_macro.json");
@@ -224,22 +200,20 @@ public:
         this->addChild(m_fileNameInput);
 
         auto saveSprite = ButtonSprite::create("Save", 0.6f);
-        auto saveBtn = CCMenuItemSpriteExtra::create(
-            saveSprite, this, menu_selector(BotMenuLayer::onSave)
-        );
+        auto saveBtn = CCMenuItemSpriteExtra::create(saveSprite, this, menu_selector(BotMenuLayer::onSave));
         saveBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 70.0f);
         menu->addChild(saveBtn);
 
         auto loadSprite = ButtonSprite::create("Load", 0.6f);
-        auto loadBtn = CCMenuItemSpriteExtra::create(
-            loadSprite, this, menu_selector(BotMenuLayer::onLoad)
-        );
+        auto loadBtn = CCMenuItemSpriteExtra::create(loadSprite, this, menu_selector(BotMenuLayer::onLoad));
         loadBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 95.0f);
         menu->addChild(loadBtn);
 
+        // Render accurate states manually
+        updateUI();
+
         this->setTouchEnabled(true);
         this->setKeypadEnabled(true);
-
         return true;
     }
 
@@ -261,38 +235,47 @@ public:
         }
     }
 
-    void updateToggles() {
-        m_ignoreCallbacks = true;
+    // Force asset recalculation without giving control up to Cocos core
+    void updateUI() {
         auto& bot = BotManager::get();
-        if (m_recordToggle) {
-            m_recordToggle->toggle(bot.currentState == BotManager::State::Recording);
+
+        // 1. Setup Button Textures safely
+        if (m_recordBtn) {
+            auto frameName = (bot.currentState == BotManager::State::Recording) ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png";
+            auto newSprite = CCSprite::createWithSpriteFrameName(frameName);
+            m_recordBtn->setNormalImage(newSprite);
         }
-        if (m_playToggle) {
-            m_playToggle->toggle(bot.currentState == BotManager::State::Playing);
+
+        if (m_playBtn) {
+            auto frameName = (bot.currentState == BotManager::State::Playing) ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png";
+            auto newSprite = CCSprite::createWithSpriteFrameName(frameName);
+            m_playBtn->setNormalImage(newSprite);
         }
-        m_ignoreCallbacks = false;
+
+        // 2. Setup Label text updates
+        std::string statusText = "Status: ";
+        if (bot.currentState == BotManager::State::Recording) statusText += "Recording";
+        else if (bot.currentState == BotManager::State::Playing) statusText += "Playing";
+        else statusText += "Idle";
+        m_statusLabel->setString(statusText.c_str());
+
+        std::string sizeText = "Recorded Inputs: " + std::to_string(bot.macro.size());
+        m_macroSizeLabel->setString(sizeText.c_str());
     }
 
     void onToggleRecord(CCObject* sender) {
-        if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        
-        // Explicit state transition independent of event timings
         if (bot.currentState == BotManager::State::Recording) {
             bot.currentState = BotManager::State::Idle;
         } else {
             bot.currentState = BotManager::State::Recording;
             bot.clearMacro();
         }
-        
-        updateToggles();
-        updateLabels();
+        updateUI();
     }
 
     void onTogglePlay(CCObject* sender) {
-        if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        
         if (bot.currentState == BotManager::State::Playing) {
             bot.currentState = BotManager::State::Idle;
         } else {
@@ -300,9 +283,7 @@ public:
             bot.playbackIndex = 0;
             std::sort(bot.macro.begin(), bot.macro.end());
         }
-        
-        updateToggles();
-        updateLabels();
+        updateUI();
     }
 
     void onSave(CCObject*) {
@@ -322,23 +303,10 @@ public:
         if (fName.empty()) fName = "macro.json";
         if (bot.loadMacroFromFile(fName)) {
             FLAlertLayer::create("Loaded", "Successfully parsed " + std::to_string(bot.macro.size()) + " actions!", "OK")->show();
-            updateLabels();
-            updateToggles();
+            updateUI();
         } else {
             FLAlertLayer::create("Error", "Macro file not found or corrupted.", "OK")->show();
         }
-    }
-
-    void updateLabels() {
-        auto& bot = BotManager::get();
-        std::string statusText = "Status: ";
-        if (bot.currentState == BotManager::State::Recording) statusText += "Recording";
-        else if (bot.currentState == BotManager::State::Playing) statusText += "Playing";
-        else statusText += "Idle";
-        m_statusLabel->setString(statusText.c_str());
-
-        std::string sizeText = "Recorded Inputs: " + std::to_string(bot.macro.size());
-        m_macroSizeLabel->setString(sizeText.c_str());
     }
 };
 
@@ -346,15 +314,12 @@ public:
 class $modify(MyPauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-
         auto menu = this->getChildByID("right-button-menu");
         if (!menu) menu = this->getChildByID("left-button-menu");
         if (!menu) return;
 
         auto botIcon = CCSprite::createWithSpriteFrameName("GJ_plusBtn_001.png");
-        auto botBtn = CCMenuItemSpriteExtra::create(
-            botIcon, this, menu_selector(MyPauseLayer::onOpenBotMenu)
-        );
+        auto botBtn = CCMenuItemSpriteExtra::create(botIcon, this, menu_selector(MyPauseLayer::onOpenBotMenu));
         menu->addChild(botBtn);
         menu->updateLayout();
     }
@@ -366,7 +331,7 @@ class $modify(MyPauseLayer, PauseLayer) {
 };
 
 // ==========================================
-// PLAYBACK, LOGIC, & CHECKPOINT HOOKS
+// PLAYBACK, LOGIC, & PRACTICE HOOKS
 // ==========================================
 class $modify(MyPlayLayer, PlayLayer) {
     struct Fields {
@@ -379,22 +344,15 @@ class $modify(MyPlayLayer, PlayLayer) {
         auto& bot = BotManager::get();
         bot.playbackIndex = 0;
         bot.isDead = false;
-
-        if (this->m_isPracticeMode) {
-            bot.currentState = BotManager::State::Recording;
-            bot.clearMacro();
-        }
-        
         m_fields->lastCheckpointCount = 0;
 
         return true;
     }
 
-    // Process commands BEFORE physics update for flawless Playback accuracy
     void update(float dt) {
         auto& bot = BotManager::get();
         
-        // Dynamically track checkpoint deletion to clear macro actions
+        // Handle practice checkpoint deletions safely
         unsigned int currentCheckpoints = this->m_checkpointArray ? this->m_checkpointArray->count() : 0;
         if (currentCheckpoints < m_fields->lastCheckpointCount) {
             if (this->m_isPracticeMode && bot.currentState == BotManager::State::Recording) {
@@ -410,19 +368,21 @@ class $modify(MyPlayLayer, PlayLayer) {
         }
         m_fields->lastCheckpointCount = currentCheckpoints;
 
+        // FIXED PLAYBACK INTERACTION LOOP
         if (bot.currentState == BotManager::State::Playing && !bot.macro.empty()) {
+            double currentX = this->m_player1->m_position.x;
+            
             while (bot.playbackIndex < bot.macro.size()) {
                 BotAction& action = bot.macro[bot.playbackIndex];
                 
-                PlayerObject* player = action.isPlayer2 ? this->m_player2 : this->m_player1;
-                if (!player) break;
-
-                if (player->m_position.x >= action.xPosition) {
-                    this->handleButton(action.isPush, action.button, action.isPlayer2);
-                    bot.playbackIndex++;
-                } else {
+                // If we haven't crossed the execution position yet, stop processing for this frame
+                if (action.xPosition > currentX) {
                     break;
                 }
+
+                // Execute input action
+                this->handleButton(action.isPush, action.button, action.isPlayer2);
+                bot.playbackIndex++;
             }
         }
         
@@ -431,20 +391,16 @@ class $modify(MyPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* p, GameObject* g) {
         PlayLayer::destroyPlayer(p, g);
-        // Mark player as dead to prevent overlapping jump registrations in the macro
         BotManager::get().isDead = true;
     }
 
-    // --- PRACTICE MODE SNAPSHOTS ---
     void markCheckpoint() {
         PlayLayer::markCheckpoint();
-        
         auto& bot = BotManager::get();
         if (!bot.practiceFixEnabled) return;
 
         if (this->m_checkpointArray->count() > 0) {
             auto checkpoint = this->m_checkpointArray->lastObject();
-            
             CheckpointState state;
             
             state.p1XPos = this->m_player1->m_position.x;
@@ -468,14 +424,12 @@ class $modify(MyPlayLayer, PlayLayer) {
                 state.p2IsOnGround = this->m_player2->m_isOnGround;
                 state.p2IsSliding = this->m_player2->m_isSliding;
             }
-
             bot.checkpointData[checkpoint] = state;
         }
     }
 
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
-        
         auto& bot = BotManager::get();
         double currentX = this->m_player1->m_position.x;
 
@@ -489,13 +443,11 @@ class $modify(MyPlayLayer, PlayLayer) {
                 }
             }
         } else if (bot.currentState == BotManager::State::Recording) {
-            // Aggressively clear any inputs that were mapped past this spawn point
             bot.removeInputsAfterX(currentX);
         }
 
         if (bot.practiceFixEnabled && bot.checkpointData.contains(checkpoint)) {
             CheckpointState state = bot.checkpointData[checkpoint];
-            
             this->m_player1->m_position.x = state.p1XPos;
             this->m_player1->m_position.y = state.p1YPos;
             this->m_player1->m_yVelocity = state.p1YVel;
@@ -528,11 +480,9 @@ class $modify(MyPlayLayer, PlayLayer) {
         if (bot.currentState == BotManager::State::Playing) {
             bot.playbackIndex = 0;
         } else if (bot.currentState == BotManager::State::Recording) {
-            // Discard timeline completely if it's a full retry from the beginning
             if (!this->m_isPracticeMode || this->m_checkpointArray->count() == 0) {
                 bot.clearMacro();
             } else {
-                // If it's a practice retry, trim to the latest active checkpoint
                 auto lastCp = this->m_checkpointArray->lastObject();
                 if (bot.checkpointData.contains(lastCp)) {
                     bot.removeInputsAfterX(bot.checkpointData[lastCp].p1XPos);
