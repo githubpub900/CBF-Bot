@@ -66,7 +66,7 @@ class $modify(CCScheduler) {
 // INPUT RECORDING (GJBaseGameLayer Hooks)
 // ==========================================
 class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
-    void handleButton(bool push, PlayerButton button, bool isPlayer2) {
+    void handleButton(bool push, int button, bool isPlayer2) {
         GJBaseGameLayer::handleButton(push, button, isPlayer2);
 
         auto& bot = BotManager::get();
@@ -79,7 +79,7 @@ class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
                 if (player->m_isDead) return;
 
                 float delta = CCDirector::sharedDirector()->getDeltaTime();
-                bot.addAction(player->m_position.x, delta, static_cast<int>(button), push, isPlayer2);
+                bot.addAction(player->m_position.x, delta, button, push, isPlayer2);
             }
         }
     }
@@ -397,7 +397,7 @@ class $modify(MyPlayLayer, PlayLayer) {
                     }
                 }
 
-                this->handleButton(action.isPush, static_cast<PlayerButton>(action.button), action.isPlayer2);
+                this->handleButton(action.isPush, action.button, action.isPlayer2);
                 bot.playbackIndex++;
             }
         }
