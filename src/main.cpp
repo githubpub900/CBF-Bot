@@ -8,25 +8,21 @@
 using namespace geode::prelude;
 
 // =========================================================================
-// Hooks – all signatures match GD 2.2081 / Geode v5.7.1 bindings
+// Hooks
 // =========================================================================
 
 class PlayLayerHook : public Modify<PlayLayerHook, PlayLayer> {
 public:
-    // storeCheckpoint now takes a CheckpointObject* that it fills.
+    // storeCheckpoint now fills the provided CheckpointObject*
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         Bot::checkpointStored(checkpoint);
     }
 
-    // There is no public loadCheckpoint() in the binding.  Manual checkpoint
-    // selection triggers checkpointActivated(); automatic death‑reload goes
-    // through a hidden internal function we cannot hook.  We therefore rely
-    // on the game’s checkpoint being complete – GD 2.2 checkpoints already
-    // save all gamemode state.  No extra restoration is needed.
-    void checkpointActivated(CheckpointObject* checkpoint) {
-        PlayLayer::checkpointActivated(checkpoint);
-        // If extra state restoration were required, it would happen here.
+    // checkpointActivated receives a CheckpointGameObject* (the visual object)
+    void checkpointActivated(CheckpointGameObject* object) {
+        PlayLayer::checkpointActivated(object);
+        // GD 2.2’s CheckpointGameObject already restores full player state.
     }
 
     // Update: manual step‑based playback
@@ -45,7 +41,7 @@ public:
         PlayLayer::update(dt);
     }
 
-    // Input recording – handleButton is the single entry point for both CBS and CBF.
+    // Input recording – handleButton is the single entry point for CBS/CBF.
     void handleButton(bool down, int button, bool player1) {
         PlayLayer::handleButton(down, button, player1);
         if (Bot::isRecording()) {
@@ -66,7 +62,7 @@ public:
     }
 };
 
-// Speedhack: multiply non‑playback frames.  Playback uses its own scaling.
+// Speedhack: multiply non‑playback frames. Playback uses its own scaling.
 class SchedulerHook : public Modify<SchedulerHook, CCScheduler> {
 public:
     void update(float dt) {
@@ -76,7 +72,7 @@ public:
     }
 };
 
-// K‑key toggle – signature now includes a double for timestamp.
+// K‑key toggle – signature includes double timestamp
 class KeyboardHook : public Modify<KeyboardHook, CCKeyboardDispatcher> {
 public:
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
@@ -130,13 +126,11 @@ void Bot::onRestart() {
     m_checkpointEventIndices.clear();
 }
 
-// ---------- Checkpoint (only recording index is stored) ----------
+// ---------- Checkpoint ----------
 void Bot::checkpointStored(CheckpointObject* cp) {
     if (m_recording)
         m_checkpointEventIndices.push_back(m_events.size());
-    // GD 2.2's CheckpointObject already captures all necessary player
-    // state (dual, gravity, gamemode rotations, size, speed) – no extra
-    // fix is required.
+    // Game's checkpoint already stores all required player state.
 }
 
 // ---------- Speedhack ----------
@@ -147,7 +141,6 @@ void Bot::speedhackDown() { setSpeedhack(m_speed - 0.1f); }
 
 // ---------- CBS detection ----------
 Bot::CBSMode Bot::getCBSMode() {
-    // Syzzi CBF is the preferred high‑precision option.
     if (Loader::get()->isModLoaded("syzzi.click_between_frames"))
         return CBSMode::Syzzi;
     if (GameManager::sharedState()->getGameVariable("0050"))
@@ -163,8 +156,6 @@ void Bot::injectInput(const InputEvent& ev) {
 }
 
 void Bot::processPlaybackStep(PlayLayer* pl, float customDt) {
-    // Temporarily disable the playback flag so that the real update()
-    // does not try to call processPlaybackStep again.
     m_playing = false;
     pl->PlayLayer::update(customDt);
     m_playing = true;
@@ -174,7 +165,7 @@ void Bot::processPlaybackStep(PlayLayer* pl, float customDt) {
 
     while (m_playIndex < m_events.size()) {
         const InputEvent& ev = m_events[m_playIndex];
-        if (ev.time <= curTime + 1e-9) { // tiny epsilon
+        if (ev.time <= curTime + 1e-9) {
             injectInput(ev);
             ++m_playIndex;
         } else {
@@ -254,33 +245,39 @@ void Bot::toggleUI(PlayLayer* pl) {
     label->setPosition(ccp(100, 200));
     bg->addChild(label);
 
-    // Speed display (static for simplicity)
+    // Speed display
     auto* speedLabel = CCLabelBMFont::create(
-        ("Speed: " + std::to_string(m_speed).substr(0,4)).c_str(),
+        fmt::format("Speed: {:.1f}", m_speed).c_str(),
         "bigFont.fnt");
     speedLabel->setPosition(ccp(100, -130));
     bg->addChild(speedLabel);
 
+    // Buttons – use CCMenuItemSpriteExtra with lambdas
     auto* menu = CCMenu::create();
-    menu->setPosition(ccp(100, 180));
+    menu->setPosition(ccp(100, 160));
 
-    auto addBtn = [&](const char* title, SEL_MenuHandler cb, float y) {
-        auto* btn = CCMenuItemLabel::create(CCLabelBMFont::create(title, "bigFont.fnt"), nullptr, cb);
+    auto addBtn = [&](const char* title, std::function<void(CCObject*)> cb, float y) {
+        auto* btn = CCMenuItemSpriteExtra::create(
+            CCLabelBMFont::create(title, "bigFont.fnt"),
+            nullptr,
+            nullptr,
+            cb
+        );
         btn->setPosition(ccp(0, y));
         menu->addChild(btn);
     };
 
-    addBtn("Record", menu_selector(Bot::onRecordButton),  30);
-    addBtn("Play",   menu_selector(Bot::onPlayButton),   -10);
-    addBtn("Save",   menu_selector(Bot::onSaveButton),   -50);
-    addBtn("Load",   menu_selector(Bot::onLoadButton),   -90);
+    addBtn("Record", [](CCObject*){ Bot::onRecordButton(nullptr); },  30);
+    addBtn("Play",   [](CCObject*){ Bot::onPlayButton(nullptr); },   -10);
+    addBtn("Save",   [](CCObject*){ Bot::onSaveButton(nullptr); },   -50);
+    addBtn("Load",   [](CCObject*){ Bot::onLoadButton(nullptr); },   -90);
 
     bg->addChild(menu);
     m_uiNode = bg;
     m_uiVisible = true;
 }
 
-// UI callbacks
+// Static UI callbacks remain empty, called only via lambdas
 void Bot::onRecordButton(CCObject*) {
     if (isRecording()) stopRecording();
     else startRecording();
@@ -290,10 +287,11 @@ void Bot::onPlayButton(CCObject*) {
     else startPlayback();
 }
 void Bot::onSaveButton(CCObject*) {
-    std::string path = CCFileUtils::sharedFileUtils()->getWritablePath() + "macro.gdmb";
+    // Convert gd::string to std::string
+    std::string path = std::string(CCFileUtils::sharedFileUtils()->getWritablePath().c_str()) + "macro.gdmb";
     saveMacro(path);
 }
 void Bot::onLoadButton(CCObject*) {
-    std::string path = CCFileUtils::sharedFileUtils()->getWritablePath() + "macro.gdmb";
+    std::string path = std::string(CCFileUtils::sharedFileUtils()->getWritablePath().c_str()) + "macro.gdmb";
     loadMacro(path);
 }
