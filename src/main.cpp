@@ -177,12 +177,6 @@ public:
         auto onRec = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
         m_recordToggle = CCMenuItemToggler::create(offRec, onRec, this, menu_selector(BotMenuLayer::onToggleRecord));
         m_recordToggle->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 + 5.0f);
-        
-        // Block callbacks before programmatically setting the toggles
-        m_ignoreCallbacks = true;
-        m_recordToggle->toggle(bot.currentState == BotManager::State::Recording);
-        m_ignoreCallbacks = false;
-        
         menu->addChild(m_recordToggle);
 
         auto recLabel = CCLabelBMFont::create("Record", "chatFont.fnt");
@@ -194,17 +188,15 @@ public:
         auto onPlay = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
         m_playToggle = CCMenuItemToggler::create(offPlay, onPlay, this, menu_selector(BotMenuLayer::onTogglePlay));
         m_playToggle->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 + 5.0f);
-        
-        m_ignoreCallbacks = true;
-        m_playToggle->toggle(bot.currentState == BotManager::State::Playing);
-        m_ignoreCallbacks = false;
-        
         menu->addChild(m_playToggle);
 
         auto playLabel = CCLabelBMFont::create("Play", "chatFont.fnt");
         playLabel->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 - 20.0f);
         playLabel->setScale(0.5f);
         this->addChild(playLabel);
+
+        // Force set the checkboxes visually to current global manager states
+        updateToggles();
 
         // Speedhack Box Label
         auto speedLabel = CCLabelBMFont::create("Engine Speed:", "chatFont.fnt");
@@ -269,46 +261,47 @@ public:
         }
     }
 
+    void updateToggles() {
+        m_ignoreCallbacks = true;
+        auto& bot = BotManager::get();
+        if (m_recordToggle) {
+            m_recordToggle->toggle(bot.currentState == BotManager::State::Recording);
+        }
+        if (m_playToggle) {
+            m_playToggle->toggle(bot.currentState == BotManager::State::Playing);
+        }
+        m_ignoreCallbacks = false;
+    }
+
     void onToggleRecord(CCObject* sender) {
         if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        auto toggler = static_cast<CCMenuItemToggler*>(sender);
         
-        if (toggler->isToggled()) {
+        // Explicit state transition independent of event timings
+        if (bot.currentState == BotManager::State::Recording) {
+            bot.currentState = BotManager::State::Idle;
+        } else {
             bot.currentState = BotManager::State::Recording;
             bot.clearMacro();
-            
-            // Uncheck the Play box without causing callback circular triggers
-            m_ignoreCallbacks = true;
-            if (m_playToggle->isToggled()) {
-                m_playToggle->toggle(false);
-            }
-            m_ignoreCallbacks = false;
-        } else {
-            bot.currentState = BotManager::State::Idle;
         }
+        
+        updateToggles();
         updateLabels();
     }
 
     void onTogglePlay(CCObject* sender) {
         if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        auto toggler = static_cast<CCMenuItemToggler*>(sender);
         
-        if (toggler->isToggled()) {
+        if (bot.currentState == BotManager::State::Playing) {
+            bot.currentState = BotManager::State::Idle;
+        } else {
             bot.currentState = BotManager::State::Playing;
             bot.playbackIndex = 0;
             std::sort(bot.macro.begin(), bot.macro.end());
-            
-            // Uncheck the Record box without causing callback circular triggers
-            m_ignoreCallbacks = true;
-            if (m_recordToggle->isToggled()) {
-                m_recordToggle->toggle(false);
-            }
-            m_ignoreCallbacks = false;
-        } else {
-            bot.currentState = BotManager::State::Idle;
         }
+        
+        updateToggles();
         updateLabels();
     }
 
@@ -330,6 +323,7 @@ public:
         if (bot.loadMacroFromFile(fName)) {
             FLAlertLayer::create("Loaded", "Successfully parsed " + std::to_string(bot.macro.size()) + " actions!", "OK")->show();
             updateLabels();
+            updateToggles();
         } else {
             FLAlertLayer::create("Error", "Macro file not found or corrupted.", "OK")->show();
         }
