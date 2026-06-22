@@ -302,6 +302,16 @@ public:
     CheckpointSnap captureSnapshot() const;
     void           restoreSnapshot(const CheckpointSnap& snap);
 
+    // ---------- Checkpoint-load detection ----------
+    // Heuristic used by the PlayLayer::resetLevel() hook to distinguish a
+    // full restart from a practice-checkpoint load. GD 2.2081 has no
+    // separate loadCheckpoint() entry point, so we detect by comparing
+    // the player's post-reset X to the last stored checkpoint X (within
+    // a 50-unit tolerance).
+    // LIMITATION: In rare cases (e.g. a level whose start position
+    // coincidentally matches a checkpoint X), this may misclassify.
+    bool isCheckpointLoad(float playerX) const;
+
 private:
     Bot();
 
@@ -347,15 +357,6 @@ private:
     void resetPlaybackState();
     void clearCheckpointState();
     void applySpeedhackToScheduler();
-
-    // Checkpoint-load detection heuristic. After PlayLayer::resetLevel()
-    // runs, we check the player's X position against the last stored
-    // checkpoint's X. If they match within a tolerance, it's a checkpoint
-    // load; otherwise it's a full restart.
-    // LIMITATION: This is a heuristic. In rare cases (e.g. a level where
-    // the start position coincidentally matches a checkpoint X), it may
-    // misclassify. The tolerance is tight (50 units) to minimize this.
-    bool isCheckpointLoad(float playerX) const;
 };
 
 // ============================================================================
