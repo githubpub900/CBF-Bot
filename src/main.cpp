@@ -1,5 +1,6 @@
 #include "Bot.hpp"
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/FMODAudioEngine.hpp>
@@ -156,6 +157,24 @@ void Bot::loadMacro(const std::string& filename) {
 
 // --- Hooks ---
 
+class $modify(BotBaseGameLayer, GJBaseGameLayer) {
+    void handleButton(bool push, int button, bool player2) {
+        // Intercepting at GJBaseGameLayer hooks inputs before PlayLayer handles them, 
+        // which reliably captures inputs managed under Syzzi's CBF modifications.
+        if (Bot::get().isRecording && !Bot::get().isPlaying) {
+            auto pl = PlayLayer::get();
+            if (pl) {
+                bool actualPlayer2 = player2 && pl->m_gameState.m_isDualMode;
+                auto p = actualPlayer2 ? pl->m_player2 : pl->m_player1;
+                if (p) {
+                    Bot::get().recordAction(p->m_position.x, button, player2, push);
+                }
+            }
+        }
+        GJBaseGameLayer::handleButton(push, button, player2);
+    }
+};
+
 class $modify(BotPlayLayer, PlayLayer) {
     void update(float dt) {
         if (Bot::get().isPlaying) {
@@ -187,17 +206,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         PlayLayer::removeCheckpoint(p0);
         if (Bot::get().isRecording) Bot::get().removeLastCheckpoint();
     }
-    
-    void handleButton(bool push, int button, bool player2) {
-        if (Bot::get().isRecording && !Bot::get().isPlaying) {
-            bool actualPlayer2 = player2 && this->m_gameState.m_isDualMode;
-            auto p = actualPlayer2 ? this->m_player2 : this->m_player1;
-            if (p) {
-                Bot::get().recordAction(p->m_position.x, button, player2, push);
-            }
-        }
-        PlayLayer::handleButton(push, button, player2);
-    }
 };
 
 class $modify(BotScheduler, CCScheduler) {
@@ -220,7 +228,6 @@ public:
     cocos2d::CCLabelBMFont* m_counterLabel = nullptr;
     CCMenuItemToggler* m_recordToggle = nullptr;
     CCMenuItemToggler* m_playToggle = nullptr;
-    bool m_blockToggleCallback = false;
 
     static BotUI* create() {
         auto ret = new BotUI();
@@ -233,7 +240,8 @@ public:
     }
 
     bool init() override {
-        if (!FLAlertLayer::init(150)) return false;
+        // Use a higher structural layer priority via FLAlertLayer to absorb screen touches
+        if (!FLAlertLayer::init(200)) return false;
 
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
         
@@ -281,7 +289,8 @@ public:
         playText->setScale(0.45f);
         this->m_mainLayer->addChild(playText);
 
-        // --- Explicit Synchronization of Persistent States ---
+        // --- Explicit State Alignment Verification ---
+        // Ensures exact Boolean matching on initialization state mapping
         m_recordToggle->m_toggled = Bot::get().isRecording;
         m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
         m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
@@ -313,11 +322,18 @@ public:
         closeBtn->setPosition(winSize.width / 2, winSize.height / 2 - 125);
         menu->addChild(closeBtn);
 
+        // Force UI menu to consume touch priority so it doesn't leak into elements underneath
         this->setKeypadEnabled(true);
         this->setTouchEnabled(true);
         this->scheduleUpdate();
 
         return true;
+    }
+
+    // Explicitly swallow touch events so clicks don't register on background levels
+    bool ccTouchBegan(cocos2d::CCTouch* pTouch, cocos2d::CCEvent* pEvent) override {
+        FLAlertLayer::ccTouchBegan(pTouch, pEvent);
+        return true; 
     }
 
     void update(float dt) override {
@@ -342,10 +358,8 @@ public:
     }
 
     void onToggleRecord(cocos2d::CCObject* pSender) {
-        if (m_blockToggleCallback) return;
-
-        // Directly flip structural states manually to bypass backend/frontend desync
         Bot::get().isRecording = !Bot::get().isRecording;
+        
         m_recordToggle->m_toggled = Bot::get().isRecording;
         m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
         m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
@@ -362,10 +376,8 @@ public:
     }
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
-        if (m_blockToggleCallback) return;
-
-        // Directly flip structural states manually to bypass backend/frontend desync
         Bot::get().isPlaying = !Bot::get().isPlaying;
+        
         m_playToggle->m_toggled = Bot::get().isPlaying;
         m_playToggle->m_onButton->setVisible(Bot::get().isPlaying);
         m_playToggle->m_offButton->setVisible(!Bot::get().isPlaying);
