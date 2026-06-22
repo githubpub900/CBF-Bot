@@ -27,12 +27,13 @@ struct BotAction {
     }
 };
 
-// Full physics snapshot to eliminate practice mode desyncs
+// Full physics snapshot to eliminate practice mode desyncs across all vehicles
 struct CheckpointState {
     double p1XPos;
     double p1YPos;
     double p1YVel;
     float p1Rotation;
+    double p1Gravity;
     bool p1IsDashing;
     bool p1IsUpsideDown;
     bool p1IsOnGround;
@@ -42,6 +43,7 @@ struct CheckpointState {
     double p2YPos;
     double p2YVel;
     float p2Rotation;
+    double p2Gravity;
     bool p2IsDashing;
     bool p2IsUpsideDown;
     bool p2IsOnGround;
