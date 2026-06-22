@@ -447,6 +447,7 @@ class $modify(MyPlayLayer, PlayLayer) {
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         auto& bot = BotManager::get();
+        bot.isDead = false; // Reset the death safety flag so inputs can be recorded again!
         
         // Evaluate the targeted rollback X first using our custom physics snapshot
         double currentX = this->m_player1->m_position.x;
