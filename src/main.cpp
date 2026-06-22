@@ -15,7 +15,6 @@ void Bot::detectEngine() {
     if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
         engine = EngineType::SyzziCBF;
     } else {
-        // Fallback for detecting 2.2081 built-in CBS
         auto gm = GameManager::sharedState();
         if (gm->getGameVariable("0179") || gm->getGameVariable("0178")) {
             engine = EngineType::CBS;
@@ -31,14 +30,6 @@ void Bot::recordAction(float xPos, int button, bool player2, bool push) {
     actions.push_back({xPos, button, player2, push});
 }
 
-/*
- * PLAYBACK ARCHITECTURE & CBF/CBS INTEGRATION:
- * For Syzzi CBF and RobTop CBS, inputs can occur precisely between visual frames.
- * Because syzzi.click_between_frames does not export a public sub-step injection API 
- * for bots, our closest reliable fallback is to execute the input on the physics 
- * step immediately upon crossing the X-position threshold. This preserves maximal 
- * accuracy without attempting to artificially override Syzzi's tick alignments.
- */
 void Bot::updatePlayback(PlayLayer* pl) {
     if (!isPlaying) return;
     
@@ -48,13 +39,9 @@ void Bot::updatePlayback(PlayLayer* pl) {
         
         if (!p) break;
         
-        // Execute input if spatial threshold is reached
         if (p->m_position.x >= action.xPos) {
-            if (action.push) {
-                pl->pushButton(action.button, action.player2);
-            } else {
-                pl->releaseButton(action.button, action.player2);
-            }
+            // Using modern 2.2081 handleButton API instead of nonexistent pushButton
+            pl->handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
             break;
@@ -67,10 +54,9 @@ void Bot::updatePlayback(PlayLayer* pl) {
 PlayerState Bot::captureState(PlayerObject* p) {
     PlayerState s;
     s.position = p->m_position;
-    s.rotation = p->m_rotation;
+    s.rotation = p->m_playerRotation;
     s.yVelocity = p->m_yVelocity;
     s.xVelocity = p->m_xVelocity;
-    s.jumpAccel = p->m_jumpAccel;
     s.isUpsideDown = p->m_isUpsideDown;
     s.isOnGround = p->m_isOnGround;
     s.isDashing = p->m_isDashing;
@@ -89,10 +75,9 @@ PlayerState Bot::captureState(PlayerObject* p) {
 
 void Bot::applyState(PlayerObject* p, const PlayerState& s) {
     p->m_position = s.position;
-    p->m_rotation = s.rotation;
+    p->m_playerRotation = s.rotation;
     p->m_yVelocity = s.yVelocity;
     p->m_xVelocity = s.xVelocity;
-    p->m_jumpAccel = s.jumpAccel;
     p->m_isUpsideDown = s.isUpsideDown;
     p->m_isOnGround = s.isOnGround;
     p->m_isDashing = s.isDashing;
@@ -110,10 +95,10 @@ void Bot::applyState(PlayerObject* p, const PlayerState& s) {
 
 void Bot::saveCheckpoint(PlayLayer* pl) {
     CheckpointData cp;
-    cp.actionIndex = actions.size(); // Marks timeline split point
+    cp.actionIndex = actions.size(); 
     cp.p1 = captureState(pl->m_player1);
     if (pl->m_player2) cp.p2 = captureState(pl->m_player2);
-    cp.isDual = pl->m_isDualMode;
+    cp.isDual = pl->m_dualMode; // Fixed field name
     checkpoints.push_back(cp);
 }
 
@@ -124,14 +109,11 @@ void Bot::removeLastCheckpoint() {
 void Bot::restoreCheckpoint(PlayLayer* pl) {
     if (!checkpoints.empty()) {
         auto& cp = checkpoints.back();
-        // DEAD INPUT CLEANUP LOGIC:
-        // Automatically truncates the vector to remove all inputs recorded 
-        // past this checkpoint to discard abandoned routes/deaths.
-        actions.resize(cp.actionIndex); 
+        actions.resize(cp.actionIndex); // Truncate split timeline inputs
         
         applyState(pl->m_player1, cp.p1);
         if (pl->m_player2) applyState(pl->m_player2, cp.p2);
-        pl->m_isDualMode = cp.isDual;
+        pl->m_dualMode = cp.isDual;
     } else {
         clearMacro();
     }
@@ -160,7 +142,6 @@ void Bot::loadMacro(const std::string& filename) {
     size_t count = 0;
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
     
-    // Avoids per-frame allocations by resizing exactly once
     actions.resize(count);
     file.read(reinterpret_cast<char*>(actions.data()), count * sizeof(MacroAction));
 }
@@ -180,7 +161,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         Bot::get().playbackIndex = 0;
         
         if (Bot::get().isRecording) {
-            // Restart & Death logic mapping
             if (this->m_isPracticeMode) {
                 Bot::get().restoreCheckpoint(this);
             } else {
@@ -190,39 +170,27 @@ class $modify(BotPlayLayer, PlayLayer) {
         }
     }
 
-    void markCheckpoint() {
-        PlayLayer::markCheckpoint();
+    void createCheckpoint() {
+        PlayLayer::createCheckpoint();
         if (Bot::get().isRecording) Bot::get().saveCheckpoint(this);
     }
 
-    void removeLastCheckpoint() {
-        PlayLayer::removeLastCheckpoint();
+    void removeCheckpoint(bool p0) {
+        PlayLayer::removeCheckpoint(p0);
         if (Bot::get().isRecording) Bot::get().removeLastCheckpoint();
     }
     
-    void pushButton(int button, bool player2) {
+    void handleButton(bool push, int button, bool player2) {
         if (Bot::get().isRecording && !Bot::get().isPlaying) {
             auto p = player2 ? this->m_player2 : this->m_player1;
-            Bot::get().recordAction(p->m_position.x, button, player2, true);
+            if (p) {
+                Bot::get().recordAction(p->m_position.x, button, player2, push);
+            }
         }
-        PlayLayer::pushButton(button, player2);
-    }
-    
-    void releaseButton(int button, bool player2) {
-        if (Bot::get().isRecording && !Bot::get().isPlaying) {
-            auto p = player2 ? this->m_player2 : this->m_player1;
-            Bot::get().recordAction(p->m_position.x, button, player2, false);
-        }
-        PlayLayer::releaseButton(button, player2);
+        PlayLayer::handleButton(push, button, player2);
     }
 };
 
-/*
- * SPEEDHACK IMPLEMENTATION
- * Instead of adjusting game FPS, we directly scale delta time.
- * This ensures the macro timing stays flawlessly accurate and 
- * physically decoupled from the rendering loop.
- */
 class $modify(BotScheduler, CCScheduler) {
     void update(float dt) {
         float scale = Bot::get().speedHackValue;
@@ -231,14 +199,38 @@ class $modify(BotScheduler, CCScheduler) {
 };
 
 // --- User Interface Layer ---
+// Inheriting directly from FLAlertLayer solves all missing template setup errors cleanly
 
-class BotUI : public geode::Popup<> {
-protected:
-    bool setup() override {
+class BotUI : public FLAlertLayer {
+public:
+    static BotUI* create() {
+        auto ret = new BotUI();
+        if (ret && ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        CC_SAFE_DELETE(ret);
+        return nullptr;
+    }
+
+    bool init() {
+        if (!FLAlertLayer::init(150)) return false;
+
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
-        this->setTitle("Macro Bot 2.2081");
+        
+        // Add a background layer
+        auto bg = CCScale9Sprite::create("GJ_square01.png");
+        bg->setContentSize({400.f, 250.f});
+        bg->setPosition(winSize / 2);
+        this->m_mainLayer->addChild(bg);
 
-        // UI: CBF/CBS Indicator
+        // Title
+        auto title = cocos2d::CCLabelBMFont::create("Macro Bot 2.2081", "goldFont.fnt");
+        title->setPosition(winSize.width / 2, winSize.height / 2 + 100);
+        title->setScale(0.8f);
+        this->m_mainLayer->addChild(title);
+
+        // Status Label
         auto statusLabel = cocos2d::CCLabelBMFont::create("", "bigFont.fnt");
         statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 50);
         statusLabel->setScale(0.5f);
@@ -254,16 +246,16 @@ protected:
                 statusLabel->setColor({255, 255, 0});
                 break;
             case EngineType::None:
-            default:
+default:
                 statusLabel->setString("Status: Disabled (No CBF/CBS)");
                 statusLabel->setColor({255, 0, 0});
                 break;
         }
         this->m_mainLayer->addChild(statusLabel);
 
-        // Core Menus
+        // Menu buttons
         auto menu = cocos2d::CCMenu::create();
-        menu->setPosition(winSize.width / 2, winSize.height / 2);
+        menu->setPosition(winSize.width / 2, winSize.height / 2 - 20);
         
         auto btnRecord = CCMenuItemSpriteExtra::create(ButtonSprite::create("Record"), this, menu_selector(BotUI::onRecord));
         auto btnPlay = CCMenuItemSpriteExtra::create(ButtonSprite::create("Play"), this, menu_selector(BotUI::onPlay));
@@ -279,6 +271,17 @@ protected:
         menu->alignItemsHorizontallyWithPadding(10.f);
         
         this->m_mainLayer->addChild(menu);
+
+        // Close Button
+        auto closeMenu = cocos2d::CCMenu::create();
+        closeMenu->setPosition(winSize.width / 2, winSize.height / 2 - 90);
+        auto closeBtn = CCMenuItemSpriteExtra::create(ButtonSprite::create("Close"), this, menu_selector(BotUI::onClose));
+        closeMenu->addChild(closeBtn);
+        this->m_mainLayer->addChild(closeMenu);
+
+        this->setKeypadEnabled(true);
+        this->setTouchEnabled(true);
+
         return true;
     }
     
@@ -318,19 +321,17 @@ protected:
         geode::Notification::create("Speedhack: " + std::to_string(bot.speedHackValue).substr(0,3) + "x", geode::NotificationIcon::Info)->show();
     }
 
-public:
-    static BotUI* create() {
-        auto ret = new BotUI();
-        if (ret && ret->initAnchored(400.f, 250.f)) {
-            ret->autorelease();
-            return ret;
-        }
-        CC_SAFE_DELETE(ret);
-        return nullptr;
+    void onClose(cocos2d::CCObject*) {
+        this->removeFromParentAndCleanup(true);
     }
 };
 
-void Bot::toggleUI() { BotUI::create()->show(); }
+void Bot::toggleUI() { 
+    auto ui = BotUI::create();
+    if (ui) {
+        cocos2d::CCDirector::sharedDirector()->getRunningScene()->addChild(ui, 100);
+    }
+}
 
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool arr) {

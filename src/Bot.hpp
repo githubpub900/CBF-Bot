@@ -14,9 +14,8 @@ enum class EngineType {
 struct PlayerState {
     cocos2d::CCPoint position;
     float rotation;
-    float yVelocity;
-    float xVelocity;
-    float jumpAccel;
+    double yVelocity;
+    double xVelocity;
     bool isUpsideDown;
     bool isOnGround;
     bool isDashing;
@@ -40,14 +39,6 @@ struct CheckpointData {
     bool isDual;
 };
 
-/*
- * RECORDING ARCHITECTURE:
- * We use an X-position based recording hybrid.
- * Why is this optimal? 
- * 1. X-position provides perfect determinism across speedhacks and framerates.
- * 2. It requires drastically less storage than frame-by-frame polling (only ~13 bytes per click).
- * 3. It natively scales to extremely high CPS and arbitrary CBF/CBS timings.
- */
 struct MacroAction {
     float xPos;
     int button;
