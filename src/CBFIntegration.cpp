@@ -25,7 +25,7 @@ void CBFIntegration::detectCBF() {
     checked = true;
 
     // Check for Syzzi's CBF mod.
-    auto mod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
+    auto mod = Loader::get()->getLoadedMod("syzzi.cbf");
     if (mod) {
         m_syzziLoaded = true;
         m_tps = 240.0; // Syzzi's CBF typically targets 240 Hz

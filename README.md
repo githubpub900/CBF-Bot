@@ -233,7 +233,7 @@ cbf-macro-bot/
 
 - **Geometry Dash**: 2.2081
 - **Geode**: v5.7.1+ (requires C++23)
-- **Optional**: `syzzi.click_between_frames` — enhances sub-frame precision beyond GD's built-in CBF
+- **Optional**: `syzzi.cbf` — enhances sub-frame precision beyond GD's built-in CBF
 
 ## Limitations
 
