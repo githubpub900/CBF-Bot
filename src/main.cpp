@@ -49,8 +49,8 @@ void Bot::updatePlayback(PlayLayer* pl) {
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
         
-        // Target player dynamically by pulling dual-mode status directly from player 1
-        bool actualPlayer2 = action.player2 && pl->m_player1 && pl->m_player1->m_isDualMode;
+        // Target player dynamically by pulling dual-mode status directly from Geode's game state struct
+        bool actualPlayer2 = action.player2 && pl->m_gameState.m_isDualMode;
         PlayerObject* p = actualPlayer2 ? pl->m_player2 : pl->m_player1;
         if (!p) p = pl->m_player1; 
 
@@ -191,7 +191,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     
     void handleButton(bool push, int button, bool player2) {
         if (Bot::get().isRecording && !Bot::get().isPlaying) {
-            bool actualPlayer2 = player2 && this->m_player1 && this->m_player1->m_isDualMode;
+            bool actualPlayer2 = player2 && this->m_gameState.m_isDualMode;
             auto p = actualPlayer2 ? this->m_player2 : this->m_player1;
             if (p) {
                 Bot::get().recordAction(p->m_position.x, button, player2, push);
