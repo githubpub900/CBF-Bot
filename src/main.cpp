@@ -16,7 +16,7 @@ enum class CBFStatus {
 
 // Determine which CBF is actively running on the client
 CBFStatus getCBFStatus() {
-    if (Loader::get()->isModEnabled("syzzi.click_between_frames")) {
+    if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
         return CBFStatus::Syzzi;
     }
     if (GameManager::sharedState()->getGameVariable("0115")) {
