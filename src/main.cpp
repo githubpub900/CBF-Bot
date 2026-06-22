@@ -16,8 +16,7 @@ enum class CBFStatus {
 
 // Determine which CBF is actively running on the client
 CBFStatus getCBFStatus() {
-    auto syzziMod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
-    if (syzziMod && syzziMod->isEnabled()) {
+    if (Loader::get()->isModEnabled("syzzi.click_between_frames")) {
         return CBFStatus::Syzzi;
     }
     if (GameManager::sharedState()->getGameVariable("0115")) {
@@ -36,7 +35,7 @@ class $modify(CCScheduler) {
 
         // Ensure speedhack does NOT affect players during death/respawn animations
         if (auto playLayer = PlayLayer::get()) {
-            if (playLayer->m_isDead) {
+            if (playLayer->m_player1 && playLayer->m_player1->m_isDead) {
                 speed = 1.0f;
             }
         }
