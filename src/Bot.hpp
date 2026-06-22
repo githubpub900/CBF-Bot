@@ -10,10 +10,7 @@
 #include <filesystem>
 #include <cstdint>
 
-// PlayerButton is an enum from Geode's cocos/mod wrapper prelude
-namespace geode::prelude {
-    enum PlayerButton : int; 
-}
+// REMOVED: Manual conflicting forward-declaration of PlayerButton
 
 namespace bot {
     enum class TimingMode : std::uint8_t {
@@ -159,7 +156,6 @@ namespace bot {
         void loadMacro();
         void setSpeedhack(double value);
 
-        // Fixed: Removed 'geode::prelude::' from game layer objects
         void onGameUpdate(PlayLayer* layer, float dt);
         void onButton(PlayerObject* player, geode::prelude::PlayerButton button, bool down);
         void onDeath(PlayLayer* layer);
@@ -207,7 +203,7 @@ namespace bot {
 
         std::vector<MacroEvent> m_events;
         std::vector<CheckpointSnapshot> m_checkpoints;
-        std::unordered_map<CheckpointObject*, CheckpointSnapshot> m_checkpointLookup; // Fixed
+        std::unordered_map<CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
         std::size_t m_playbackIndex = 0;
 
         PlayLayer* m_layer = nullptr;

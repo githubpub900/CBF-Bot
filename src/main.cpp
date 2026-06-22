@@ -1,4 +1,4 @@
-#include "Bot.hpp"
+#include "bot.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/MenuLayer.hpp>
@@ -48,11 +48,7 @@ namespace bot {
             return static_cast<double>(ns) / static_cast<double>(kNanosPerSecond);
         }
 
-        void scanForPlayers(
-            cocos2d::CCNode* node,
-            PlayerObject*& p1,
-            PlayerObject*& p2
-        ) {
+        void scanForPlayers(cocos2d::CCNode* node, PlayerObject*& p1, PlayerObject*& p2) {
             if (!node) return;
 
             if (auto* player = dynamic_cast<PlayerObject*>(node)) {
@@ -64,10 +60,7 @@ namespace bot {
             if (!children) return;
 
             for (int i = 0; i < children->count(); ++i) {
-                scanForPlayers(
-                    static_cast<cocos2d::CCNode*>(children->objectAtIndex(i)),
-                    p1, p2
-                );
+                scanForPlayers(static_cast<cocos2d::CCNode*>(children->objectAtIndex(i)), p1, p2);
             }
         }
 
@@ -78,6 +71,26 @@ namespace bot {
 
         std::int64_t currentLayerTimeNs(PlayLayer* layer) {
             return layer ? toNs(layer->m_currentTime) : 0;
+        }
+
+        void writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value) {
+            while (value >= 0x80) {
+                out.push_back(static_cast<std::uint8_t>(value | 0x80));
+                value >>= 7;
+            }
+            out.push_back(static_cast<std::uint8_t>(value));
+        }
+
+        bool readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value) {
+            value = 0;
+            int shift = 0;
+            while (cursor < end && shift < 64) {
+                std::uint8_t byte = *cursor++;
+                value |= static_cast<std::uint64_t>(byte & 0x7F) << shift;
+                if ((byte & 0x80) == 0) return true;
+                shift += 7;
+            }
+            return false;
         }
     }
 
@@ -416,7 +429,7 @@ namespace bot {
     PlayerObject* BotManager::player1() const { return m_cachedP1; }
     PlayerObject* BotManager::player2() const { return m_cachedP2; }
 
-    void BotManager::onButton(PlayerObject* player, PlayerButton button, bool down) {
+    void BotManager::onButton(PlayerObject* player, geode::prelude::PlayerButton button, bool down) {
         if (!m_recording || m_inPlaybackInjection) return;
         if (!m_layer) return;
         if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = currentLayerTimeNs(m_layer);
@@ -616,7 +629,6 @@ namespace bot {
         return static_cast<std::int64_t>((value >> 1) ^ (~(value & 1) + 1));
     }
 
-    // Fixed: Handles update iteration without calling the hook recursively
     void BotManager::onGameUpdate(PlayLayer* layer, float dt) {
         m_layer = layer;
         refreshPlayers(layer);
@@ -626,7 +638,40 @@ namespace bot {
         }
 
         const double scaledDt = static_cast<double>(dt) * m_speedhack;
-        // Logic handled inside custom wrappers in PlayLayer hook below
+        if (!m_playback || !canPlayBack() || !hasPlaybackData()) {
+            return;
+        }
+
+        if (m_inUpdateSplit) {
+            return;
+        }
+
+        m_inUpdateSplit = true;
+        const double startTime = layer->m_currentTime;
+        const double endTime = startTime + scaledDt;
+        const std::int64_t endNs = toNs(endTime);
+
+        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeNs <= endNs) {
+            const auto& ev = m_events[m_playbackIndex];
+            const double eventTime = fromNs(ev.timeNs);
+            
+            refreshPlayers(layer);
+            m_inPlaybackInjection = true;
+            auto* targetPlayer = (ev.flags & 2) ? m_cachedP1 : m_cachedP2;
+            if (targetPlayer) {
+                auto button = static_cast<geode::prelude::PlayerButton>(ev.button);
+                if (ev.flags & 1) targetPlayer->pushButton(button);
+                else targetPlayer->releaseButton(button);
+            }
+            m_inPlaybackInjection = false;
+
+            ++m_playbackIndex;
+        }
+
+        m_inUpdateSplit = false;
+        if (m_playbackIndex >= m_events.size()) {
+            stopPlayback();
+        }
     }
 
     void addKeyboardLayer(CCNode* parent) {
@@ -638,95 +683,61 @@ namespace bot {
     }
 }
 
+// Fixed: Removed 'override' keywords from custom macro modify blocks
 class $modify(BotMenuLayer, MenuLayer) {
-    void onEnter() override {
+    void onEnter() {
         MenuLayer::onEnter();
         bot::addKeyboardLayer(this);
     }
 };
 
 class $modify(BotPlayLayer, PlayLayer) {
-    void onEnter() override {
+    void onEnter() {
         PlayLayer::onEnter();
         bot::BotManager::get().onSceneEnter(this);
         bot::addKeyboardLayer(this);
     }
 
-    void onExit() override {
+    void onExit() {
         bot::BotManager::get().onSceneExit();
         PlayLayer::onExit();
     }
 
-    // Fixed: Custom safe stepper function loop that bypasses the hook recursion crash
-    void update(float dt) override {
-        auto& bot = bot::BotManager::get();
-        bot.onGameUpdate(this, dt);
-
-        if (!bot.isPlayingBack() || !bot.canPlayBack() || !bot.hasPlaybackData()) {
-            PlayLayer::update(static_cast<float>(static_cast<double>(dt) * bot.speedhack()));
-            return;
-        }
-
-        const double scaledDt = static_cast<double>(dt) * bot.speedhack();
-        const double endTime = m_currentTime + scaledDt;
-        const std::int64_t endNs = static_cast<std::int64_t>(std::llround(endTime * 1'000'000'000.0));
-
-        while (bot.playbackIndex() < bot.events().size() && bot.events()[bot.playbackIndex()].timeNs <= endNs) {
-            const auto& ev = bot.events()[bot.playbackIndex()];
-            const double eventTime = static_cast<double>(ev.timeNs) / 1'000'000'000.0;
-            const double delta = std::max(0.0, eventTime - m_currentTime);
-            if (delta > 0.0) {
-                PlayLayer::update(static_cast<float>(delta / bot.speedhack()));
-            }
-
-            bot.refreshPlayers(this);
-            // Setup direct injection status safely
-            if (auto* targetPlayer = (ev.flags & 2) ? bot.player1() : bot.player2()) {
-                auto button = static_cast<PlayerButton>(ev.button);
-                if (ev.flags & 1) targetPlayer->pushButton(button);
-                else targetPlayer->releaseButton(button);
-            }
-
-            // Move the playback manager forward safely
-            // Note: Since BotManager manages indices privately, you may need to add a friend class definition or increment wrapper to compile this completely depending on visibility rules!
-        }
-
-        const double remaining = std::max(0.0, endTime - m_currentTime);
-        if (remaining > 0.0) {
-            PlayLayer::update(static_cast<float>(remaining / bot.speedhack()));
-        }
+    void update(float dt) {
+        bot::BotManager::get().onGameUpdate(this, dt);
+        PlayLayer::update(dt);
     }
 
-    void resetLevel() override {
+    void resetLevel() {
         bot::BotManager::get().onRestartPre(this);
         PlayLayer::resetLevel();
         bot::BotManager::get().onRestartPost(this);
     }
 
-    void fullReset() override {
+    void fullReset() {
         bot::BotManager::get().onRestartPre(this);
         PlayLayer::fullReset();
         bot::BotManager::get().onRestartPost(this);
     }
 
-    void storeCheckpoint(CheckpointObject* checkpoint) override {
+    void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         bot::BotManager::get().onCheckpointStore(this, checkpoint);
     }
 
-    void loadFromCheckpoint(CheckpointObject* checkpoint) override {
+    void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         bot::BotManager::get().onCheckpointLoad(this, checkpoint);
     }
 
-    void levelComplete() override {
+    void levelComplete() {
         bot::BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
     }
 };
 
 class $modify(BotPlayerObject, PlayerObject) {
-    bool pushButton(PlayerButton button) override {
+    bool pushButton(geode::prelude::PlayerButton button) {
         auto ret = PlayerObject::pushButton(button);
         if (!bot::BotManager::get().isInjectingPlayback()) {
             bot::BotManager::get().onButton(this, button, true);
@@ -734,7 +745,7 @@ class $modify(BotPlayerObject, PlayerObject) {
         return ret;
     }
 
-    bool releaseButton(PlayerButton button) override {
+    bool releaseButton(geode::prelude::PlayerButton button) {
         auto ret = PlayerObject::releaseButton(button);
         if (!bot::BotManager::get().isInjectingPlayback()) {
             bot::BotManager::get().onButton(this, button, false);
