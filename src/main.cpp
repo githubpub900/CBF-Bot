@@ -54,7 +54,7 @@ namespace bot {
         }
 
         std::int64_t currentLayerTimeNs(PlayLayer* layer) {
-            return layer ? toNs(layer->m_time) : 0;
+            return layer ? toNs(layer->m_currentTime) : 0;
         }
     }
 
@@ -222,9 +222,24 @@ namespace bot {
             return true;
         }
 
-        using CCLayer::keyDown; // Add this to expose the 2-argument keyDown so the 1-arg override doesn't hide it
+        using CCLayer::keyDown; // Expose the base method overloads to prevent shadowing warnings
 
+#if defined(GEODE_IS_WINDOWS)
         void keyDown(cocos2d::enumKeyCodes key) override {
+            handleKeyDown(key);
+        }
+#elif defined(GEODE_IS_ANDROID)
+        void keyDown(cocos2d::enumKeyCodes key, double dt) override {
+            handleKeyDown(key);
+        }
+#else
+        void keyDown(cocos2d::enumKeyCodes key) {
+            handleKeyDown(key);
+        }
+#endif
+
+    private:
+        void handleKeyDown(cocos2d::enumKeyCodes key) {
             if (key == cocos2d::enumKeyCodes::KEY_K) {
                 BotManager::get().toggleOverlay();
             }
@@ -302,7 +317,7 @@ namespace bot {
         m_events.clear();
         m_checkpoints.clear();
         m_checkpointLookup.clear();
-        m_recordBaseNs = m_layer ? toNs(m_layer->m_time) : 0;
+        m_recordBaseNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
         m_playbackStartNs = 0;
         m_deathCutoffNs = 0;
     }
@@ -322,7 +337,7 @@ namespace bot {
         m_playback = true;
         m_recording = false;
         m_playbackIndex = 0;
-        m_playbackStartNs = m_layer ? toNs(m_layer->m_time) : 0;
+        m_playbackStartNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
         m_inPlaybackInjection = false;
         m_dead = false;
         refreshPlayers(m_layer);
@@ -362,7 +377,7 @@ namespace bot {
         m_layer = layer;
         refreshPlayers(layer);
         if (m_recording && !m_recordBaseNs) {
-            m_recordBaseNs = layer ? toNs(layer->m_time) : 0;
+            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
         }
     }
 
@@ -430,7 +445,7 @@ namespace bot {
     void BotManager::onRestartPost(PlayLayer* layer) {
         clearDeadState();
         if (m_recording) {
-            m_recordBaseNs = layer ? toNs(layer->m_time) : 0;
+            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
         }
     }
 
@@ -630,14 +645,14 @@ namespace bot {
         }
 
         m_inUpdateSplit = true;
-        const double startTime = layer->m_time;
+        const double startTime = layer->m_currentTime;
         const double endTime = startTime + scaledDt;
         const std::int64_t endNs = toNs(endTime);
 
         while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeNs <= endNs) {
             const auto& ev = m_events[m_playbackIndex];
             const double eventTime = fromNs(ev.timeNs);
-            const double delta = std::max(0.0, eventTime - layer->m_time);
+            const double delta = std::max(0.0, eventTime - layer->m_currentTime);
             if (delta > 0.0) {
                 originalUpdate(static_cast<float>(delta / m_speedhack));
             }
@@ -655,7 +670,7 @@ namespace bot {
             ++m_playbackIndex;
         }
 
-        const double remaining = std::max(0.0, endTime - layer->m_time);
+        const double remaining = std::max(0.0, endTime - layer->m_currentTime);
         if (remaining > 0.0) {
             originalUpdate(static_cast<float>(remaining / m_speedhack));
         }
@@ -685,45 +700,45 @@ class $modify(BotMenuLayer, MenuLayer) {
 class $modify(BotPlayLayer, PlayLayer) {
     void onEnter() {
         PlayLayer::onEnter();
-        BotManager::get().onSceneEnter(this);
+        bot::BotManager::get().onSceneEnter(this);
         bot::addKeyboardLayer(this);
     }
 
     void onExit() {
-        BotManager::get().onSceneExit();
+        bot::BotManager::get().onSceneExit();
         PlayLayer::onExit();
     }
 
     void update(float dt) {
-        BotManager::get().onGameUpdate(this, dt, [this](float step) {
+        bot::BotManager::get().onGameUpdate(this, dt, [this](float step) {
             PlayLayer::update(step);
         });
     }
 
     void resetLevel() {
-        BotManager::get().onRestartPre(this);
+        bot::BotManager::get().onRestartPre(this);
         PlayLayer::resetLevel();
-        BotManager::get().onRestartPost(this);
+        bot::BotManager::get().onRestartPost(this);
     }
 
     void fullReset() {
-        BotManager::get().onRestartPre(this);
+        bot::BotManager::get().onRestartPre(this);
         PlayLayer::fullReset();
-        BotManager::get().onRestartPost(this);
+        bot::BotManager::get().onRestartPost(this);
     }
 
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
-        BotManager::get().onCheckpointStore(this, checkpoint);
+        bot::BotManager::get().onCheckpointStore(this, checkpoint);
     }
 
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
-        BotManager::get().onCheckpointLoad(this, checkpoint);
+        bot::BotManager::get().onCheckpointLoad(this, checkpoint);
     }
 
     void levelComplete() {
-        BotManager::get().onLevelComplete(this);
+        bot::BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
     }
 };
@@ -731,15 +746,15 @@ class $modify(BotPlayLayer, PlayLayer) {
 class $modify(BotPlayerObject, PlayerObject) {
     void pushButton(PlayerButton button) {
         PlayerObject::pushButton(button);
-        if (!BotManager::get().isInjectingPlayback()) {
-            BotManager::get().onButton(this, button, true);
+        if (!bot::BotManager::get().isInjectingPlayback()) {
+            bot::BotManager::get().onButton(this, button, true);
         }
     }
 
     void releaseButton(PlayerButton button) {
         PlayerObject::releaseButton(button);
-        if (!BotManager::get().isInjectingPlayback()) {
-            BotManager::get().onButton(this, button, false);
+        if (!bot::BotManager::get().isInjectingPlayback()) {
+            bot::BotManager::get().onButton(this, button, false);
         }
     }
 };
