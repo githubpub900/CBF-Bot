@@ -61,6 +61,9 @@ public:
     void updatePlayback(PlayLayer* pl);
     void updateAudioPitch();
     
+    PlayerState captureState(PlayerObject* p);
+    void applyState(PlayerObject* p, const PlayerState& s);
+
     void saveCheckpoint(PlayLayer* pl);
     void removeLastCheckpoint();
     void restoreCheckpoint(PlayLayer* pl);

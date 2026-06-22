@@ -49,13 +49,12 @@ void Bot::updatePlayback(PlayLayer* pl) {
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
         
-        // Dynamic Player targeting resolves flipped inputs / missing dual components safely
-        bool actualPlayer2 = action.player2 && pl->m_isDualMode;
+        // Target player dynamically by pulling dual-mode status directly from player 1
+        bool actualPlayer2 = action.player2 && pl->m_player1 && pl->m_player1->m_isDualMode;
         PlayerObject* p = actualPlayer2 ? pl->m_player2 : pl->m_player1;
         if (!p) p = pl->m_player1; 
 
-        if (p->m_position.x >= action.xPos) {
-            // Keep original action.player2 flag so external layout mods process it identically
+        if (p && p->m_position.x >= action.xPos) {
             pl->handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
@@ -109,7 +108,7 @@ void Bot::applyState(PlayerObject* p, const PlayerState& s) {
 void Bot::saveCheckpoint(PlayLayer* pl) {
     CheckpointData cp;
     cp.actionIndex = actions.size(); 
-    cp.p1 = captureState(pl->m_player1);
+    if (pl->m_player1) cp.p1 = captureState(pl->m_player1);
     if (pl->m_player2) cp.p2 = captureState(pl->m_player2);
     checkpoints.push_back(cp);
 }
@@ -122,7 +121,7 @@ void Bot::restoreCheckpoint(PlayLayer* pl) {
     if (!checkpoints.empty()) {
         auto& cp = checkpoints.back();
         actions.resize(cp.actionIndex); 
-        applyState(pl->m_player1, cp.p1);
+        if (pl->m_player1) applyState(pl->m_player1, cp.p1);
         if (pl->m_player2) applyState(pl->m_player2, cp.p2);
     } else {
         clearMacro();
@@ -192,8 +191,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     
     void handleButton(bool push, int button, bool player2) {
         if (Bot::get().isRecording && !Bot::get().isPlaying) {
-            // Verify if the input realistically belongs to Player 2 based on active layer configurations
-            bool actualPlayer2 = player2 && this->m_isDualMode;
+            bool actualPlayer2 = player2 && this->m_player1 && this->m_player1->m_isDualMode;
             auto p = actualPlayer2 ? this->m_player2 : this->m_player1;
             if (p) {
                 Bot::get().recordAction(p->m_position.x, button, player2, push);
@@ -234,7 +232,7 @@ public:
         return nullptr;
     }
 
-    bool init() {
+    bool init() override {
         if (!FLAlertLayer::init(150)) return false;
 
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
@@ -264,7 +262,7 @@ public:
         
         m_recordToggle = CCMenuItemToggler::create(offLabel, onLabel, this, menu_selector(BotUI::onToggleRecord));
         m_recordToggle->setPosition(winSize.width / 2 - 110, winSize.height / 2 + 20);
-        m_recordToggle->setChecked(Bot::get().isRecording);
+        m_recordToggle->toggle(Bot::get().isRecording);
         menu->addChild(m_recordToggle);
 
         auto recText = cocos2d::CCLabelBMFont::create("Record Mode", "bigFont.fnt");
@@ -277,7 +275,7 @@ public:
 
         m_playToggle = CCMenuItemToggler::create(offLabel2, onLabel2, this, menu_selector(BotUI::onTogglePlay));
         m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
-        m_playToggle->setChecked(Bot::get().isPlaying);
+        m_playToggle->toggle(Bot::get().isPlaying);
         menu->addChild(m_playToggle);
 
         auto playText = cocos2d::CCLabelBMFont::create("Playback", "bigFont.fnt");
@@ -323,8 +321,8 @@ public:
         }
     }
     
-    void textChanged(TextInput* input) override {
-        std::string rawVal = input->getString();
+    void textChanged(CCTextInputNode* node) override {
+        std::string rawVal = node->getString();
         try {
             if (!rawVal.empty()) {
                 float val = std::stof(rawVal);
@@ -338,20 +336,20 @@ public:
 
     void onToggleRecord(cocos2d::CCObject* pSender) {
         auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isRecording = !toggle->isOff();
+        Bot::get().isRecording = toggle->isOn();
         if (Bot::get().isRecording) {
             Bot::get().isPlaying = false;
-            if (m_playToggle) m_playToggle->setChecked(false);
+            if (m_playToggle) m_playToggle->toggle(false);
         }
         Bot::get().updateAudioPitch();
     }
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
         auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isPlaying = !toggle->isOff();
+        Bot::get().isPlaying = toggle->isOn();
         if (Bot::get().isPlaying) {
             Bot::get().isRecording = false;
-            if (m_recordToggle) m_recordToggle->setChecked(false);
+            if (m_recordToggle) m_recordToggle->toggle(false);
             Bot::get().playbackIndex = 0;
         }
         Bot::get().updateAudioPitch();
