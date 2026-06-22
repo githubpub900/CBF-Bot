@@ -16,7 +16,8 @@ enum class CBFStatus {
 
 // Determine which CBF is actively running on the client
 CBFStatus getCBFStatus() {
-    if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
+    auto syzziMod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
+    if (syzziMod && syzziMod->isEnabled()) {
         return CBFStatus::Syzzi;
     }
     if (GameManager::sharedState()->getGameVariable("0115")) {
@@ -32,6 +33,13 @@ class $modify(CCScheduler) {
     void update(float dt) {
         float speed = BotManager::get().speedMultiplier;
         if (speed < 0.01f) speed = 0.01f;
+
+        // Ensure speedhack does NOT affect players during death/respawn animations
+        if (auto playLayer = PlayLayer::get()) {
+            if (playLayer->m_isDead) {
+                speed = 1.0f;
+            }
+        }
 
         // Scale game update ticks (engine speed)
         CCScheduler::update(dt * speed);
@@ -76,7 +84,7 @@ private:
 public:
     static BotMenuLayer* create() {
         auto ret = new BotMenuLayer();
-        if (ret && ret->init(280.0f, 240.0f, "GJ_square01.png", "CBF Bot Control Panel")) {
+        if (ret && ret->init(280.0f, 260.0f, "GJ_square01.png", "CBF Bot Control Panel")) {
             ret->autorelease();
             return ret;
         }
@@ -119,13 +127,34 @@ public:
         else statusText += "Idle";
 
         m_statusLabel = CCLabelBMFont::create(statusText.c_str(), "chatFont.fnt");
-        m_statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 65.0f);
+        m_statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 75.0f);
         m_statusLabel->setScale(0.6f);
         this->addChild(m_statusLabel);
 
+        // CBF Indicator inside GUI
+        std::string cbfText = "CBF: ";
+        ccColor3B cbfColor = {255, 0, 0};
+        auto status = getCBFStatus();
+        if (status == CBFStatus::Syzzi) {
+            cbfText += "Syzzi (Active)";
+            cbfColor = {0, 255, 0};
+        } else if (status == CBFStatus::RobTop) {
+            cbfText += "RobTop (Active)";
+            cbfColor = {255, 255, 0};
+        } else {
+            cbfText += "Disabled";
+            cbfColor = {255, 50, 50};
+        }
+
+        auto cbfLabel = CCLabelBMFont::create(cbfText.c_str(), "chatFont.fnt");
+        cbfLabel->setPosition(winSize.width / 2, winSize.height / 2 + 55.0f);
+        cbfLabel->setScale(0.55f);
+        cbfLabel->setColor(cbfColor);
+        this->addChild(cbfLabel);
+
         std::string sizeText = "Recorded Inputs: " + std::to_string(bot.macro.size());
         m_macroSizeLabel = CCLabelBMFont::create(sizeText.c_str(), "chatFont.fnt");
-        m_macroSizeLabel->setPosition(winSize.width / 2, winSize.height / 2 + 45.0f);
+        m_macroSizeLabel->setPosition(winSize.width / 2, winSize.height / 2 + 35.0f);
         m_macroSizeLabel->setScale(0.55f);
         this->addChild(m_macroSizeLabel);
 
@@ -134,25 +163,25 @@ public:
         auto recordBtn = CCMenuItemSpriteExtra::create(
             recordSprite, this, menu_selector(BotMenuLayer::onToggleRecord)
         );
-        recordBtn->setPosition(winSize.width / 2 - 60.0f, winSize.height / 2 + 10.0f);
+        recordBtn->setPosition(winSize.width / 2 - 60.0f, winSize.height / 2 + 5.0f);
         menu->addChild(recordBtn);
 
         auto playSprite = ButtonSprite::create("Play", 0.7f);
         auto playBtn = CCMenuItemSpriteExtra::create(
             playSprite, this, menu_selector(BotMenuLayer::onTogglePlay)
         );
-        playBtn->setPosition(winSize.width / 2 + 60.0f, winSize.height / 2 + 10.0f);
+        playBtn->setPosition(winSize.width / 2 + 60.0f, winSize.height / 2 + 5.0f);
         menu->addChild(playBtn);
 
         // Speedhack Box Label
         auto speedLabel = CCLabelBMFont::create("Engine Speed:", "chatFont.fnt");
-        speedLabel->setPosition(winSize.width / 2 - 60.0f, winSize.height / 2 - 30.0f);
+        speedLabel->setPosition(winSize.width / 2 - 60.0f, winSize.height / 2 - 35.0f);
         speedLabel->setScale(0.55f);
         this->addChild(speedLabel);
 
         // Input text box for Speedhack speed values
         m_speedInput = CCTextInputNode::create(70.0f, 30.0f, "speed", "chatFont.fnt");
-        m_speedInput->setPosition(winSize.width / 2 + 40.0f, winSize.height / 2 - 30.0f);
+        m_speedInput->setPosition(winSize.width / 2 + 40.0f, winSize.height / 2 - 35.0f);
         m_speedInput->setLabelPlaceholderColor({150, 150, 150});
         m_speedInput->setDelegate(this);
         m_speedInput->setAllowedChars("0123456789.");
@@ -164,7 +193,7 @@ public:
 
         // File Operations
         m_fileNameInput = CCTextInputNode::create(140.0f, 30.0f, "macro_name", "chatFont.fnt");
-        m_fileNameInput->setPosition(winSize.width / 2 - 35.0f, winSize.height / 2 - 75.0f);
+        m_fileNameInput->setPosition(winSize.width / 2 - 35.0f, winSize.height / 2 - 80.0f);
         m_fileNameInput->setString("my_macro.json");
         m_fileNameInput->setLabelPlaceholderColor({150, 150, 150});
         this->addChild(m_fileNameInput);
@@ -173,14 +202,14 @@ public:
         auto saveBtn = CCMenuItemSpriteExtra::create(
             saveSprite, this, menu_selector(BotMenuLayer::onSave)
         );
-        saveBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 65.0f);
+        saveBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 70.0f);
         menu->addChild(saveBtn);
 
         auto loadSprite = ButtonSprite::create("Load", 0.6f);
         auto loadBtn = CCMenuItemSpriteExtra::create(
             loadSprite, this, menu_selector(BotMenuLayer::onLoad)
         );
-        loadBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 90.0f);
+        loadBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 95.0f);
         menu->addChild(loadBtn);
 
         this->setTouchEnabled(true);
@@ -304,25 +333,6 @@ class $modify(MyPlayLayer, PlayLayer) {
             bot.clearMacro();
         }
 
-        // --- CBF / CBS VISUAL STATUS INDICATOR ---
-        auto status = getCBFStatus();
-        auto indicator = CCLabelBMFont::create(".", "chatFont.fnt");
-        indicator->setScale(3.5f); // Sizeable period visual in the corner
-
-        if (status == CBFStatus::Syzzi) {
-            indicator->setColor({0, 255, 0}); // Green
-        } else if (status == CBFStatus::RobTop) {
-            indicator->setColor({255, 255, 0}); // Yellow
-        } else {
-            indicator->setColor({255, 0, 0}); // Red
-        }
-
-        auto winSize = CCDirector::sharedDirector()->getWinSize();
-        // Positioned cleanly in the top left corner of the layer viewport
-        indicator->setPosition({15.0f, winSize.height - 15.0f});
-        indicator->setID("cbf-status-indicator"_spr);
-        this->addChild(indicator, 9999);
-
         return true;
     }
 
@@ -438,8 +448,13 @@ class $modify(MyPlayLayer, PlayLayer) {
 
     void resetLevel() {
         PlayLayer::resetLevel();
-        if (BotManager::get().currentState == BotManager::State::Playing) {
-            BotManager::get().playbackIndex = 0;
+        auto& bot = BotManager::get();
+        if (bot.currentState == BotManager::State::Playing) {
+            bot.playbackIndex = 0;
+        } else if (bot.currentState == BotManager::State::Recording) {
+            // Restarting the whole level cleans up old inputs so there is no carryover overlap
+            bot.clearMacro();
+            log::info("Bot: Reset and discarded recording timeline on full level retry.");
         }
     }
 };
