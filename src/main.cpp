@@ -1,7 +1,7 @@
 #include "Bot.hpp"
 
 #include <Geode/Geode.hpp>
-#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
@@ -20,7 +20,6 @@ using namespace geode::prelude;
 
 namespace bot {
     namespace {
-        constexpr int kInputLayerTag = 0xB071;
         constexpr int kOverlayTag = 0xB072;
         constexpr std::int64_t kNanosPerSecond = 1'000'000'000LL;
 
@@ -198,36 +197,6 @@ namespace bot {
         }
 
         CCLabelBMFont* m_status = nullptr;
-    };
-
-    class BotKeyLayer final : public CCLayer {
-    public:
-        static BotKeyLayer* create() {
-            auto* ret = new BotKeyLayer();
-            if (ret && ret->init()) {
-                ret->autorelease();
-                return ret;
-            }
-            CC_SAFE_DELETE(ret);
-            return nullptr;
-        }
-
-        bool init() override {
-            if (!CCLayer::init()) return false;
-            setKeyboardEnabled(true);
-            setKeypadEnabled(true);
-            setTouchEnabled(false);
-            setVisible(false);
-            setZOrder(std::numeric_limits<int>::max() - 6);
-            return true;
-        }
-
-        // RobTop's customized Cocos2d-x uses this dual-parameter keyDown override uniformly
-        void keyDown(cocos2d::enumKeyCodes key, double dt) override {
-            if (key == cocos2d::enumKeyCodes::KEY_K) {
-                BotManager::get().toggleOverlay();
-            }
-        }
     };
 
     BotManager& BotManager::get() {
@@ -664,20 +633,25 @@ namespace bot {
             stopPlayback();
         }
     }
-
-    void addKeyboardLayer(CCNode* parent) {
-        if (!parent) return;
-        if (parent->getChildByTag(kInputLayerTag)) return;
-        auto* input = BotKeyLayer::create();
-        if (!input) return;
-        parent->addChild(input, std::numeric_limits<int>::max() - 6, kInputLayerTag);
-    }
 }
 
-class $modify(BotMenuLayer, MenuLayer) {
-    void onEnter() {
-        MenuLayer::onEnter();
-        bot::addKeyboardLayer(this);
+// Intercept keyboard messages at the absolute engine source!
+// This fixes keys being swallowed on both Windows and Android.
+class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool isRepeat) {
+        if (down && key == cocos2d::enumKeyCodes::KEY_K) {
+            auto* scene = CCDirector::sharedDirector()->getRunningScene();
+            if (scene) {
+                // Ensure the overlay is only toggleable when active in a main level or menu
+                bool inTogglableScene = scene->getChildByType<PlayLayer>(0) != nullptr || 
+                                         scene->getChildByType<MenuLayer>(0) != nullptr;
+                if (inTogglableScene) {
+                    bot::BotManager::get().toggleOverlay();
+                    return true;
+                }
+            }
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, isRepeat);
     }
 };
 
@@ -685,7 +659,6 @@ class $modify(BotPlayLayer, PlayLayer) {
     void onEnter() {
         PlayLayer::onEnter();
         bot::BotManager::get().onSceneEnter(this);
-        bot::addKeyboardLayer(this);
     }
 
     void onExit() {
