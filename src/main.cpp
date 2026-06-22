@@ -49,7 +49,6 @@ void Bot::updatePlayback(PlayLayer* pl) {
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
         
-        // Target player dynamically by pulling dual-mode status directly from Geode's game state struct
         bool actualPlayer2 = action.player2 && pl->m_gameState.m_isDualMode;
         PlayerObject* p = actualPlayer2 ? pl->m_player2 : pl->m_player1;
         if (!p) p = pl->m_player1; 
@@ -221,6 +220,7 @@ public:
     cocos2d::CCLabelBMFont* m_counterLabel = nullptr;
     CCMenuItemToggler* m_recordToggle = nullptr;
     CCMenuItemToggler* m_playToggle = nullptr;
+    bool m_blockToggleCallback = false;
 
     static BotUI* create() {
         auto ret = new BotUI();
@@ -262,7 +262,6 @@ public:
         
         m_recordToggle = CCMenuItemToggler::create(offLabel, onLabel, this, menu_selector(BotUI::onToggleRecord));
         m_recordToggle->setPosition(winSize.width / 2 - 110, winSize.height / 2 + 20);
-        m_recordToggle->toggle(Bot::get().isRecording);
         menu->addChild(m_recordToggle);
 
         auto recText = cocos2d::CCLabelBMFont::create("Record Mode", "bigFont.fnt");
@@ -275,8 +274,13 @@ public:
 
         m_playToggle = CCMenuItemToggler::create(offLabel2, onLabel2, this, menu_selector(BotUI::onTogglePlay));
         m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
-        m_playToggle->toggle(Bot::get().isPlaying);
         menu->addChild(m_playToggle);
+
+        // Synchronize initial toggles safely without loop interaction
+        m_blockToggleCallback = true;
+        m_recordToggle->toggle(Bot::get().isRecording);
+        m_playToggle->toggle(Bot::get().isPlaying);
+        m_blockToggleCallback = false;
 
         auto playText = cocos2d::CCLabelBMFont::create("Playback", "bigFont.fnt");
         playText->setPosition(winSize.width / 2 + 110, winSize.height / 2 + 20);
@@ -335,21 +339,33 @@ public:
     }
 
     void onToggleRecord(cocos2d::CCObject* pSender) {
+        if (m_blockToggleCallback) return;
         auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isRecording = toggle->isOn();
+        Bot::get().isRecording = toggle->m_toggled;
+        
         if (Bot::get().isRecording) {
             Bot::get().isPlaying = false;
-            if (m_playToggle) m_playToggle->toggle(false);
+            if (m_playToggle && m_playToggle->m_toggled) {
+                m_blockToggleCallback = true;
+                m_playToggle->toggle(false);
+                m_blockToggleCallback = false;
+            }
         }
         Bot::get().updateAudioPitch();
     }
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
+        if (m_blockToggleCallback) return;
         auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isPlaying = toggle->isOn();
+        Bot::get().isPlaying = toggle->m_toggled;
+        
         if (Bot::get().isPlaying) {
             Bot::get().isRecording = false;
-            if (m_recordToggle) m_recordToggle->toggle(false);
+            if (m_recordToggle && m_recordToggle->m_toggled) {
+                m_blockToggleCallback = true;
+                m_recordToggle->toggle(false);
+                m_blockToggleCallback = false;
+            }
             Bot::get().playbackIndex = 0;
         }
         Bot::get().updateAudioPitch();
@@ -367,6 +383,18 @@ public:
 
     void onClose(cocos2d::CCObject*) {
         s_activeMenuInstance = nullptr;
+        
+        // Block instant processing immediately
+        this->setKeypadEnabled(false);
+        this->setTouchEnabled(false);
+        
+        // Defer actual cleanup to next frame boundary to avoid stack corruption
+        auto delay = cocos2d::CCDelayTime::create(0.0f);
+        auto callFunc = cocos2d::CCCallFunc::create(this, callfunc_selector(BotUI::deferredClose));
+        this->runAction(cocos2d::CCSequence::create(delay, callFunc, nullptr));
+    }
+
+    void deferredClose() {
         this->removeFromParentAndCleanup(true);
     }
 };
