@@ -3,6 +3,10 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -27,7 +31,6 @@ struct BotAction {
 struct CheckpointState {
     double p1XPos;
     double p1YPos;
-    double p1XVel;
     double p1YVel;
     float p1Rotation;
     bool p1IsDashing;
@@ -37,7 +40,6 @@ struct CheckpointState {
 
     double p2XPos;
     double p2YPos;
-    double p2XVel;
     double p2YVel;
     float p2Rotation;
     bool p2IsDashing;

@@ -116,15 +116,15 @@ public:
         m_macroSizeLabel->setScale(0.55f);
         this->addChild(m_macroSizeLabel);
 
-        // Control Toggles (Record / Playback)
-        auto recordSprite = ButtonSprite::create("Record", "goldButton_001.png");
+        // Control Toggles using proper overload signatures (char const*, float scale)
+        auto recordSprite = ButtonSprite::create("Record", 0.8f);
         auto recordBtn = CCMenuItemSpriteExtra::create(
             recordSprite, this, menu_selector(BotMenuLayer::onToggleRecord)
         );
         recordBtn->setPosition(winSize.width / 2 - 65.0f, winSize.height / 2 - 5.0f);
         menu->addChild(recordBtn);
 
-        auto playSprite = ButtonSprite::create("Play", "goldButton_001.png");
+        auto playSprite = ButtonSprite::create("Play", 0.8f);
         auto playBtn = CCMenuItemSpriteExtra::create(
             playSprite, this, menu_selector(BotMenuLayer::onTogglePlay)
         );
@@ -165,16 +165,14 @@ public:
         m_fileNameInput->setLabelPlaceholderColor({150, 150, 150});
         this->addChild(m_fileNameInput);
 
-        auto saveSprite = ButtonSprite::create("Save", "goldButton_001.png");
-        saveSprite->setScale(0.6f);
+        auto saveSprite = ButtonSprite::create("Save", 0.6f);
         auto saveBtn = CCMenuItemSpriteExtra::create(
             saveSprite, this, menu_selector(BotMenuLayer::onSave)
         );
         saveBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 70.0f);
         menu->addChild(saveBtn);
 
-        auto loadSprite = ButtonSprite::create("Load", "goldButton_001.png");
-        loadSprite->setScale(0.6f);
+        auto loadSprite = ButtonSprite::create("Load", 0.6f);
         auto loadBtn = CCMenuItemSpriteExtra::create(
             loadSprite, this, menu_selector(BotMenuLayer::onLoad)
         );
@@ -331,10 +329,11 @@ class $modify(MyPlayLayer, PlayLayer) {
 
             // Accurate boundary matching for sub-frame executions
             if (player->m_position.x >= action.xPosition) {
+                // Call input functions directly on the PlayerObject
                 if (action.isPush) {
-                    this->pushButton(action.isPlayer2 ? 1 : 0, static_cast<PlayerButton>(action.button));
+                    player->pushButton(static_cast<PlayerButton>(action.button));
                 } else {
-                    this->releaseButton(action.isPlayer2 ? 1 : 0, static_cast<PlayerButton>(action.button));
+                    player->releaseButton(static_cast<PlayerButton>(action.button));
                 }
                 bot.playbackIndex++;
             } else {
@@ -358,7 +357,6 @@ class $modify(MyPlayLayer, PlayLayer) {
             // Player 1 precise physics state
             state.p1XPos = this->m_player1->m_position.x;
             state.p1YPos = this->m_player1->m_position.y;
-            state.p1XVel = this->m_player1->m_xVelocity;
             state.p1YVel = this->m_player1->m_yVelocity;
             state.p1Rotation = this->m_player1->getRotation();
             state.p1IsDashing = this->m_player1->m_isDashing;
@@ -370,7 +368,6 @@ class $modify(MyPlayLayer, PlayLayer) {
             if (this->m_player2) {
                 state.p2XPos = this->m_player2->m_position.x;
                 state.p2YPos = this->m_player2->m_position.y;
-                state.p2XVel = this->m_player2->m_xVelocity;
                 state.p2YVel = this->m_player2->m_yVelocity;
                 state.p2Rotation = this->m_player2->getRotation();
                 state.p2IsDashing = this->m_player2->m_isDashing;
@@ -416,7 +413,6 @@ class $modify(MyPlayLayer, PlayLayer) {
             // Restore Player 1
             this->m_player1->m_position.x = state.p1XPos;
             this->m_player1->m_position.y = state.p1YPos;
-            this->m_player1->m_xVelocity = state.p1XVel;
             this->m_player1->m_yVelocity = state.p1YVel;
             this->m_player1->setRotation(state.p1Rotation);
             this->m_player1->m_isDashing = state.p1IsDashing;
@@ -428,7 +424,6 @@ class $modify(MyPlayLayer, PlayLayer) {
             if (this->m_player2) {
                 this->m_player2->m_position.x = state.p2XPos;
                 this->m_player2->m_position.y = state.p2YPos;
-                this->m_player2->m_xVelocity = state.p2XVel;
                 this->m_player2->m_yVelocity = state.p2YVel;
                 this->m_player2->setRotation(state.p2Rotation);
                 this->m_player2->m_isDashing = state.p2IsDashing;
