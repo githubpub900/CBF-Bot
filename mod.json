@@ -1,0 +1,97 @@
+{
+    "geode": "5.7.1",
+    "gd": {
+        "win": "2.2081",
+        "mac": "2.2081",
+        "android": "2.2081"
+    },
+    "id": "cbf.macrobot",
+    "name": "CBF Macro Bot",
+    "version": "v1.0.0",
+    "developer": "CBF Macro Bot Team",
+    "description": "Record gameplay in Practice Mode and play it back in Normal Mode. Leverages GD 2.2081's built-in Click Between Frames and deterministic RNG. Ships with a frame-rate-independent speedhack with dynamic physics polling (up to 24 kHz) for choppy-free slow-motion.",
+    "repository": "",
+    "tags": ["gameplay", "utility", "enhancement"],
+    "settings": {
+        "auto-record": {
+            "type": "bool",
+            "default": false,
+            "name": "Auto-record in Practice Mode",
+            "description": "Automatically start recording when entering Practice Mode."
+        },
+        "auto-stop-at-end": {
+            "type": "bool",
+            "default": true,
+            "name": "Auto-stop at level end",
+            "description": "Stops recording when the level is completed."
+        },
+        "default-speed": {
+            "type": "float",
+            "default": 1.0,
+            "min": 0.001,
+            "max": 1000.0,
+            "name": "Default speedhack speed",
+            "description": "Default speed multiplier for the built-in frame-independent speedhack (0.001x to 1000x).",
+            "control": {
+                "slider": true
+            }
+        },
+        "max-physics-rate": {
+            "type": "int",
+            "default": 240,
+            "min": 60,
+            "max": 24000,
+            "name": "Max physics polling rate (Hz)",
+            "description": "Maximum physics ticks per second. Higher values enable smoother slow-motion at the cost of CPU. 240 = CBF default (smooth down to ~0.1x). 24000 = smooth down to ~0.001x.",
+            "control": {
+                "slider": true
+            }
+        },
+        "practice-fix-enabled": {
+            "type": "bool",
+            "default": true,
+            "name": "Enable practice bug fix",
+            "description": "Forces GD's deterministic replay RNG seed so physics in Practice Mode matches Normal Mode."
+        },
+        "use-builtin-cbf": {
+            "type": "bool",
+            "default": true,
+            "name": "Use GD built-in Click Between Frames",
+            "description": "Enable GD 2.2081's native m_clickBetweenSteps for sub-frame input precision. Disable to fall back to per-frame ticks."
+        },
+        "save-folder": {
+            "type": "string",
+            "default": "cbf_macros",
+            "name": "Macro save folder",
+            "description": "Subfolder inside the mod's save directory where macros are stored."
+        },
+        "hotkey-record": {
+            "type": "keybind",
+            "name": "Record / Stop hotkey",
+            "default": "F6",
+            "category": "gameplay",
+            "priority": 1
+        },
+        "hotkey-play": {
+            "type": "keybind",
+            "name": "Play / Stop hotkey",
+            "default": "F7",
+            "category": "gameplay",
+            "priority": 1
+        },
+        "hotkey-ui": {
+            "type": "keybind",
+            "name": "Open Macro Bot UI",
+            "default": "F8",
+            "category": "gameplay",
+            "priority": 1
+        }
+    },
+    "dependencies": {
+        "syzzi.cbf": {
+            "version": ">=1.0.0",
+            "importance": "suggested",
+            "description": "Optional: enables enhanced sub-frame tick precision beyond GD's built-in CBF."
+        }
+    }
+}
