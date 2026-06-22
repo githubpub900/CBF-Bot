@@ -95,7 +95,6 @@ void Bot::saveCheckpoint(PlayLayer* pl) {
     cp.actionIndex = actions.size(); 
     cp.p1 = captureState(pl->m_player1);
     if (pl->m_player2) cp.p2 = captureState(pl->m_player2);
-    cp.isDual = pl->m_isDualMode; 
     checkpoints.push_back(cp);
 }
 
@@ -110,7 +109,6 @@ void Bot::restoreCheckpoint(PlayLayer* pl) {
         
         applyState(pl->m_player1, cp.p1);
         if (pl->m_player2) applyState(pl->m_player2, cp.p2);
-        pl->m_isDualMode = cp.isDual;
     } else {
         clearMacro();
     }

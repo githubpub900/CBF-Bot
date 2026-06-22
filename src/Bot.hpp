@@ -33,7 +33,6 @@ struct CheckpointData {
     PlayerState p1;
     PlayerState p2;
     size_t actionIndex; 
-    bool isDual;
 };
 
 struct MacroAction {
