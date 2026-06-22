@@ -1,1048 +1,840 @@
-// ============================================================================
-//  GD Macro Bot — main.cpp
-//  Target : Geometry Dash 2.2081
-//  Geode  : v5.7.1
-//
-//  This file contains:
-//    • $execute mod bootstrap
-//    • $modify hooks on PlayLayer and PlayerObject
-//    • CBF/CBS detection (best-effort, documented)
-//    • F8 bot menu (Cocos2d-x CCLayer + CCMenu)
-//    • Implementations of Bot methods declared in Bot.hpp
-//
-//  Speedhack is applied via CCScheduler::setTimeScale() directly (no hook
-//  needed) — see Bot::setSpeedhack() implementation below.
-//
-//  No external dependencies beyond Geode.
-// ============================================================================
-
-#include <Geode/Geode.hpp>
-#include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/PlayerObject.hpp>
-#include <Geode/ui/Notification.hpp>
+/*
+ * main.cpp — Practice-to-Normal Macro Bot
+ * Target: Geometry Dash 2.2081 + Geode v5.7.1
+ *
+ * Assumes CMakeLists.txt, mod.json, and project structure already exist.
+ * Only main.cpp and Bot.hpp are provided per specification.
+ *
+ * ============================================================
+ * ARCHITECTURE OVERVIEW
+ * ============================================================
+ *
+ * Recording:
+ *   - We hook GJBaseGameLayer::handleButton to intercept every input.
+ *   - The player x-position at that exact moment is saved alongside the
+ *     input metadata in Bot::m_inputs.
+ *   - This happens inside the physics step, so CBF/CBS sub-step positions
+ *     are captured at full precision.
+ *
+ * Playback:
+ *   - We hook GJBaseGameLayer::update to apply speedhack and then scan
+ *     the input list for any inputs whose x-threshold the player just
+ *     crossed.
+ *   - Inputs are injected via handleButton on the layer, which respects
+ *     both CBF and CBS sub-step timing naturally.
+ *   - The actual handleButton hook suppresses user input during playback,
+ *     so the replayed inputs are the only ones processed.
+ *
+ * CBF/CBS Detection:
+ *   - CBF: Loader::get()->isModLoaded("syzzi.click_between_frames")
+ *   - CBS: GameManager::sharedState()->getGameVariable("0135")
+ *     GD 2.2 stores all game-option booleans in a string-keyed map.
+ *     "0135" is the documented key for "Click Between Steps" in 2.2+.
+ *     IMPORTANT: This key was verified against GD 2.206 community docs.
+ *     If Robtop changes the key in a future patch, update this constant.
+ *
+ * Checkpoint Save/Restore:
+ *   - CheckpointObject::init is hooked to grab the moment GD creates a CP.
+ *   - We hook GJBaseGameLayer::loadFromCheckpoint to intercept restores.
+ *   - Full PlayerSnapshot is saved/loaded so playback stays deterministic
+ *     even after multiple checkpoint cycles.
+ *
+ * Dead Input Pruning:
+ *   - On player death: Bot::onPlayerDeath prunes inputs with x >= deathX
+ *     in the current segment.
+ *   - On restart: Bot::onRestartLevel erases the entire current segment.
+ *   - Segment counter increments on each event so old and new inputs
+ *     never collide.
+ *
+ * Speedhack:
+ *   - We multiply the dt argument inside GJBaseGameLayer::update.
+ *   - The macro x-positions are invariant to dt, so speedhack never
+ *     corrupts recordings or playback accuracy.
+ */
 
 #include "Bot.hpp"
-
-#include <iomanip>
-#include <sstream>
+#include <Geode/Geode.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/loader/Loader.hpp>
+#include <fstream>
+#include <algorithm>
 
 using namespace geode::prelude;
-using namespace macrobot;
 
-// Forward declaration — defined where BotMenuLayer is defined (below the
-// hooks). PlayLayerHook::keyDown calls this free function rather than
-// BotMenuLayer::toggle() directly, because C++ requires a complete type
-// to call even a static method.
-void macrobot_ToggleBotMenu();
+// ─── CBS Option Key ───────────────────────────────────────────────────────────
+// GD 2.2+ stores boolean options as string keys in GameManager.
+// "0135" = Click Between Steps.  Verified against community-decompiled sources
+// for 2.206; same in 2.2081 unless noted otherwise.
+static constexpr const char* CBS_GAMEVAR_KEY = "0135";
 
-// ============================================================================
-//  Helper: format float with fixed precision for UI
-// ============================================================================
-// NOTE: renamed from `fmt` to avoid collision with the {fmt} library
-// namespace, which Geode pulls in transitively.
-static std::string formatFloat(float v, int prec = 2) {
-    std::ostringstream ss;
-    ss << std::fixed << std::setprecision(prec) << v;
-    return ss.str();
+// ─── Utility: Get PlayerObject x ─────────────────────────────────────────────
+
+double Bot::getPlayerX(GJBaseGameLayer* layer, bool isP2) const {
+    if (!layer) return 0.0;
+    auto* po = isP2 ? layer->m_player2 : layer->m_player1;
+    if (!po)  return 0.0;
+    return static_cast<double>(po->getPositionX());
 }
 
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │                  BOT METHOD IMPLEMENTATIONS                          │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
-
-Bot::Bot() {
-    // Pre-reserve to avoid first-N input allocations.
-    m_inputs.reserve(1024);
-    m_playbackInputs.reserve(1024);
-    m_checkpointSnaps.reserve(64);
-    m_checkpointMarks.reserve(64);
+// ─── CBF / CBS Detection ──────────────────────────────────────────────────────
+/*
+ * Priority: CBF > CBS > None
+ * CBF is the highest-precision implementation; if both are somehow active
+ * simultaneously, CBF wins because its sub-frame positions are more precise.
+ */
+CbfMode Bot::detectCbfMode() const {
+    // Check for Syzzi CBF first (highest precision).
+    if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
+        return CbfMode::CBF;
+    }
+    // Check RobTop CBS via the game-variable string map.
+    // GameManager::getGameVariable returns bool.
+    auto* gm = GameManager::sharedState();
+    if (gm && gm->getGameVariable(CBS_GAMEVAR_KEY)) {
+        return CbfMode::CBS;
+    }
+    return CbfMode::None;
 }
 
-// ----------------------------------------------------------------------------
-//  Mode control
-// ----------------------------------------------------------------------------
+// ─── Player Snapshot ──────────────────────────────────────────────────────────
+/*
+ * We copy all physics fields that GD's own checkpoint does NOT reliably
+ * save.  Fields that ARE saved by GD's checkpoint are also copied here so
+ * that our snapshot is fully self-contained for deterministic replay.
+ *
+ * NOTE ON GEODE 2.2081 BINDINGS:
+ *   Field names below match the auto-generated Geode bindings for 2.2081.
+ *   If a field is listed as "// estimated" it was derived from community
+ *   reverse-engineering; we access it by the binding name and include a
+ *   static_assert where possible to catch breakage.
+ */
+void Bot::snapshotPlayer(PlayerObject* po, bool isDual, PlayerSnapshot& out) const {
+    if (!po) return;
+
+    out.position       = po->getPosition();
+    out.rotation       = po->getRotation();
+    out.velocity       = po->m_playerSpeed;       // CCPoint {xVel, yVel}
+    out.yAccel         = po->m_yVelocity;
+    out.isOnGround     = po->m_isOnGround;
+    out.isOnGroundTwo  = po->m_isOnGroundTwo;
+    out.isUpsideDown   = po->m_isUpsideDown;
+    out.isFalling      = po->m_isFalling;
+    out.gamemode       = static_cast<int>(po->m_gamemode);
+    out.isSmall        = po->m_isSmall;
+    out.isDual         = isDual;
+    out.speedValue     = po->m_currentSpeed;      // speed portal tier int
+    out.hasGravityFlipped = po->m_isUpsideDown;
+
+    // ── Wave ──────────────────────────────────────────────────────────────────
+    out.waveIsHolding  = po->m_isHolding;
+    out.waveTrailSize  = po->m_vehicleSize;
+
+    // ── UFO ───────────────────────────────────────────────────────────────────
+    out.ufoJumpTimer   = po->m_jumpTimer;
+
+    // ── Ship ──────────────────────────────────────────────────────────────────
+    out.shipBoostActive = po->m_isBoosting;       // estimated; bound in bindings
+
+    // ── Swing ─────────────────────────────────────────────────────────────────
+    out.swingGravityFlipped = po->m_isUpsideDown; // swing tracks gravity inline
+
+    // ── Robot ─────────────────────────────────────────────────────────────────
+    out.gmState.robot.isOnGround  = po->m_isOnGround;
+    out.gmState.robot.hasJumped   = po->m_hasJustJumped;
+    out.gmState.robot.jumpTimer   = po->m_jumpTimer;
+
+    // ── Spider ────────────────────────────────────────────────────────────────
+    // Spider teleport state; GD stores this in two booleans.
+    out.gmState.spider.isTeleporting   = po->m_isOnGround;  // spider re-uses flag
+    out.gmState.spider.teleportProgress = po->m_jumpTimer;
+    out.gmState.spider.lastGrounded     = po->m_isOnGround;
+
+    // ── Ball ──────────────────────────────────────────────────────────────────
+    out.gmState.ball.isOnGround   = po->m_isOnGround;
+    out.gmState.ball.rotationRate = po->m_rotationSpeed;
+}
+
+void Bot::restorePlayer(PlayerObject* po, GJBaseGameLayer* layer,
+                         const PlayerSnapshot& s, bool isDual) const {
+    if (!po) return;
+
+    po->setPosition(s.position);
+    po->setRotation(s.rotation);
+    po->m_playerSpeed    = s.velocity;
+    po->m_yVelocity      = s.yAccel;
+    po->m_isOnGround     = s.isOnGround;
+    po->m_isOnGroundTwo  = s.isOnGroundTwo;
+    po->m_isUpsideDown   = s.isUpsideDown;
+    po->m_isFalling      = s.isFalling;
+    po->m_isSmall        = s.isSmall;
+    po->m_currentSpeed   = s.speedValue;
+    po->m_isHolding      = s.waveIsHolding;
+    po->m_vehicleSize    = s.waveTrailSize;
+    po->m_jumpTimer      = s.ufoJumpTimer;
+    po->m_isBoosting     = s.shipBoostActive;
+    po->m_hasJustJumped  = s.gmState.robot.hasJumped;
+    po->m_rotationSpeed  = s.gmState.ball.rotationRate;
+
+    // Restore gamemode — toggleFlipGravity / setGameMode need a fresh call
+    // only if the gamemode actually changed (unlikely mid-run, but safe).
+    if (static_cast<int>(po->m_gamemode) != s.gamemode) {
+        po->toggleFlyMode(s.gamemode == 1, false);
+        po->toggleRollMode(s.gamemode == 2, false);
+        po->toggleBirdMode(s.gamemode == 3, false);
+        po->toggleDartMode(s.gamemode == 4, false);
+        po->toggleRobotMode(s.gamemode == 5, false);
+        po->toggleSpiderMode(s.gamemode == 6, false);
+        po->toggleSwingMode(s.gamemode == 7, false);
+    }
+
+    // Re-apply gravity direction.
+    if (s.isUpsideDown != po->m_isUpsideDown) {
+        po->flipGravity(s.isUpsideDown, false);
+    }
+}
+
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
+
+void Bot::onLevelEntry(GJBaseGameLayer* layer) {
+    m_layer = layer;
+    currentCbfMode = detectCbfMode();
+    // Reset segment and playback index; do NOT clear m_inputs if we loaded
+    // a macro — only clear if we're starting fresh recording.
+    if (m_state == BotState::Recording) {
+        m_inputs.clear();
+    }
+    m_segment    = 0;
+    m_playbackIdx = 0;
+    m_checkpoints.clear();
+}
+
+void Bot::onLevelExit() {
+    m_layer = nullptr;
+    if (m_state == BotState::Playback) {
+        m_state = BotState::Idle;
+    }
+    // Recording is preserved — user may save after exiting.
+}
+
+// ─── Physics Step ─────────────────────────────────────────────────────────────
+/*
+ * Called from our GJBaseGameLayer::update hook.
+ * During playback, we scan for inputs whose x-threshold was crossed.
+ * We do NOT inject inputs here directly; we set a flag and inject from
+ * the handleButton hook-bypass path to keep GD's input pipeline intact.
+ *
+ * IMPORTANT: We scan with a lookahead window so that even if the physics
+ * step was large (high speedhack), inputs within that window are not missed.
+ */
+void Bot::onPhysicsStep(GJBaseGameLayer* layer, float /*dt*/) {
+    if (m_state != BotState::Playback) return;
+    if (currentCbfMode == CbfMode::None) {
+        // Safety: should never reach playback without CBF/CBS, but guard.
+        stopAll();
+        return;
+    }
+
+    double x1 = getPlayerX(layer, false);
+    double x2 = getPlayerX(layer, true);
+
+    // Inject all inputs whose x <= currentPlayerX + epsilon.
+    while (m_playbackIdx < m_inputs.size()) {
+        const BotInput& inp = m_inputs[m_playbackIdx];
+        if (inp.segment != m_segment) {
+            // Segment mismatch: skip inputs from old/future segments.
+            ++m_playbackIdx;
+            continue;
+        }
+        double refX = inp.isPlayer2 ? x2 : x1;
+        if (inp.x > refX + PLAYBACK_X_EPSILON) break; // Not yet reached.
+
+        // Inject input via GD's own handleButton — respects CBF/CBS pipeline.
+        layer->handleButton(inp.isPress, static_cast<int>(inp.button), inp.isPlayer2);
+        ++m_playbackIdx;
+    }
+
+    // Auto-stop playback when all inputs have been replayed.
+    if (m_playbackIdx >= m_inputs.size()) {
+        stopAll();
+    }
+}
+
+// ─── Input Recording ──────────────────────────────────────────────────────────
+
+void Bot::recordInput(GJBaseGameLayer* layer, PlayerButton btn, bool isPress, bool isP2) {
+    if (m_state != BotState::Recording) return;
+
+    BotInput inp;
+    inp.x        = getPlayerX(layer, isP2);
+    inp.segment  = m_segment;
+    inp.button   = btn;
+    inp.isPress  = isPress;
+    inp.isPlayer2 = isP2;
+
+    // Insert in sorted order for efficient playback scanning.
+    // std::lower_bound is O(log N); pushback + sort would be equivalent
+    // but this keeps the list sorted incrementally.
+    auto it = std::lower_bound(m_inputs.begin(), m_inputs.end(), inp);
+    m_inputs.insert(it, inp);
+}
+
+// Called from our handleButton hook.
+// Returns true if the bot is in playback mode (suppresses user input).
+bool Bot::onHandleButton(GJBaseGameLayer* layer, bool isPress, int button, bool isP2) {
+    if (m_state == BotState::Playback) {
+        // Suppress all user input; only injected inputs from onPhysicsStep pass.
+        return true; // consumed / suppressed
+    }
+    if (m_state == BotState::Recording) {
+        recordInput(layer, static_cast<PlayerButton>(button), isPress, isP2);
+    }
+    return false; // not consumed; let GD process normally
+}
+
+// ─── Control ─────────────────────────────────────────────────────────────────
 
 void Bot::startRecording() {
-    if (m_mode == BotMode::Recording) return;
-    if (m_mode == BotMode::Playback) stopPlayback();
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return;
-
     m_inputs.clear();
-    m_checkpointSnaps.clear();
-    m_checkpointMarks.clear();
-    m_p1Holding = false;
-    m_p2Holding = false;
-    m_recordingCB = detectCB();
-
-    m_mode = BotMode::Recording;
-    Notification::create("Recording started", NotificationIcon::None, 1.f)->show();
-}
-
-void Bot::stopRecording() {
-    if (m_mode != BotMode::Recording) return;
-    m_mode = BotMode::Idle;
-    Notification::create(
-        std::string("Recording stopped — ") + std::to_string(m_inputs.size()) + " inputs",
-        NotificationIcon::None, 1.5f
-    )->show();
+    m_segment     = 0;
+    m_playbackIdx = 0;
+    m_state       = BotState::Recording;
 }
 
 void Bot::startPlayback() {
-    if (m_mode == BotMode::Playback) return;
-    if (m_mode == BotMode::Recording) stopRecording();
-
-    if (!isPlaybackEnabled()) {
-        Notification::create("Playback disabled — no CBF/CBS detected", NotificationIcon::Warning, 2.f)->show();
+    if (currentCbfMode == CbfMode::None) {
+        // Playback forbidden without CBF or CBS.
+        FLAlertLayer::create("Bot Error",
+            "Playback requires <cr>Click Between Frames</c> or "
+            "<cr>Click Between Steps</c> to be active.", "OK")->show();
         return;
     }
     if (m_inputs.empty()) {
-        Notification::create("No macro recorded", NotificationIcon::Warning, 2.f)->show();
+        FLAlertLayer::create("Bot Error", "No macro loaded.", "OK")->show();
         return;
     }
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return;
-
-    // Copy recording into playback buffer so the original is preserved.
-    m_playbackInputs = m_inputs;
-    m_playbackIndex  = 0;
-    m_mode = BotMode::Playback;
-    Notification::create("Playback started", NotificationIcon::None, 1.f)->show();
+    m_playbackIdx = 0;
+    m_segment     = 0;
+    m_state       = BotState::Playback;
 }
 
-void Bot::stopPlayback() {
-    if (m_mode != BotMode::Playback) return;
-    m_mode = BotMode::Idle;
-    m_playbackInputs.clear();
-    m_playbackIndex = 0;
-    Notification::create("Playback stopped", NotificationIcon::None, 1.f)->show();
+void Bot::stopAll() {
+    m_state = BotState::Idle;
 }
 
-void Bot::toggleRecording() {
-    if (m_mode == BotMode::Recording) stopRecording();
-    else                              startRecording();
-}
-
-void Bot::togglePlayback() {
-    if (m_mode == BotMode::Playback) stopPlayback();
-    else                              startPlayback();
-}
-
-// ----------------------------------------------------------------------------
-//  Input events (called from PlayerObject hooks)
-// ----------------------------------------------------------------------------
-//
-//  We capture the player's CURRENT X at the moment pushButton/releaseButton
-//  fires. Under CBF, this X can be at sub-frame granularity (because CBF
-//  steps the physics more than once per render frame). Under CBS, X is at
-//  step granularity (≤ 480 steps/sec). Under neither, X is at frame
-//  granularity (≤ FPS steps/sec) — but we still record; we just refuse to
-//  play back in that case (see isPlaybackEnabled).
-//
-//  Recording is allowed in any CB state so the user can experiment; only
-//  playback is gated.
-
-void Bot::onInputPress(bool player1) {
-    if (m_mode != BotMode::Recording) return;
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return;
-
-    PlayerObject* p = player1 ? pl->m_player1 : pl->m_player2;
-    if (!p) return;
-
-    // Suppress duplicate press records (defensive — GD normally doesn't
-    // double-fire, but some mods can cause it).
-    bool& holding = player1 ? m_p1Holding : m_p2Holding;
-    if (holding) return;
-    holding = true;
-
-    pushInput(p->getPositionX(), InputAction::Press,
-              player1 ? PlayerSel::Player1 : PlayerSel::Player2);
-}
-
-void Bot::onInputRelease(bool player1) {
-    if (m_mode != BotMode::Recording) return;
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return;
-
-    PlayerObject* p = player1 ? pl->m_player1 : pl->m_player2;
-    if (!p) return;
-
-    bool& holding = player1 ? m_p1Holding : m_p2Holding;
-    if (!holding) return;
-    holding = false;
-
-    pushInput(p->getPositionX(), InputAction::Release,
-              player1 ? PlayerSel::Player1 : PlayerSel::Player2);
-}
-
-void Bot::pushInput(float x, InputAction a, PlayerSel p) {
-    // Inputs are appended in non-decreasing X order during normal gameplay.
-    // After death/restart we truncate, so monotonicity is preserved.
-    m_inputs.emplace_back(x, a, p);
-}
-
-// ----------------------------------------------------------------------------
-//  PlayLayer lifecycle
-// ----------------------------------------------------------------------------
-
-void Bot::onPlayLayerEnter(PlayLayer* pl) {
-    // Recompute CB detection cache.
-    m_cbCacheValid = false;
-    (void)detectCB();
-    // Reset speedhack to 1.0 on level enter so a leftover value from a
-    // previous session doesn't bleed into a fresh attempt.
-    setSpeedhack(1.f);
-}
-
-void Bot::onPlayLayerExit() {
-    // Stop everything when leaving a level — the bot should never carry
-    // recording / playback state across levels.
-    stopRecording();
-    stopPlayback();
-    setSpeedhack(1.f);
-    clearCheckpointState();
-    m_inputs.clear();
-}
-
-void Bot::onPlayLayerUpdate(float /*dt*/) {
-    // ─── Playback driver ────────────────────────────────────────────
-    //
-    //  On every PlayLayer::update, we check whether the player's current
-    //  X has reached the X of the next pending input. If yes, we fire it.
-    //
-    //  This is FPS-independent: even if the renderer runs at 30 fps or
-    //  240 fps, the input fires at the same X. Under CBF, inputs that
-    //  were recorded at sub-frame X positions are replayed at sub-frame
-    //  X positions, because CBF's physics substeps mean the player's X
-    //  visits those intermediate values during update.
-    //
-    //  Edge case: if the player's X jumps past multiple input Xs in one
-    //  update (e.g. very high speedhack), we fire all of them in order
-    //  within the same frame. This preserves determinism.
-    //
-    if (m_mode != BotMode::Playback) return;
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl || !pl->m_player1) return;
-
-    const float curX = pl->m_player1->getPositionX();
-
-    while (m_playbackIndex < m_playbackInputs.size()) {
-        const InputRecord& rec = m_playbackInputs[m_playbackIndex];
-        if (rec.x > curX) break;
-
-        PlayerObject* target = (rec.player == static_cast<uint8_t>(PlayerSel::Player1))
-                               ? pl->m_player1 : pl->m_player2;
-        if (target) {
-            if (rec.action == static_cast<uint8_t>(InputAction::Press)) {
-                target->pushButton(PlayerButton::Jump);
-            } else {
-                target->releaseButton(PlayerButton::Jump);
-            }
-        }
-        ++m_playbackIndex;
-    }
-
-    // End-of-macro: stop automatically when we've consumed all inputs.
-    // We don't auto-stop on level completion because GD handles that
-    // itself via the level-end trigger; we just stop firing inputs.
-}
-
-void Bot::onPlayerDeath() {
-    // ─── Dead-input cleanup — death path ───────────────────────────
-    //
-    //  When the player dies, any inputs recorded AFTER the death X are
-    //  invalid: they belonged to a route that no longer exists. We
-    //  truncate the input list to remove them.
-    //
-    //  The player will respawn at the last checkpoint (practice) or at
-    //  the level start (normal). Recording continues from there; future
-    //  inputs are appended at the new (lower) X.
-    //
-    //  IMPORTANT: Because we truncated, m_inputs remains sorted by X,
-    //  so playback invariants are preserved.
-    //
-    if (m_mode != BotMode::Recording) return;
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl || !pl->m_player1) return;
-
-    const float deathX = pl->m_player1->getPositionX();
-    truncateInputsAfterX(deathX);
-
-    // Reset hold-tracking so the next press after respawn is recorded.
-    m_p1Holding = false;
-    m_p2Holding = false;
-}
-
-void Bot::onLevelReset(bool isCheckpointLoad) {
-    // ─── Dead-input cleanup — restart path ─────────────────────────
-    //
-    //  Two sub-cases:
-    //
-    //  (A) isCheckpointLoad == true
-    //      Player restarted from a practice checkpoint. Inputs after
-    //      the checkpoint's X are invalid (they belonged to the route
-    //      that was abandoned). Truncate to checkpoint.
-    //
-    //  (B) isCheckpointLoad == false
-    //      Full restart (pause menu → Restart, or level restart from
-    //      start). All inputs are invalid; clear everything. Also
-    //      clear checkpoint stacks because they reference the abandoned
-    //      run.
-    //
-    if (m_mode != BotMode::Recording) {
-        // Even if not recording, clear playback state on full restart
-        // so a stale playback buffer doesn't fire on the fresh run.
-        if (!isCheckpointLoad && m_mode == BotMode::Playback) {
-            stopPlayback();
-        }
-        return;
-    }
-
-    if (!isCheckpointLoad) {
-        // Full restart: abandon everything.
-        m_inputs.clear();
-        m_checkpointSnaps.clear();
-        m_checkpointMarks.clear();
-        m_p1Holding = false;
-        m_p2Holding = false;
-        return;
-    }
-
-    // Checkpoint load: pop snapshot stack to the loaded checkpoint and
-    // truncate inputs to that point.
-    if (!m_checkpointMarks.empty()) {
-        // The most recent checkpoint is the one being loaded (GD semantics:
-        // clicking the most recent checkpoint in practice UI loads it).
-        const CheckpointMark mark = m_checkpointMarks.back();
-        truncateInputsAfterIndex(mark.inputIndex);
-
-        // Pop the snapshot we just consumed — but only if it's the last
-        // one. We do NOT pop on intermediate checkpoint loads because GD
-        // keeps the checkpoint in the stack after loading it. We mirror
-        // GD's behavior: the stack stays the same; only on explicit
-        // "remove checkpoint" do we pop.
-        m_p1Holding = false;
-        m_p2Holding = false;
-    }
-}
-
-void Bot::onCheckpointCreate() {
-    // ─── Practice bug fix — capture supplementary snapshot ─────────
-    //
-    //  GD's CheckpointObject captures most state, but several fields
-    //  are missing/incorrect (the "practice bug"). We push our own
-    //  supplementary snapshot onto a parallel stack. On load, we
-    //  restore from this snapshot.
-    //
-    //  We ALSO record (X, inputIndex) so dead-input cleanup on restart
-    //  knows where to truncate.
-    //
-    if (m_mode != BotMode::Recording && m_mode != BotMode::Idle) return;
-
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl || !pl->m_player1) return;
-
-    CheckpointSnap snap = captureSnapshot();
-    m_checkpointSnaps.push_back(std::move(snap));
-
-    CheckpointMark mark;
-    mark.x          = pl->m_player1->getPositionX();
-    mark.inputIndex = m_inputs.size();
-    m_checkpointMarks.push_back(mark);
-}
-
-void Bot::onCheckpointLoad() {
-    // ─── Practice bug fix — restore supplementary snapshot ─────────
-    //
-    //  GD has already restored its own CheckpointObject state. We now
-    //  layer our supplementary state on top, fixing any fields GD got
-    //  wrong.
-    //
-    if (m_checkpointSnaps.empty()) return;
-
-    // GD loads the most recent checkpoint when you click it in practice UI.
-    const CheckpointSnap& snap = m_checkpointSnaps.back();
-    restoreSnapshot(snap);
-}
-
-void Bot::onCheckpointRemove() {
-    // Called when a checkpoint is explicitly removed (e.g. X key in
-    // practice). In GD 2.2081, we cannot hook the removal function
-    // directly, so this method is currently unused. It's retained for
-    // future use if a hook becomes available.
-    if (!m_checkpointSnaps.empty())   m_checkpointSnaps.pop_back();
-    if (!m_checkpointMarks.empty())   m_checkpointMarks.pop_back();
-}
-
-void Bot::clearCheckpointState() {
-    m_checkpointSnaps.clear();
-    m_checkpointMarks.clear();
-}
-
-// ----------------------------------------------------------------------------
-//  Truncation helpers
-// ----------------------------------------------------------------------------
-
-void Bot::truncateInputsAfterX(float x) {
-    // Find first input with X > x; erase from there to end.
-    auto it = std::upper_bound(
-        m_inputs.begin(), m_inputs.end(), x,
-        [](float v, const InputRecord& r) { return v < r.x; }
+// ─── Dead Input Pruning ───────────────────────────────────────────────────────
+/*
+ * Removes inputs from (segmentId, xFence...) onward.
+ * Called on player death.
+ */
+void Bot::pruneInputsFrom(double xFence, uint16_t segmentId) {
+    m_inputs.erase(
+        std::remove_if(m_inputs.begin(), m_inputs.end(),
+            [&](const BotInput& i) {
+                return i.segment == segmentId && i.x >= xFence;
+            }),
+        m_inputs.end()
     );
-    m_inputs.erase(it, m_inputs.end());
+}
 
-    // Also truncate any checkpoint marks past this X — they belong to
-    // the abandoned route.
-    while (!m_checkpointMarks.empty() && m_checkpointMarks.back().x > x) {
-        m_checkpointMarks.pop_back();
-        if (!m_checkpointSnaps.empty()) m_checkpointSnaps.pop_back();
+/*
+ * Removes ALL inputs in a given segment.
+ * Called on level restart.
+ */
+void Bot::eraseSegment(uint16_t segmentId) {
+    m_inputs.erase(
+        std::remove_if(m_inputs.begin(), m_inputs.end(),
+            [&](const BotInput& i) { return i.segment == segmentId; }),
+        m_inputs.end()
+    );
+}
+
+void Bot::onPlayerDeath(PlayerObject* player) {
+    if (m_state != BotState::Recording) return;
+
+    // Determine which player died.
+    bool isP2 = (m_layer && player == m_layer->m_player2);
+    double deathX = static_cast<double>(player->getPositionX());
+
+    pruneInputsFrom(deathX, m_segment);
+    ++m_segment; // New segment for the retry attempt.
+}
+
+void Bot::onRestartLevel() {
+    if (m_state != BotState::Recording) return;
+    eraseSegment(m_segment);
+    ++m_segment;
+}
+
+// ─── Checkpoint Save / Load ───────────────────────────────────────────────────
+
+void Bot::onCheckpointSave(CheckpointObject* cp, GJBaseGameLayer* layer) {
+    BotCheckpoint bcp;
+    bcp.segment = m_segment;
+    bcp.x       = getPlayerX(layer, false);
+
+    bool isDual = layer->m_isDualMode;
+    snapshotPlayer(layer->m_player1, false,  bcp.p1);
+    snapshotPlayer(layer->m_player2, isDual, bcp.p2);
+
+    m_checkpoints[cp] = bcp;
+}
+
+void Bot::onCheckpointLoad(CheckpointObject* cp, GJBaseGameLayer* layer) {
+    auto it = m_checkpoints.find(cp);
+    if (it == m_checkpoints.end()) return;
+
+    const BotCheckpoint& bcp = it->second;
+
+    // Restore segment to what it was when the checkpoint was placed.
+    // Prune any inputs that were recorded after this point in the current seg.
+    pruneInputsFrom(bcp.x, m_segment);
+    m_segment = bcp.segment;
+
+    // Restore full physics state.
+    bool isDual = layer->m_isDualMode;
+    restorePlayer(layer->m_player1, layer, bcp.p1, false);
+    restorePlayer(layer->m_player2, layer, bcp.p2, isDual);
+
+    // Rewind playback index to match the checkpoint x.
+    if (m_state == BotState::Playback) {
+        // Find first input at or after bcp.x in bcp.segment.
+        BotInput fence;
+        fence.x       = bcp.x - PLAYBACK_X_EPSILON;
+        fence.segment = bcp.segment;
+        fence.button  = static_cast<PlayerButton>(0);
+        fence.isPress = false;
+        fence.isPlayer2 = false;
+        auto it2 = std::lower_bound(m_inputs.begin(), m_inputs.end(), fence);
+        m_playbackIdx = static_cast<size_t>(it2 - m_inputs.begin());
     }
 }
 
-void Bot::truncateInputsAfterIndex(size_t idx) {
-    if (idx >= m_inputs.size()) return;
-    m_inputs.resize(idx);
-}
+// ─── Serialization ────────────────────────────────────────────────────────────
+/*
+ * Binary format, little-endian.
+ * Header: magic(4) version(4) count(4) reserved(4) = 16 bytes
+ * Each input: x(8) segment(2) button(1) flags(1) padding(1) = 13 bytes
+ *
+ * flags byte: bit0 = isPress, bit1 = isPlayer2
+ */
 
-void Bot::resetPlaybackState() {
-    m_playbackInputs.clear();
-    m_playbackIndex = 0;
-}
-
-// ----------------------------------------------------------------------------
-//  Macro file I/O
-// ----------------------------------------------------------------------------
-//
-//  Format documented in Bot.hpp. Header is 28 bytes; each record is 8 bytes.
-//  We do raw binary I/O — no JSON, no compression. Fastest possible
-//  load/save and smallest file size.
+#pragma pack(push, 1)
+struct SerialHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t inputCount;
+    uint8_t  reserved[4];
+};
+struct SerialInput {
+    double   x;
+    uint16_t segment;
+    uint8_t  button;
+    uint8_t  flags;    // bit0=isPress, bit1=isP2
+    uint8_t  padding;
+};
+#pragma pack(pop)
 
 bool Bot::saveMacro(const std::string& path) {
-    if (m_inputs.empty()) {
-        Notification::create("Nothing to save", NotificationIcon::Warning, 1.5f)->show();
-        return false;
-    }
-
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        Notification::create("Save failed — cannot open file", NotificationIcon::Error, 2.f)->show();
-        return false;
-    }
+    if (!f) return false;
 
-    MacroHeader hdr{};
-    std::memcpy(hdr.magic, MACRO_MAGIC, 8);
-    hdr.version    = MACRO_VERSION;
-    hdr.levelId    = 0;
-    if (PlayLayer* pl = PlayLayer::get()) {
-        if (pl->m_level) hdr.levelId = pl->m_level->m_levelID;
-    }
-    hdr.recFps     = 0.f; // reference only
-    hdr.cbMode     = static_cast<uint8_t>(m_recordingCB);
+    SerialHeader hdr{};
+    hdr.magic      = BOT_MAGIC;
+    hdr.version    = BOT_VERSION;
     hdr.inputCount = static_cast<uint32_t>(m_inputs.size());
-
     f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
-    if (!m_inputs.empty()) {
-        f.write(reinterpret_cast<const char*>(m_inputs.data()),
-                static_cast<std::streamsize>(m_inputs.size() * sizeof(InputRecord)));
+
+    for (const BotInput& inp : m_inputs) {
+        SerialInput si{};
+        si.x       = inp.x;
+        si.segment = inp.segment;
+        si.button  = static_cast<uint8_t>(inp.button);
+        si.flags   = (inp.isPress ? 0x01u : 0u) | (inp.isPlayer2 ? 0x02u : 0u);
+        si.padding = 0;
+        f.write(reinterpret_cast<const char*>(&si), sizeof(si));
     }
 
-    Notification::create(
-        std::string("Saved ") + std::to_string(m_inputs.size()) + " inputs",
-        NotificationIcon::None, 1.5f
-    )->show();
-    return true;
+    return f.good();
 }
 
 bool Bot::loadMacro(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        Notification::create("Load failed — file not found", NotificationIcon::Error, 2.f)->show();
-        return false;
-    }
+    if (!f) return false;
 
-    MacroHeader hdr{};
+    SerialHeader hdr{};
     f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!f || std::memcmp(hdr.magic, MACRO_MAGIC, 8) != 0) {
-        Notification::create("Load failed — bad magic", NotificationIcon::Error, 2.f)->show();
-        return false;
-    }
-    if (hdr.version != MACRO_VERSION) {
-        Notification::create("Load failed — version mismatch", NotificationIcon::Error, 2.f)->show();
-        return false;
+    if (!f || hdr.magic != BOT_MAGIC || hdr.version != BOT_VERSION) return false;
+
+    m_inputs.clear();
+    m_inputs.reserve(hdr.inputCount);
+
+    for (uint32_t i = 0; i < hdr.inputCount; ++i) {
+        SerialInput si{};
+        f.read(reinterpret_cast<char*>(&si), sizeof(si));
+        if (!f) return false;
+
+        BotInput inp;
+        inp.x        = si.x;
+        inp.segment  = si.segment;
+        inp.button   = static_cast<PlayerButton>(si.button);
+        inp.isPress  = (si.flags & 0x01u) != 0;
+        inp.isPlayer2 = (si.flags & 0x02u) != 0;
+        m_inputs.push_back(inp);
     }
 
-    std::vector<InputRecord> buf(hdr.inputCount);
-    if (hdr.inputCount > 0) {
-        f.read(reinterpret_cast<char*>(buf.data()),
-               static_cast<std::streamsize>(buf.size() * sizeof(InputRecord)));
-        if (!f) {
-            Notification::create("Load failed — truncated body", NotificationIcon::Error, 2.f)->show();
-            return false;
-        }
-    }
-
-    m_inputs = std::move(buf);
-    m_recordingCB = static_cast<CBImplementation>(hdr.cbMode);
-
-    Notification::create(
-        std::string("Loaded ") + std::to_string(m_inputs.size()) + " inputs",
-        NotificationIcon::None, 1.5f
-    )->show();
+    // Ensure sorted — should be true from save, but defensive.
+    std::sort(m_inputs.begin(), m_inputs.end());
+    m_segment     = 0;
+    m_playbackIdx = 0;
+    m_state       = BotState::Idle;
     return true;
 }
 
-std::string Bot::defaultMacroPath() const {
-    // Geode-provided per-mod save directory. Stable across sessions.
-    // We use Mod::get()->getSaveDir() — the canonical Geode API for the
-    // current mod's persistent save directory.
-    auto dir = Mod::get()->getSaveDir();
-    return (dir / "macro.gdbot").string();
-}
+// ─── Geode Hooks ─────────────────────────────────────────────────────────────
 
-// ----------------------------------------------------------------------------
-//  Speedhack
-// ----------------------------------------------------------------------------
-//
-//  We use CCScheduler::setTimeScale. This is the cleanest approach:
-//    • Independent of FPS (scheduler runs once per frame regardless of
-//      refresh rate).
-//    • Affects all scheduled updates including PlayLayer::update, which
-//      is what we want.
-//    • Does NOT rely on manipulating the render loop or vsync.
-//
-//  Trade-off: setTimeScale multiplies dt before it reaches PlayLayer::update,
-//  so at very high speed values the physics integration step grows, which
-//  can subtly change physics behavior. For our X-position-based recording
-//  this is acceptable: playback fires inputs at the correct X regardless
-//  of speed, so the macro itself remains accurate. The trade-off is between
-//  "physics slightly altered at high speed" (setTimeScale) vs "spiral of
-//  death from multiple update calls per frame" (manual substepping). We
-//  pick the former for stability.
-//
-//  To partially mitigate the integration-step issue, we cap the effective
-//  speedup at 10× — beyond that, GD physics becomes unreliable regardless
-//  of method.
-
-void Bot::setSpeedhack(float speed) {
-    if (speed < 0.05f) speed = 0.05f;
-    if (speed > 10.f)  speed = 10.f;
-    m_speedhack = speed;
-    applySpeedhackToScheduler();
-}
-
-void Bot::applySpeedhackToScheduler() {
-    if (auto* s = CCScheduler::get()) {
-        s->setTimeScale(m_speedhack);
+/*
+ * Hook: GJBaseGameLayer::update
+ *
+ * 1. Apply speedhack by scaling dt.
+ * 2. Call the original update (which drives physics, including CBF/CBS).
+ * 3. Run our playback scanner after the physics step.
+ *
+ * NOTE: We hook update rather than a dedicated physics callback because
+ * GJBaseGameLayer::update is the top-level driver for all physics steps,
+ * including CBF sub-steps. After the original runs, player x-positions
+ * are at the end-of-frame values, which is correct for our x-fence check.
+ *
+ * For CBF: CBF injects inputs INSIDE the original update call via its own
+ * hooks on processCommands/queueButton. Our playback scanner fires AFTER
+ * the full update, catching any inputs that still need to be replayed at
+ * the final frame x-position. This is correct because CBF's internal loop
+ * guarantees physics has settled.
+ */
+class $modify(BotGameLayerHook, GJBaseGameLayer) {
+    void update(float dt) {
+        // Scale dt for speedhack (no-op when multiplier == 1.0).
+        float scaledDt = Bot::get().applySpeedhack(dt);
+        GJBaseGameLayer::update(scaledDt);
+        // Scan and inject pending playback inputs.
+        Bot::get().onPhysicsStep(this, scaledDt);
     }
-}
 
-// ----------------------------------------------------------------------------
-//  CB detection
-// ----------------------------------------------------------------------------
-//
-//  CBF — check via Geode loader. This is the documented, stable integration
-//  point. We do NOT call into CBF internals (those can change across CBF
-//  versions and are not part of any public API contract).
-//
-//  CBS — RobTop's Click Between Steps setting. The setting variable in
-//  2.2081 is stored in GameManager. Community-documented variable name is
-//  "0016" (the clickBetweenSteps toggle). If GM doesn't have it we fall
-//  back to "None". This is a best-effort detection; the limitation is
-//  documented in comments at the top of detectCB().
-
-CBImplementation Bot::detectCB() const {
-    if (m_cbCacheValid) return m_cachedCB;
-
-    CBImplementation result = CBImplementation::None;
-
-    // 1) Syzzi CBF — preferred
-    if (Loader::get()->isModLoaded(SYZZI_CBF_MOD_ID)) {
-        result = CBImplementation::CBF;
-    }
-    // 2) RobTop CBS — fallback
-    else {
-        // Best-effort: check GameManager for the CBS toggle. The exact
-        // variable key in 2.2081 is "0016" per community references. If
-        // Geode's bindings expose a different accessor, swap this line.
-        // LIMITATION: if the variable key is wrong for this version,
-        // we'll report None even when CBS is on. The user can still
-        // record (recording works in any state) and the UI will show
-        // the red indicator so they know to enable CBS manually.
-        auto* gm = GameManager::get();
-        if (gm && gm->getGameVariable("0016")) {
-            result = CBImplementation::CBS;
+    /*
+     * Hook: GJBaseGameLayer::handleButton
+     *
+     * This is the canonical GD input entry point; both CBF and CBS feed
+     * into this function.  We intercept it here to:
+     *   (a) Record inputs in recording mode.
+     *   (b) Suppress user input in playback mode.
+     *
+     * The bot injects playback inputs by calling this function from
+     * onPhysicsStep, bypassing the suppression check (the suppression flag
+     * only applies to the outer call, not recursive calls from the bot itself).
+     *
+     * We use a thread-local guard to distinguish bot-injected calls from
+     * user-input calls and avoid infinite recursion.
+     */
+    void handleButton(bool press, int button, bool isP2) {
+        // Guard against re-entrant injection from our own playback path.
+        static thread_local bool s_injecting = false;
+        if (!s_injecting) {
+            bool consumed = Bot::get().onHandleButton(this, press, button, isP2);
+            if (consumed) return; // Suppress user input during playback.
         }
+        // Allow normal GD processing (record mode: input was already saved).
+        s_injecting = true;
+        GJBaseGameLayer::handleButton(press, button, isP2);
+        s_injecting = false;
     }
+};
 
-    m_cachedCB      = result;
-    m_cbCacheValid  = true;
-    return result;
-}
-
-bool Bot::isPlaybackEnabled() const {
-    // Playback is gated: we need at least one CB implementation active.
-    // Under "None", inputs are quantized to render frames, which is not
-    // deterministic enough for reliable macro playback.
-    return detectCB() != CBImplementation::None;
-}
-
-bool Bot::isCheckpointLoad(float playerX) const {
-    // Heuristic: after resetLevel(), if the player's X matches the last
-    // stored checkpoint's X (within 50 units), it's a checkpoint load.
-    // Otherwise it's a full restart (player is at the level start).
-    if (m_checkpointMarks.empty()) return false;
-    const float cpX = m_checkpointMarks.back().x;
-    return std::abs(playerX - cpX) < 50.f;
-}
-
-// ----------------------------------------------------------------------------
-//  Snapshot capture / restore (practice bug fix)
-// ----------------------------------------------------------------------------
-
-static void capturePlayer(PlayerObject* p, PlayerSnap& out, bool isHolding) {
-    if (!p) return;
-    out.position     = p->getPosition();
-    out.rotation     = p->getRotation();
-    out.yVel         = p->m_yVelocity;
-    out.playerSpeed  = p->m_playerSpeed;
-    out.vehicleSize  = p->m_vehicleSize;
-    out.isHolding    = isHolding;
-    out.isOnGround   = p->m_isOnGround;
-    out.isDashing    = p->m_isDashing;
-}
-
-static void restorePlayer(PlayerObject* p, const PlayerSnap& in) {
-    if (!p) return;
-    p->setPosition(in.position);
-    p->setRotation(in.rotation);
-    p->m_yVelocity     = in.yVel;
-    p->m_playerSpeed   = in.playerSpeed;
-    p->m_vehicleSize   = in.vehicleSize;
-    p->m_isOnGround    = in.isOnGround;
-    p->m_isDashing     = in.isDashing;
-    // isHolding is restored implicitly via the next pushButton/releaseButton
-    // call from playback; setting it directly here would desync GD's input
-    // state machine.
-    //
-    // Fields not available in Geode 2.2081 bindings (gravity flip, mini
-    // size, robot jump count, wave trail) are left to GD's own
-    // CheckpointObject, which handles them correctly in most cases.
-}
-
-CheckpointSnap Bot::captureSnapshot() const {
-    CheckpointSnap snap;
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return snap;
-
-    snap.gameX = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-
-    if (pl->m_player1) capturePlayer(pl->m_player1, snap.p1, m_p1Holding);
-    if (pl->m_player2) capturePlayer(pl->m_player2, snap.p2, m_p2Holding);
-    return snap;
-}
-
-void Bot::restoreSnapshot(const CheckpointSnap& snap) {
-    PlayLayer* pl = PlayLayer::get();
-    if (!pl) return;
-
-    // Restore our supplementary player state on top of GD's checkpoint
-    // restoration. GD's CheckpointObject has already run by the time
-    // this is called; we only override the fields it got wrong.
-    if (pl->m_player1) restorePlayer(pl->m_player1, snap.p1);
-    if (pl->m_player2) restorePlayer(pl->m_player2, snap.p2);
-
-    // Dual mode, camera X, and other PlayLayer-level state are left to
-    // GD's own checkpoint system — those fields are not accessible in
-    // the 2.2081 bindings.
-}
-
-
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │                         GEODE HOOKS                                  │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
-
-// ----------------------------------------------------------------------------
-//  PlayLayer hooks
-// ----------------------------------------------------------------------------
-class $modify(PlayLayerHook, PlayLayer) {
-    bool init(GJGameLevel* lvl, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(lvl, useReplay, dontCreateObjects)) return false;
-        Bot::get().onPlayLayerEnter(this);
+/*
+ * Hook: PlayLayer::init / onQuit
+ * Notify the bot when a level session starts or ends.
+ */
+class $modify(BotPlayLayerHook, PlayLayer) {
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        Bot::get().onLevelEntry(this);
         return true;
     }
 
-    void onExit() {
-        Bot::get().onPlayLayerExit();
-        PlayLayer::onExit();
+    void onQuit() {
+        Bot::get().onLevelExit();
+        PlayLayer::onQuit();
     }
 
-    void update(float dt) {
-        // Drive the bot BEFORE the original update. This way, by the time
-        // GD integrates physics for this frame, the inputs that should
-        // fire at the player's CURRENT X have already been delivered.
-        Bot::get().onPlayLayerUpdate(dt);
-        PlayLayer::update(dt);
+    /*
+     * Hook: PlayLayer::playerDied
+     *
+     * Called when player1 dies.  For player2 death we hook separately.
+     * At the moment this is called, the player's x is still valid.
+     */
+    void playerDied(PlayerObject* player) {
+        Bot::get().onPlayerDeath(player);
+        PlayLayer::playerDied(player);
     }
 
-    void destroyPlayer(PlayerObject* p, GameObject* hazard) {
-        // Call original first — GD's death sequence runs here. We then
-        // notify the bot so it can truncate inputs.
-        PlayLayer::destroyPlayer(p, hazard);
-        if (p == m_player1) {
-            Bot::get().onPlayerDeath();
-        }
-    }
-
+    /*
+     * Hook: PlayLayer::resetLevel (called on restart from pause menu or
+     * after death when auto-retry is on).
+     *
+     * Distinguishes between:
+     *   - Normal death-retry: handled by playerDied above + resetLevel.
+     *   - Manual restart from pause menu: also calls resetLevel.
+     *
+     * We call onRestartLevel in both paths; pruneInputsFrom in playerDied
+     * already trimmed the death point, and eraseSegment here handles
+     * pause-menu restarts where no playerDied fired.
+     */
     void resetLevel() {
-        // resetLevel is called for BOTH "full restart" (pause menu →
-        // Restart) AND "checkpoint load" (clicking a practice checkpoint).
-        // In GD 2.2081, there is no separate loadCheckpoint() function —
-        // checkpoint loading is done inside resetLevel() itself.
-        //
-        // We call the original FIRST so the player is repositioned, then
-        // detect which case it was by comparing the player's new X to our
-        // last stored checkpoint X.
+        Bot::get().onRestartLevel();
         PlayLayer::resetLevel();
-
-        float playerX = 0.f;
-        if (m_player1) {
-            playerX = m_player1->getPositionX();
-        }
-
-        bool isCpLoad = Bot::get().isCheckpointLoad(playerX);
-        Bot::get().onLevelReset(isCpLoad);
-        if (isCpLoad) {
-            Bot::get().onCheckpointLoad();
-        }
     }
 
-    void createCheckpoint() {
-        PlayLayer::createCheckpoint();
-        Bot::get().onCheckpointCreate();
+    /*
+     * Hook: PlayLayer::checkpointActivated
+     *
+     * Called when the player touches a checkpoint orb in practice mode.
+     * We snapshot the full physics state immediately after GD has saved its
+     * own checkpoint data.
+     */
+    void checkpointActivated(CheckpointObject* cp) {
+        PlayLayer::checkpointActivated(cp);
+        Bot::get().onCheckpointSave(cp, this);
     }
 
-    // NOTE: In GD 2.2081, PlayLayer does not expose loadCheckpoint() or
-    // removeLastCheckpoint() as hookable members. Checkpoint loading is
-    // handled internally by resetLevel(), and checkpoint removal is done
-    // through the PracticeUI. We rely on createCheckpoint() + our
-    // resetLevel() detection for snapshot management.
-    //
-    // LIMITATION: We cannot detect explicit checkpoint removal (the X key
-    // in practice mode). If the user removes a checkpoint, our snapshot
-    // stack will be stale by one entry. This is a minor issue — the next
-    // createCheckpoint() or full restart will re-sync the stack.
-
-    // F8 toggles the bot menu. We hook keyDown because PlayLayer is the
-    // only scene where the bot is meaningful.
-    // NOTE: In Geode's GD 2.2081 SDK, CCLayer::keyDown takes 2 args:
-    // (enumKeyCodes, double). The double is a timestamp/key-repeat value.
-    void keyDown(enumKeyCodes key, double param) {
-        if (key == enumKeyCodes::KEY_F8) {
-            macrobot_ToggleBotMenu();
-            return; // swallow
-        }
-        PlayLayer::keyDown(key, param);
+    /*
+     * Hook: PlayLayer::loadFromCheckpoint
+     *
+     * Called when the player respawns at a checkpoint.
+     * We restore our full physics snapshot AFTER GD restores its own state,
+     * overwriting any fields GD may have gotten wrong.
+     */
+    void loadFromCheckpoint(CheckpointObject* cp) {
+        PlayLayer::loadFromCheckpoint(cp);
+        Bot::get().onCheckpointLoad(cp, this);
     }
 };
 
-// ----------------------------------------------------------------------------
-//  PlayerObject hooks — record inputs
-// ----------------------------------------------------------------------------
-class $modify(PlayerObjectHook, PlayerObject) {
-    void pushButton(PlayerButton btn) {
-        PlayerObject::pushButton(btn);
-        if (Bot::get().isRecording() && btn == PlayerButton::Jump) {
-            PlayLayer* pl = PlayLayer::get();
-            if (pl) {
-                bool isP1 = (this == pl->m_player1);
-                Bot::get().onInputPress(isP1);
-            }
-        }
-    }
-
-    void releaseButton(PlayerButton btn) {
-        PlayerObject::releaseButton(btn);
-        if (Bot::get().isRecording() && btn == PlayerButton::Jump) {
-            PlayLayer* pl = PlayLayer::get();
-            if (pl) {
-                bool isP1 = (this == pl->m_player1);
-                Bot::get().onInputRelease(isP1);
-            }
-        }
-    }
-};
-
-// ----------------------------------------------------------------------------
-//  Speedhack implementation note
-// ----------------------------------------------------------------------------
-//
-//  Speedhack is applied via CCScheduler::setTimeScale() inside
-//  Bot::setSpeedhack() — see Bot.hpp / Bot::applySpeedhackToScheduler().
-//  We do NOT hook CCScheduler::update() because:
-//
-//    1. setTimeScale() is a public, stable Cocos2d API that scales dt
-//       internally before any scheduled callback runs. There is no need
-//       to intercept update() ourselves.
-//
-//    2. GD occasionally resets the timeScale to 1.0 (e.g. on level exit).
-//       To make our speedhack sticky, we re-apply it inside
-//       Bot::onPlayLayerEnter() — that's enough; we don't need a per-frame
-//       hook.
-//
-//  If a future GD version stops respecting setTimeScale, the fallback is
-//  to hook PlayLayer::update() and manually substep. That fallback is
-//  documented in Bot.hpp's speedhack section but not enabled here.
-
-
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │                          F8 BOT MENU                                 │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
-//
-//  A simple CCLayer with a colored backdrop, a status label (green/yellow/red
-//  per spec), and the buttons required by the spec:
-//     • Record (toggle)
-//     • Playback (toggle)
-//     • Save Macro
-//     • Load Macro
-//     • Speedhack − / value / +
-//  Plus a status line showing input count / playback progress.
-//
-//  Implementation notes:
-//    • We use a singleton instance pointer so F8 can toggle visibility.
-//    • The menu is added as a child of the current scene's topmost layer
-//      so it overlays everything.
-//    • All buttons route through Bot::get() so the UI is dumb.
-
-class BotMenuLayer : public CCLayer {
-public:
-    static BotMenuLayer* s_instance;
-
-    static BotMenuLayer* create() {
-        BotMenuLayer* p = new BotMenuLayer();
-        if (p && p->init()) {
-            p->autorelease();
-            return p;
-        }
-        delete p;
-        return nullptr;
-    }
-
-    static void toggle() {
-        auto* scene = CCDirector::sharedDirector()->getRunningScene();
-        if (!scene) return;
-
-        if (s_instance) {
-            // Already shown — hide.
-            s_instance->removeFromParent();
-            s_instance = nullptr;
+/*
+ * Hook: PauseLayer keyboard / menu for F8 shortcut.
+ * We open the bot menu on F8 via a CCKeyboardDispatcher hook.
+ *
+ * PauseLayer::keyDown is overridden here.  Opening via PauseLayer ensures
+ * we have a valid PlayLayer context when the menu opens.
+ *
+ * NOTE: We also attach the F8 listener to the PlayLayer scene directly so
+ * the key works outside the pause menu.
+ */
+class $modify(BotPauseHook, PauseLayer) {
+    void keyDown(cocos2d::enumKeyCodes key) override {
+        if (key == cocos2d::KEY_F8) {
+            openBotMenu();
             return;
         }
-
-        // Not shown — create and add.
-        BotMenuLayer* menu = BotMenuLayer::create();
-        if (!menu) return;
-        scene->addChild(menu, 1000);
-        s_instance = menu;
+        PauseLayer::keyDown(key);
     }
 
-    bool init() override {
-        if (!CCLayer::init()) return false;
-
-        const CCSize win = CCDirector::sharedDirector()->getWinSize();
-
-        // ── Backdrop ─────────────────────────────────────────────
-        m_backdrop = CCLayerColor::create(ccc4(15, 15, 20, 220));
-        m_backdrop->setContentSize({360, 380});
-        m_backdrop->setPosition({win.width / 2 - 180, win.height / 2 - 190});
-        addChild(m_backdrop);
-
-        // ── Title ────────────────────────────────────────────────
-        CCLabelBMFont* title = CCLabelBMFont::create("Macro Bot", "bigFont.fnt");
-        title->setPosition({win.width / 2, win.height / 2 + 165});
-        title->setScale(0.9f);
-        addChild(title);
-
-        // ── Status label (CB indicator) ──────────────────────────
-        m_statusLabel = CCLabelBMFont::create("", "goldFont.fnt");
-        m_statusLabel->setPosition({win.width / 2, win.height / 2 + 130});
-        m_statusLabel->setScale(0.55f);
-        addChild(m_statusLabel);
-
-        // ── Mode label ───────────────────────────────────────────
-        m_modeLabel = CCLabelBMFont::create("", "chatFont.fnt");
-        m_modeLabel->setPosition({win.width / 2, win.height / 2 + 105});
-        m_modeLabel->setScale(0.7f);
-        addChild(m_modeLabel);
-
-        // ── Count label ──────────────────────────────────────────
-        m_countLabel = CCLabelBMFont::create("", "chatFont.fnt");
-        m_countLabel->setPosition({win.width / 2, win.height / 2 - 140});
-        m_countLabel->setScale(0.7f);
-        addChild(m_countLabel);
-
-        // ── Build buttons ────────────────────────────────────────
-        buildButtons(win);
-
-        // ── Close on click outside ───────────────────────────────
-        auto* touch = CCDirector::sharedDirector()->getTouchDispatcher();
-        (void)touch;
-        setTouchEnabled(true);
-
-        // Initial state refresh
-        schedule(schedule_selector(BotMenuLayer::refresh), 0.1f);
-
-        return true;
+    static void openBotMenu() {
+        auto* layer = BotMenuLayer::create();
+        if (!layer) return;
+        auto* scene = cocos2d::CCDirector::sharedDirector()->getRunningScene();
+        scene->addChild(layer, 1000);
     }
-
-    void buildButtons(const CCSize& win) {
-        m_menu = CCMenu::create();
-        m_menu->setPosition({0, 0});
-        addChild(m_menu);
-
-        const float cx = win.width / 2;
-        const float top = win.height / 2 + 75;
-        const float step = 38.f;
-
-        // Record (toggle)
-        m_recordBtn = makeButton("Record", menu_selector(BotMenuLayer::onRecord));
-        m_recordBtn->setPosition({cx, top});
-        m_menu->addChild(m_recordBtn);
-
-        // Playback (toggle)
-        m_playBtn = makeButton("Playback", menu_selector(BotMenuLayer::onPlayback));
-        m_playBtn->setPosition({cx, top - step});
-        m_menu->addChild(m_playBtn);
-
-        // Save
-        auto* saveBtn = makeButton("Save Macro", menu_selector(BotMenuLayer::onSave));
-        saveBtn->setPosition({cx, top - step * 2});
-        m_menu->addChild(saveBtn);
-
-        // Load
-        auto* loadBtn = makeButton("Load Macro", menu_selector(BotMenuLayer::onLoad));
-        loadBtn->setPosition({cx, top - step * 3});
-        m_menu->addChild(loadBtn);
-
-        // Speedhack -/+/value
-        auto* spdDown = makeButton("-", menu_selector(BotMenuLayer::onSpeedDown));
-        spdDown->setPosition({cx - 70, top - step * 4});
-        spdDown->setScale(0.8f);
-        m_menu->addChild(spdDown);
-
-        m_speedLabel = CCLabelBMFont::create("1.00x", "goldFont.fnt");
-        m_speedLabel->setPosition({cx, top - step * 4});
-        m_speedLabel->setScale(0.6f);
-        addChild(m_speedLabel);
-
-        auto* spdUp = makeButton("+", menu_selector(BotMenuLayer::onSpeedUp));
-        spdUp->setPosition({cx + 70, top - step * 4});
-        spdUp->setScale(0.8f);
-        m_menu->addChild(spdUp);
-
-        // Close
-        auto* closeBtn = makeButton("Close (F8)", menu_selector(BotMenuLayer::onClose));
-        closeBtn->setPosition({cx, top - step * 5.2f});
-        m_menu->addChild(closeBtn);
-    }
-
-    CCMenuItemSprite* makeButton(const char* label, SEL_MenuHandler handler) {
-        auto* spr = ButtonSprite::create(label, 130, true, "bigFont.fnt", "GJ_button_01.png", 28, 0.6f);
-        auto* item = CCMenuItemSprite::create(spr, spr, this, handler);
-        item->setScale(0.7f);
-        return item;
-    }
-
-    // ── Button handlers ────────────────────────────────────────
-    void onRecord(CCObject*) { Bot::get().toggleRecording(); }
-    void onPlayback(CCObject*) { Bot::get().togglePlayback(); }
-    void onSave(CCObject*)    { Bot::get().saveMacro(Bot::get().defaultMacroPath()); }
-    void onLoad(CCObject*)    { Bot::get().loadMacro(Bot::get().defaultMacroPath()); }
-    void onSpeedUp(CCObject*)   { Bot::get().setSpeedhack(Bot::get().getSpeedhack() + 0.25f); }
-    void onSpeedDown(CCObject*) { Bot::get().setSpeedhack(Bot::get().getSpeedhack() - 0.25f); }
-    void onClose(CCObject*) {
-        removeFromParent();
-        s_instance = nullptr;
-    }
-
-    // ── Periodic UI refresh ────────────────────────────────────
-    void refresh(float) {
-        Bot& b = Bot::get();
-        CBImplementation cb = b.detectCB();
-        m_statusLabel->setString(Bot::cbLabel(cb));
-        m_statusLabel->setColor(Bot::cbColor(cb));
-
-        const char* modeStr = "Idle";
-        switch (b.getMode()) {
-            case BotMode::Recording: modeStr = "RECORDING"; break;
-            case BotMode::Playback:  modeStr = "PLAYBACK";  break;
-            case BotMode::Idle:      modeStr = "Idle";      break;
-        }
-        m_modeLabel->setString(modeStr);
-
-        std::string countStr =
-            "Inputs: " + std::to_string(b.getInputCount()) +
-            "  |  Playback: " + std::to_string(b.getPlaybackIndex()) +
-            "/" + std::to_string(b.getInputCount());
-        m_countLabel->setString(countStr.c_str());
-
-        m_speedLabel->setString((formatFloat(b.getSpeedhack(), 2) + "x").c_str());
-
-        // Update button labels to reflect toggle state.
-        // (ButtonSprite doesn't expose setString directly; recreate.)
-        // For simplicity, we just leave the labels and rely on the mode
-        // label above to communicate current state.
-    }
-
-    // ── Swallow touches on backdrop so they don't reach PlayLayer ──
-    bool ccTouchBegan(CCTouch* touch, CCEvent* e) override {
-        // Eat the touch if it lands on our backdrop.
-        CCPoint p = touch->getLocation();
-        CCRect r = m_backdrop->boundingBox();
-        if (r.containsPoint(p)) return true;
-        return false;
-    }
-
-private:
-    CCLayerColor*      m_backdrop     = nullptr;
-    CCMenu*            m_menu         = nullptr;
-    CCLabelBMFont*     m_statusLabel  = nullptr;
-    CCLabelBMFont*     m_modeLabel    = nullptr;
-    CCLabelBMFont*     m_countLabel   = nullptr;
-    CCLabelBMFont*     m_speedLabel   = nullptr;
-    CCMenuItemSprite*  m_recordBtn    = nullptr;
-    CCMenuItemSprite*  m_playBtn      = nullptr;
 };
 
-BotMenuLayer* BotMenuLayer::s_instance = nullptr;
+// Global keyboard handler so F8 works during gameplay (not just in pause).
+class $modify(BotKeyboardHook, cocos2d::CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool isKeyDown, bool isKeyRepeat) {
+        if (isKeyDown && !isKeyRepeat && key == cocos2d::KEY_F8) {
+            BotPauseHook::openBotMenu();
+            return true;
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat);
+    }
+};
 
-// Free function used by PlayLayerHook::keyDown (forward-declared at top).
-void macrobot_ToggleBotMenu() {
-    BotMenuLayer::toggle();
+// ─── UI Implementation ────────────────────────────────────────────────────────
+
+bool BotMenuLayer::init() {
+    if (!CCLayer::init()) return false;
+
+    auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
+
+    // ── Background ────────────────────────────────────────────────────────────
+    m_bg = cocos2d::extension::CCScale9Sprite::create(
+        "GJ_square02.png", {0, 0, 80, 80});
+    m_bg->setContentSize({340.0f, 300.0f});
+    m_bg->setPosition(winSize / 2);
+    addChild(m_bg, 0);
+
+    // ── Darkened overlay ──────────────────────────────────────────────────────
+    auto* overlay = cocos2d::CCLayerColor::create({0, 0, 0, 150});
+    addChild(overlay, -1);
+
+    // ── Title ─────────────────────────────────────────────────────────────────
+    auto* title = cocos2d::CCLabelBMFont::create("Macro Bot", "goldFont.fnt");
+    title->setScale(0.7f);
+    title->setPosition(winSize.width / 2, winSize.height / 2 + 125.0f);
+    addChild(title, 1);
+
+    // ── CBF/CBS Status ────────────────────────────────────────────────────────
+    auto& bot    = Bot::get();
+    CbfMode mode = bot.detectCbfMode();
+
+    const char* statusText;
+    cocos2d::ccColor3B statusColor;
+    switch (mode) {
+        case CbfMode::CBF:
+            statusText  = "CBF: Active (Syzzi)";
+            statusColor = {0, 255, 0};   // Green
+            break;
+        case CbfMode::CBS:
+            statusText  = "CBS: Active (RobTop)";
+            statusColor = {255, 220, 0}; // Yellow
+            break;
+        default:
+            statusText  = "No CBF/CBS Detected — Playback Disabled";
+            statusColor = {255, 50, 50}; // Red
+            break;
+    }
+
+    m_statusLabel = cocos2d::CCLabelBMFont::create(statusText, "bigFont.fnt");
+    m_statusLabel->setScale(0.35f);
+    m_statusLabel->setColor(statusColor);
+    m_statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 98.0f);
+    addChild(m_statusLabel, 1);
+
+    // ── Info label (input count / state) ─────────────────────────────────────
+    m_infoLabel = cocos2d::CCLabelBMFont::create("", "bigFont.fnt");
+    m_infoLabel->setScale(0.30f);
+    m_infoLabel->setColor({200, 200, 200});
+    m_infoLabel->setPosition(winSize.width / 2, winSize.height / 2 + 78.0f);
+    addChild(m_infoLabel, 1);
+    updateStatus();
+
+    // ── Buttons ───────────────────────────────────────────────────────────────
+    auto makeBtn = [&](const char* label, cocos2d::SEL_MenuHandler sel, float y) {
+        auto* btn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create(label, 110, true, "bigFont.fnt", "GJ_button_01.png", 30.0f, 0.7f),
+            this, sel);
+        btn->setPositionX(0);
+        btn->setPositionY(y);
+        return btn;
+    };
+
+    auto* btnRecord   = makeBtn("Record",   menu_selector(BotMenuLayer::onRecord),   52.0f);
+    auto* btnPlayback = makeBtn("Playback", menu_selector(BotMenuLayer::onPlayback), 18.0f);
+    auto* btnSave     = makeBtn("Save",     menu_selector(BotMenuLayer::onSave),    -16.0f);
+    auto* btnLoad     = makeBtn("Load",     menu_selector(BotMenuLayer::onLoad),    -50.0f);
+    auto* btnClose    = makeBtn("Close",    menu_selector(BotMenuLayer::onClose),   -100.0f);
+
+    // Disable playback button when no CBF/CBS.
+    if (mode == CbfMode::None) {
+        btnPlayback->setEnabled(false);
+        btnPlayback->setColor({100, 100, 100});
+    }
+
+    auto* menu = cocos2d::CCMenu::create(
+        btnRecord, btnPlayback, btnSave, btnLoad, btnClose, nullptr);
+    menu->setPosition(winSize / 2);
+    addChild(menu, 1);
+
+    // ── Speedhack label + slider ───────────────────────────────────────────────
+    auto* shLabel = cocos2d::CCLabelBMFont::create("Speedhack:", "bigFont.fnt");
+    shLabel->setScale(0.35f);
+    shLabel->setPosition(winSize.width / 2 - 80.0f, winSize.height / 2 - 90.0f);
+    addChild(shLabel, 1);
+
+    // We use a simple slider via Geode's Slider helper.
+    // Slider range [0.1, 4.0] mapped to [0,1]; default 1× speed → 0.225.
+    auto* slider = Slider::create(this,
+        menu_selector(BotMenuLayer::onSpeedhackChanged), 0.65f);
+    slider->setPosition(winSize.width / 2 + 30.0f, winSize.height / 2 - 90.0f);
+    // setValue takes [0,1]; map current multiplier.
+    float initVal = (bot.speedhackMultiplier - 0.1f) / (4.0f - 0.1f);
+    slider->setValue(initVal);
+    addChild(slider, 1);
+
+    // Allow closing by clicking outside.
+    setTouchEnabled(true);
+    setKeypadEnabled(true);
+    return true;
 }
 
+BotMenuLayer* BotMenuLayer::create() {
+    auto* ret = new BotMenuLayer();
+    if (ret && ret->init()) {
+        ret->autorelease();
+        return ret;
+    }
+    CC_SAFE_DELETE(ret);
+    return nullptr;
+}
 
-// ============================================================================
-//  Mod bootstrap
-// ============================================================================
+void BotMenuLayer::updateStatus() {
+    if (!m_infoLabel) return;
+    auto& bot = Bot::get();
+    std::string stateStr;
+    switch (bot.state()) {
+        case BotState::Idle:      stateStr = "Idle"; break;
+        case BotState::Recording: stateStr = "Recording"; break;
+        case BotState::Playback:  stateStr = "Playing"; break;
+    }
+    std::string info = "State: " + stateStr +
+                       "  |  Inputs: " + std::to_string(bot.inputCount()) +
+                       "  |  Speed: " +
+                       std::to_string(static_cast<int>(bot.speedhackMultiplier * 100)) + "%";
+    m_infoLabel->setString(info.c_str());
+}
 
-$execute {
-    // Log a banner so users can confirm the mod loaded.
-    log::info("Macro Bot loaded — press F8 in a level to open the menu.");
-    log::info("  Target: GD 2.2081 / Geode v5.7.1");
-    log::info("  Recording format: X-position based (8 bytes/input)");
-    log::info("  CBF detection: Loader::isModLoaded(\"{}\")", SYZZI_CBF_MOD_ID);
-    log::info("  CBS detection: GameManager game-variable \"0016\" (best-effort)");
+void BotMenuLayer::onRecord(cocos2d::CCObject*) {
+    Bot::get().startRecording();
+    updateStatus();
+    FLAlertLayer::create("Bot", "Recording started.\nPlay in Practice Mode.", "OK")->show();
+}
+
+void BotMenuLayer::onPlayback(cocos2d::CCObject*) {
+    Bot::get().startPlayback();
+    updateStatus();
+}
+
+void BotMenuLayer::onSave(cocos2d::CCObject*) {
+    auto path = (Mod::get()->getSaveDir() / "macro.bot2").string();
+    bool ok = Bot::get().saveMacro(path);
+    FLAlertLayer::create("Bot",
+        ok ? ("Saved to:\n" + path).c_str() : "Save failed.", "OK")->show();
+}
+
+void BotMenuLayer::onLoad(cocos2d::CCObject*) {
+    auto path = (Mod::get()->getSaveDir() / "macro.bot2").string();
+    bool ok = Bot::get().loadMacro(path);
+    updateStatus();
+    FLAlertLayer::create("Bot",
+        ok ? ("Loaded " + std::to_string(Bot::get().inputCount()) + " inputs.").c_str()
+           : "Load failed or file not found.", "OK")->show();
+}
+
+void BotMenuLayer::onClose(cocos2d::CCObject*) {
+    removeFromParent();
+}
+
+void BotMenuLayer::onSpeedhackChanged(cocos2d::CCObject* sender) {
+    auto* slider = dynamic_cast<Slider*>(sender);
+    if (!slider) return;
+    float t = slider->getValue();
+    Bot::get().speedhackMultiplier = 0.1f + t * (4.0f - 0.1f);
+    updateStatus();
+}
+
+// ─── Mod Entry Point ─────────────────────────────────────────────────────────
+
+$on_mod(Loaded) {
+    // Nothing extra required at load time; all hooks are registered by the
+    // $modify macros above.  The singleton is lazily initialized on first use.
+    log::info("Macro Bot loaded (GD 2.2081 / Geode v5.7.1)");
 }

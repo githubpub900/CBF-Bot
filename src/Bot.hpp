@@ -1,384 +1,362 @@
-// ============================================================================
-//  GD Macro Bot — Bot.hpp
-//  Target : Geometry Dash 2.2081
-//  Geode  : v5.7.1
-//
-//  This header is the entire bot core: data structures + Bot singleton.
-//  Hooks, UI, F8 menu, and Bot method implementations live in main.cpp.
-//
-//  ┌─ Why two files? ──────────────────────────────────────────────────────┐
-//  │  Bot.hpp  — pure data structures + Bot class declaration.             │
-//  │  main.cpp — Geode $modify hooks, Cocos2d UI, Bot method bodies.       │
-//  └───────────────────────────────────────────────────────────────────────┘
-// ============================================================================
-
 #pragma once
 
+/*
+ * Bot.hpp — Practice-to-Normal Macro Bot
+ * Target: Geometry Dash 2.2081 + Geode v5.7.1
+ *
+ * ============================================================
+ * RECORDING FORMAT: X-POSITION BASED
+ * ============================================================
+ *
+ * We store every input as (xPosition, playerButton, isPress, player2).
+ * xPosition comes from PlayerObject::m_position.x at the exact moment
+ * the input is processed inside the physics step — NOT at render time.
+ *
+ * WHY X-POSITION INSTEAD OF FRAMES OR TIMESTAMPS?
+ *
+ *  1. DETERMINISM: GD physics is deterministic given the same x-position.
+ *     Two runs with identical x-position inputs always produce identical
+ *     physics outcomes, regardless of FPS, speedhack, or CBF sub-stepping.
+ *
+ *  2. CBF/CBS COMPATIBILITY: Both Syzzi CBF and RobTop CBS inject inputs
+ *     inside the physics substep. x-position is the only quantity that is
+ *     monotonically increasing AND available at sub-frame precision inside
+ *     those physics steps. Frame index is meaningless for CBF because CBF
+ *     can insert many physics steps per rendered frame.
+ *
+ *  3. SPEEDHACK INVARIANCE: Speedhack changes how quickly x advances per
+ *     real second, but inputs stored by x-position replay identically at
+ *     any speed. Frame-based or time-based formats would need conversion.
+ *
+ *  4. SMALL FILE SIZE: We only store one record per click/release — file
+ *     size scales with CPS, not run length. A 5-minute run at 20 CPS is
+ *     ~6000 records × 9 bytes = ~54 KB uncompressed.
+ *
+ *  5. HIGH-CPS SUPPORT: No quantization; inputs recorded between frames
+ *     from CBF sub-steps have distinct x-positions and replay perfectly.
+ *
+ * LIMITATION: x-position wraps in some auto-scroll segments and multi-
+ * stage levels. We handle this by also storing a "segment ID" counter
+ * that increments on each level restart / checkpoint restore, making the
+ * (segmentId, x) tuple globally unique within a recording session.
+ *
+ * ============================================================
+ * CBF vs CBS INTEGRATION
+ * ============================================================
+ *
+ * Syzzi Click Between Frames (syzzi.click_between_frames):
+ *   - Hooks GJBaseGameLayer::processCommands or equivalent to call
+ *     GJBaseGameLayer::handleButton at arbitrary sub-frame positions.
+ *   - We detect CBF by checking Loader::get()->isModLoaded("syzzi.click_between_frames").
+ *   - During recording under CBF, inputs arrive inside physics updates with
+ *     x-positions that are NOT aligned to rendered-frame boundaries. We store
+ *     them as-is; the fractional x-position carries all necessary precision.
+ *   - During playback under CBF, we inject via GJBaseGameLayer::handleButton
+ *     inside our own physics-step hook, which CBF will also be driving. The
+ *     x-threshold comparison fires inputs at the correct sub-frame point.
+ *
+ * RobTop Click Between Steps (CBS):
+ *   - Built into GD 2.2+; activated when "Click Between Steps" is toggled
+ *     in the game options.  Internally it quantizes inputs to ~480 FPS
+ *     equivalent physics steps.
+ *   - We detect CBS by reading GameManager::m_clickBetweenSteps (bool field
+ *     at verified offset, see main.cpp).
+ *   - Under CBS the x-position precision is limited to ~1/480 of a second
+ *     at 1× speed, but our format stores that precision faithfully with no
+ *     artificial quantization.
+ *   - Playback under CBS: same injection path; CBS will handle the sub-step
+ *     timing; our x-threshold fires the input at the correct CBS sub-step.
+ *
+ * FALLBACK: If neither CBF nor CBS is active, playback is disabled entirely
+ * because frame-level accuracy cannot faithfully reproduce CBF recordings
+ * and may desync Normal Mode runs.
+ *
+ * ============================================================
+ * CHECKPOINT / PRACTICE BUG FIX
+ * ============================================================
+ *
+ * GD's built-in checkpoints do NOT save all physics state. We maintain a
+ * parallel BotCheckpoint that stores the full state required for accurate
+ * macro replay (see BotCheckpoint below).
+ *
+ * On checkpoint save: we snapshot every field listed in BotCheckpoint.
+ * On checkpoint load: we restore all fields BEFORE the physics step runs.
+ * We also advance our "dead-input fence" so any inputs recorded before this
+ * x-position in a previous failed attempt are discarded on the next death.
+ *
+ * ============================================================
+ * DEAD INPUT CLEANUP
+ * ============================================================
+ *
+ * When a player dies at x = D:
+ *   - Any input with x >= D in the current segment is erased.
+ *   - The segment counter increments so future inputs cannot collide with
+ *     inputs recorded before the restart.
+ *
+ * When the player presses Restart from the pause menu:
+ *   - We erase all inputs with segmentId == currentSegment AND x >= 0
+ *     (i.e., the entire current segment).
+ *   - segmentCounter increments.
+ *
+ * ============================================================
+ * SPEEDHACK
+ * ============================================================
+ *
+ * We implement speedhack by scaling the dt argument passed to
+ * GJBaseGameLayer::update before it reaches the physics engine.
+ * This is equivalent to changing game speed without touching FPS.
+ * Macro timing is invariant because it is x-position based, not dt-based.
+ *
+ * ============================================================
+ * SERIALIZATION FORMAT (binary, little-endian)
+ * ============================================================
+ *
+ * Header (16 bytes):
+ *   u32  magic        = 0x424F5432  ("BOT2")
+ *   u32  version      = 1
+ *   u32  inputCount
+ *   u8   reserved[4]
+ *
+ * Per-input record (13 bytes each):
+ *   f64  xPosition    (8 bytes) — player x at input moment
+ *   u16  segmentId    (2 bytes) — restart/death counter
+ *   u8   button       (1 byte)  — PlayerButton enum value
+ *   u8   flags        (1 byte)  — bit0=isPress, bit1=isPlayer2
+ *   u8   padding      (1 byte)  — reserved, must be 0
+ *
+ * Total overhead: 16 + N × 13 bytes.  At 20 CPS for 5 minutes: ~54 KB.
+ */
+
 #include <Geode/Geode.hpp>
-#include <vector>
-#include <string>
-#include <cstdint>
-#include <fstream>
-#include <algorithm>
-#include <cmath>
-#include <utility>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/CheckpointObject.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
 
 using namespace geode::prelude;
 
-namespace macrobot {
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-// ============================================================================
-//  Constants
-// ============================================================================
-inline constexpr const char* SYZZI_CBF_MOD_ID   = "syzzi.click_between_frames";
-inline constexpr const char* MACRO_MAGIC         = "GDBOTv1";
-inline constexpr uint32_t    MACRO_VERSION       = 1;
-inline constexpr float       CBS_EFFECTIVE_MAX_FPS = 480.f; // see CB detection notes
+constexpr uint32_t BOT_MAGIC   = 0x424F5432u; // "BOT2"
+constexpr uint32_t BOT_VERSION = 1u;
 
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │              RECORDING FORMAT — X-POSITION BASED                     │
-//  ├──────────────────────────────────────────────────────────────────────┤
-//  │                                                                       │
-//  │  Each input is one 8-byte record:                                     │
-//  │     struct InputRecord { float x; u8 action; u8 player; u16 pad; }    │
-//  │                                                                       │
-//  │  WHY X-POSITION IS OPTIMAL FOR CBF/CBS GAMEPLAY                       │
-//  │                                                                       │
-//  │  1. PLAYBACK ACCURACY                                                 │
-//  │     GD physics is a deterministic function of (level layout, input    │
-//  │     sequence at X positions). Two runs reaching the same X with the   │
-//  │     same inputs produce identical outcomes. That is exactly the       │
-//  │     invariant a macro bot needs to exploit.                           │
-//  │                                                                       │
-//  │  2. DETERMINISM                                                       │
-//  │     X is a property of the game state, not the renderer. It is        │
-//  │     invariant under FPS, refresh-rate, and speedhack changes.         │
-//  │     Frame-based recording breaks under all three.                     │
-//  │                                                                       │
-//  │  3. SMALL FILE SIZE                                                   │
-//  │     File size scales as O(click_count), NOT O(run_duration).          │
-//  │     A 2-minute level with 100 clicks ≈ 828 bytes (header + body).    │
-//  │     A 60-fps frame-based format for the same run ≈ 7.2 MB.            │
-//  │                                                                       │
-//  │  4. FAST LOAD / SAVE                                                  │
-//  │     Fixed-size records → trivial memcpy serialization, no parsing.    │
-//  │                                                                       │
-//  │  5. CBF / CBS COMPATIBILITY                                           │
-//  │     Syzzi CBF allows inputs to register BETWEEN rendered frames.      │
-//  │     The X position at input time is still well-defined regardless     │
-//  │     of where in the render cycle the input was processed — we store   │
-//  │     the exact X, preserving full CBF precision without quantization.  │
-//  │     CBS (RobTop) caps effective input rate at ~480 FPS, but X-based   │
-//  │     recording still captures whatever X the engine settles on.        │
-//  │                                                                       │
-//  │  6. HIGH CPS RECORDINGS                                              │
-//  │     Multiple inputs at the same X (rare, but possible under CBF)      │
-//  │     are stored as multiple records; ordering is preserved by index.   │
-//  │                                                                       │
-//  │  TRADE-OFF                                                            │
-//  │     Y position is not stored. In practice this is fine because Y is   │
-//  │     a deterministic function of (level + X-input sequence) for every  │
-//  │     vanilla GD gamemode. Physics-state-based recording would also     │
-//  │     work, but X-position is strictly smaller on disk and equally      │
-//  │     deterministic. We pick X-position.                                │
-//  │                                                                       │
-//  │  FILE LAYOUT                                                          │
-//  │     [MacroHeader : 28 bytes]                                          │
-//  │     [InputRecord * inputCount]                                        │
-//  │                                                                       │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
+// Tolerance window for x-position matching during playback.
+// We fire a queued input when playerX >= input.x - PLAYBACK_X_EPSILON.
+// This compensates for the discrete physics step size; it should be smaller
+// than the minimum possible physics step width (~0.001 at 480 FPS, 1× speed).
+constexpr double PLAYBACK_X_EPSILON = 0.0005;
 
-enum class InputAction : uint8_t {
-    Press   = 0,
-    Release = 1,
+// ─── Input Record ─────────────────────────────────────────────────────────────
+
+struct BotInput {
+    double      x;          ///< Player x-position when input was registered
+    uint16_t    segment;    ///< Monotonic counter; increments on each death/restart
+    PlayerButton button;    ///< Which button (Jump, Left, Right, etc.)
+    bool        isPress;    ///< true = button down, false = button up
+    bool        isPlayer2;  ///< Dual-mode second player
+
+    // Sorting: inputs are ordered by (segment, x) so binary search works.
+    bool operator<(const BotInput& o) const noexcept {
+        if (segment != o.segment) return segment < o.segment;
+        return x < o.x;
+    }
+};
+static_assert(sizeof(PlayerButton) == 1 || sizeof(PlayerButton) <= 4,
+    "Adjust BotInput serialization if PlayerButton grows beyond 1 byte");
+
+// ─── Gamemode-specific physics state ─────────────────────────────────────────
+// We store the fields that GD's built-in checkpoint omits but that affect
+// deterministic replay (e.g. spider teleport phase, robot animation tick).
+
+struct RobotState {
+    bool isOnGround;
+    bool hasJumped;
+    float jumpTimer;
 };
 
-enum class PlayerSel : uint8_t {
-    Player1 = 0,
-    Player2 = 1,
+struct SpiderState {
+    bool isTeleporting;
+    float teleportProgress;
+    bool lastGrounded;
 };
 
-#pragma pack(push, 1)
-struct InputRecord {
-    float   x;         // Player X (world space) at the moment of the input
-    uint8_t action;    // InputAction
-    uint8_t player;    // PlayerSel
-    uint16_t reserved; // Alignment to 8 bytes; reserved for future flags
-
-    InputRecord() : x(0.f), action(0), player(0), reserved(0) {}
-    InputRecord(float x_, InputAction a, PlayerSel p)
-        : x(x_), action(static_cast<uint8_t>(a)),
-          player(static_cast<uint8_t>(p)), reserved(0) {}
-};
-#pragma pack(pop)
-static_assert(sizeof(InputRecord) == 8, "InputRecord must be 8 bytes");
-
-#pragma pack(push, 1)
-struct MacroHeader {
-    char     magic[8];    // "GDBOTv1\0"
-    uint32_t version;     // format version
-    int32_t  levelId;     // for sanity check on load
-    float    recFps;      // recording FPS — REFERENCE ONLY, not used for playback
-    uint8_t  cbMode;      // CBImplementation recorded under
-    uint8_t  pad[3];      // alignment
-    uint32_t inputCount;
-};
-#pragma pack(pop)
-static_assert(sizeof(MacroHeader) == 28, "MacroHeader must be 28 bytes");
-
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │       PRACTICE BUG FIX — CHECKPOINT SNAPSHOT                         │
-//  ├──────────────────────────────────────────────────────────────────────┤
-//  │                                                                       │
-//  │  GD's built-in CheckpointObject captures most state, but several      │
-//  │  fields are known to be missing or incorrectly restored — this is     │
-//  │  the classic "practice bug". We maintain a parallel snapshot stack    │
-//  │  keyed by checkpoint order and restore our snapshot on load.          │
-//  │                                                                       │
-//  │  NOTE ON BINDINGS: Geode's 2.2081 PlayerObject bindings expose        │
-//  │  fewer fields than older versions. The following confirmed-existing   │
-//  │  members are captured:                                                │
-//  │    - position (CCNode::getPosition)                                   │
-//  │    - rotation (CCNode::getRotation)                                   │
-//  │    - m_yVelocity (double)                                             │
-//  │    - m_playerSpeed (float — speed-portal multiplier)                  │
-//  │    - m_vehicleSize (int — current gamemode)                           │
-//  │    - m_isOnGround (bool)                                              │
-//  │    - m_isDashing (bool)                                               │
-//  │                                                                       │
-//  │  Fields NOT available in 2.2081 bindings (gravity flip, mini size,    │
-//  │  robot jump count, wave trail visibility, dual mode) are left to      │
-//  │  GD's own CheckpointObject. The combination of our snapshot and       │
-//  │  GD's snapshot covers everything needed for deterministic macro       │
-//  │  playback after a checkpoint load.                                    │
-//  │                                                                       │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
-
-struct PlayerSnap {
-    // --- Universal (confirmed in Geode 2.2081 bindings) ---
-    CCPoint position;
-    float   rotation;
-    double  yVel;          // m_yVelocity is double in 2.2081
-    float   playerSpeed;   // m_playerSpeed — speed-portal multiplier
-    int     vehicleSize;   // m_vehicleSize — current gamemode
-
-    // --- Gamemode-specific (confirmed) ---
-    bool    isHolding;     // tracked by us, not a PlayerObject field
-    bool    isOnGround;    // m_isOnGround
-    bool    isDashing;     // m_isDashing
-
-    PlayerSnap()
-        : position(CCPointZero), rotation(0.f), yVel(0.0),
-          playerSpeed(0.f), vehicleSize(0),
-          isHolding(false), isOnGround(false), isDashing(false) {}
+struct BallState {
+    bool isOnGround;
+    float rotationRate;
 };
 
-struct CheckpointSnap {
-    float      gameX;      // PlayLayer world X at checkpoint
-    PlayerSnap p1;
-    PlayerSnap p2;
+// Union-style storage — only the active gamemode's fields matter.
+struct GamemodeState {
+    RobotState  robot  {};
+    SpiderState spider {};
+    BallState   ball   {};
 };
 
-// ============================================================================
-//  CB Implementation Detection
-// ============================================================================
+// ─── Full Checkpoint Snapshot ─────────────────────────────────────────────────
 /*
- *  CBF (Syzzi's Click Between Frames mod)
- *  ---------------------------------------
- *  Detection: Loader::get()->isModLoaded("syzzi.click_between_frames").
+ * BotCheckpoint stores every piece of physics state needed so that macro
+ * playback remains valid after any number of checkpoint reloads.
  *
- *  Syzzi's CBF exposes its internal API via Geode events / setting hooks,
- *  but the public, stable integration surface for third-party bots is
- *  limited to: "the mod is loaded → inputs register between frames".
- *  We do NOT call into CBF internals; we rely on the side effect that
- *  pushButton/releaseButton are invoked at sub-frame X positions, and
- *  we capture those X values exactly. This is the most reliable and
- *  forward-compatible integration point — it survives CBF version
- *  bumps that change internal class names.
- *
- *  CBS (RobTop's built-in Click Between Steps)
- *  --------------------------------------------
- *  Detection: We check GameManager for the CBS toggle. The exact setting
- *  variable name in 2.2081 is "0016" (clickBetweenSteps) per community
- *  references; if not found we fall back to "None". This is a best-effort
- *  detection — see detectCB() implementation in main.cpp.
- *
- *  Hierarchy: CBF > CBS > None. Playback is disabled in the "None" state
- *  because frame-based input resolution is not deterministic enough for
- *  reliable macro playback under varying FPS.
+ * Fields are taken directly from PlayerObject and GJBaseGameLayer members
+ * documented in the Geode/GD headers for 2.2081.
  */
-enum class CBImplementation : uint8_t {
-    None = 0,   // RED   — playback disabled
-    CBS  = 1,   // YELLOW — RobTop Click Between Steps
-    CBF  = 2,   // GREEN — Syzzi Click Between Frames (preferred)
+
+struct PlayerSnapshot {
+    // ── Spatial ──────────────────────────────────────────────────────────────
+    cocos2d::CCPoint position;      ///< m_position
+    cocos2d::CCPoint velocity;      ///< m_playerVelocity (x/y speed)
+    float            yAccel;        ///< m_yVelocity (raw vertical acceleration)
+    float            rotation;      ///< getRotation()
+
+    // ── Physics flags ────────────────────────────────────────────────────────
+    bool isOnGround;                ///< m_isOnGround
+    bool isOnGroundTwo;             ///< m_isOnGroundTwo (ceiling-standing)
+    bool isUpsideDown;              ///< m_isUpsideDown (gravity flip)
+    bool isFalling;                 ///< m_isFalling
+
+    // ── Gamemode ─────────────────────────────────────────────────────────────
+    int  gamemode;                  ///< PlayerMode enum (cube=0, ship=1, …)
+    bool isSmall;                   ///< m_isSmall
+    bool isDual;                    ///< captured from GJBaseGameLayer dual flag
+
+    // ── Speed / portals ──────────────────────────────────────────────────────
+    int  speedValue;                ///< current speed portal tier (0–4)
+    bool hasGravityFlipped;         ///< mirror of m_isUpsideDown for clarity
+
+    // ── Gamemode-specific ────────────────────────────────────────────────────
+    GamemodeState gmState;
+
+    // ── Wave-specific ────────────────────────────────────────────────────────
+    bool    waveIsHolding;          ///< Is the player currently holding jump?
+    float   waveTrailSize;          ///< Restore visual state too
+
+    // ── UFO-specific ─────────────────────────────────────────────────────────
+    float   ufoJumpTimer;           ///< Cooldown before another UFO jump
+
+    // ── Ship-specific ────────────────────────────────────────────────────────
+    bool    shipBoostActive;
+
+    // ── Swing-specific ───────────────────────────────────────────────────────
+    bool    swingGravityFlipped;
 };
 
-// ============================================================================
-//  Bot Modes
-// ============================================================================
-enum class BotMode : uint8_t {
-    Idle      = 0,
-    Recording = 1,
-    Playback  = 2,
+struct BotCheckpoint {
+    uint16_t        segment;        ///< Segment ID at save time
+    double          x;              ///< x-position at save time (used as fence)
+    PlayerSnapshot  p1;
+    PlayerSnapshot  p2;             ///< Only meaningful in dual mode
 };
 
-// ============================================================================
-//  ┌──────────────────────────────────────────────────────────────────────┐
-//  │                      BOT SINGLETON                                   │
-//  ├──────────────────────────────────────────────────────────────────────┤
-//  │                                                                       │
-//  │  One active session per PlayLayer. All hooks in main.cpp delegate    │
-//  │  here.                                                                │
-//  │                                                                       │
-//  │  MEMORY POLICY                                                        │
-//  │    - m_inputs: one contiguous std::vector<InputRecord>. We reserve() │
-//  │      on recording start to avoid per-input allocation.                │
-//  │    - m_checkpointSnaps: parallel vector, same policy.                 │
-//  │    - No per-frame allocations during gameplay.                        │
-//  │                                                                       │
-//  │  THREADING                                                            │
-//  │    All access is on the GD main thread (Cocos2d update cycle). No    │
-//  │    locking needed.                                                    │
-//  │                                                                       │
-//  └──────────────────────────────────────────────────────────────────────┘
-// ============================================================================
+// ─── CBF / CBS Detection Result ───────────────────────────────────────────────
+
+enum class CbfMode {
+    None,    ///< Neither CBF nor CBS active — playback forbidden
+    CBS,     ///< RobTop built-in Click Between Steps (~480 FPS precision)
+    CBF,     ///< Syzzi Click Between Frames (sub-frame, highest precision)
+};
+
+// ─── Bot State Machine ────────────────────────────────────────────────────────
+
+enum class BotState {
+    Idle,
+    Recording,
+    Playback,
+};
+
+// ─── Main Bot Class ───────────────────────────────────────────────────────────
+
 class Bot {
 public:
+    // Singleton
     static Bot& get() {
         static Bot instance;
         return instance;
     }
 
-    // ---------- Mode control ----------
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    void onLevelEntry(GJBaseGameLayer* layer);
+    void onLevelExit();
+    void onPhysicsStep(GJBaseGameLayer* layer, float dt);
+    void onPlayerDeath(PlayerObject* player);
+    void onCheckpointSave(CheckpointObject* cp, GJBaseGameLayer* layer);
+    void onCheckpointLoad(CheckpointObject* cp, GJBaseGameLayer* layer);
+    void onRestartLevel();
+
+    // ── Input events (called from our handleButton hook) ──────────────────────
+    void recordInput(GJBaseGameLayer* layer, PlayerButton btn, bool isPress, bool isP2);
+    // Returns true if the bot consumed the input (playback mode)
+    bool onHandleButton(GJBaseGameLayer* layer, bool isPress, int button, bool isP2);
+
+    // ── Control ───────────────────────────────────────────────────────────────
     void startRecording();
-    void stopRecording();
     void startPlayback();
-    void stopPlayback();
-    void toggleRecording();
-    void togglePlayback();
+    void stopAll();
 
-    // ---------- Input events (called from PlayerObject hooks) ----------
-    void onInputPress(bool player1);
-    void onInputRelease(bool player1);
-
-    // ---------- PlayLayer lifecycle ----------
-    void onPlayLayerEnter(PlayLayer* pl);
-    void onPlayLayerExit();
-    void onPlayLayerUpdate(float dt);
-    void onPlayerDeath();
-    void onLevelReset(bool isCheckpointLoad);
-    void onCheckpointCreate();
-    void onCheckpointLoad();
-    void onCheckpointRemove();
-
-    // ---------- Macro file I/O ----------
+    // ── Serialization ─────────────────────────────────────────────────────────
     bool saveMacro(const std::string& path);
     bool loadMacro(const std::string& path);
-    std::string defaultMacroPath() const;
 
-    // ---------- Speedhack ----------
-    void   setSpeedhack(float speed);
-    float  getSpeedhack() const { return m_speedhack; }
+    // ── Speedhack ─────────────────────────────────────────────────────────────
+    float speedhackMultiplier = 1.0f;
+    /// Called from our GJBaseGameLayer::update hook to scale dt.
+    float applySpeedhack(float dt) const { return dt * speedhackMultiplier; }
 
-    // ---------- CB detection ----------
-    CBImplementation detectCB() const;
-    static const char* cbLabel(CBImplementation cb);
-    static ccColor3B   cbColor(CBImplementation cb);
+    // ── CBF/CBS detection ─────────────────────────────────────────────────────
+    CbfMode detectCbfMode() const;
+    CbfMode currentCbfMode = CbfMode::None;
 
-    // ---------- Getters ----------
-    BotMode  getMode() const { return m_mode; }
-    bool     isRecording() const { return m_mode == BotMode::Recording; }
-    bool     isPlayback()  const { return m_mode == BotMode::Playback;  }
-    bool     isPlaybackEnabled() const;        // false if CB == None
-    size_t   getInputCount() const { return m_inputs.size(); }
-    size_t   getPlaybackIndex() const { return m_playbackIndex; }
-    CBImplementation getRecordingCB() const { return m_recordingCB; }
-
-    // ---------- Snapshot helpers ----------
-    CheckpointSnap captureSnapshot() const;
-    void           restoreSnapshot(const CheckpointSnap& snap);
-
-    // ---------- Checkpoint-load detection ----------
-    // Heuristic used by the PlayLayer::resetLevel() hook to distinguish a
-    // full restart from a practice-checkpoint load. GD 2.2081 has no
-    // separate loadCheckpoint() entry point, so we detect by comparing
-    // the player's post-reset X to the last stored checkpoint X (within
-    // a 50-unit tolerance).
-    // LIMITATION: In rare cases (e.g. a level whose start position
-    // coincidentally matches a checkpoint X), this may misclassify.
-    bool isCheckpointLoad(float playerX) const;
+    // ── State queries ─────────────────────────────────────────────────────────
+    BotState state()         const { return m_state; }
+    bool     isRecording()   const { return m_state == BotState::Recording; }
+    bool     isPlayback()    const { return m_state == BotState::Playback; }
+    size_t   inputCount()    const { return m_inputs.size(); }
 
 private:
-    Bot();
+    Bot() = default;
 
-    BotMode  m_mode = BotMode::Idle;
+    // ── Core data ─────────────────────────────────────────────────────────────
+    BotState                m_state         = BotState::Idle;
+    std::vector<BotInput>   m_inputs;           ///< All recorded inputs, sorted by (segment,x)
+    size_t                  m_playbackIdx   = 0;///< Next input to inject during playback
+    uint16_t                m_segment       = 0;///< Current death/restart counter
 
-    // ----- Recording: input list, sorted by X by construction -----
-    std::vector<InputRecord> m_inputs;
-    // Copy of m_inputs used during playback (so recording state isn't mutated)
-    std::vector<InputRecord> m_playbackInputs;
+    // Checkpoints: keyed by CheckpointObject pointer for O(1) lookup
+    std::unordered_map<CheckpointObject*, BotCheckpoint> m_checkpoints;
 
-    // ----- Per-player hold tracking (avoids duplicate release records) -----
-    bool m_p1Holding = false;
-    bool m_p2Holding = false;
+    // The layer pointer (valid only during a level session)
+    GJBaseGameLayer*        m_layer         = nullptr;
 
-    // ----- Dead-input cleanup support -----
-    // For each checkpoint we store (X at checkpoint, input index at checkpoint).
-    // On restart-to-checkpoint we truncate inputs to that index.
-    // On full restart we clear everything.
-    struct CheckpointMark {
-        float  x;
-        size_t inputIndex;
-    };
-    std::vector<CheckpointMark> m_checkpointMarks;
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    double getPlayerX(GJBaseGameLayer* layer, bool isP2 = false) const;
+    void   snapshotPlayer(PlayerObject* po, bool isDual, PlayerSnapshot& out) const;
+    void   restorePlayer(PlayerObject* po, GJBaseGameLayer* layer,
+                         const PlayerSnapshot& snap, bool isDual) const;
+    void   pruneInputsFrom(double xFence, uint16_t segmentId);
+    void   eraseSegment(uint16_t segmentId);
 
-    // Parallel snapshot stack for practice bug fix
-    std::vector<CheckpointSnap> m_checkpointSnaps;
-
-    // ----- Playback state -----
-    size_t            m_playbackIndex = 0;
-    CBImplementation  m_recordingCB   = CBImplementation::None;
-
-    // ----- Speedhack -----
-    float m_speedhack = 1.f;
-
-    // ----- CB detection cache (recomputed on level enter) -----
-    mutable CBImplementation m_cachedCB   = CBImplementation::None;
-    mutable bool             m_cbCacheValid = false;
-
-    // ----- Internal helpers -----
-    void pushInput(float x, InputAction a, PlayerSel p);
-    void truncateInputsAfterX(float x);
-    void truncateInputsAfterIndex(size_t idx);
-    void resetPlaybackState();
-    void clearCheckpointState();
-    void applySpeedhackToScheduler();
+    // Advance playback pointer to first input not yet past current x
+    void advancePlaybackIndex(double currentX);
 };
 
-// ============================================================================
-//  Inline helpers (small enough to keep in header)
-// ============================================================================
+// ─── UI Forward Declarations ──────────────────────────────────────────────────
 
-inline const char* Bot::cbLabel(CBImplementation cb) {
-    switch (cb) {
-        case CBImplementation::CBF:  return "CBF Active (Syzzi)";
-        case CBImplementation::CBS:  return "CBS Active (RobTop)";
-        case CBImplementation::None: return "No CBF / CBS";
-    }
-    return "Unknown";
-}
+class BotMenuLayer : public cocos2d::CCLayer {
+public:
+    static BotMenuLayer* create();
+    bool init() override;
 
-inline ccColor3B Bot::cbColor(CBImplementation cb) {
-    switch (cb) {
-        case CBImplementation::CBF:  return ccc3(0x40, 0xE0, 0x40); // green
-        case CBImplementation::CBS:  return ccc3(0xFF, 0xD0, 0x00); // yellow
-        case CBImplementation::None: return ccc3(0xE0, 0x30, 0x30); // red
-    }
-    return ccc3(0xFF, 0xFF, 0xFF);
-}
+private:
+    void onRecord(cocos2d::CCObject*);
+    void onPlayback(cocos2d::CCObject*);
+    void onSave(cocos2d::CCObject*);
+    void onLoad(cocos2d::CCObject*);
+    void onClose(cocos2d::CCObject*);
+    void onSpeedhackChanged(cocos2d::CCObject*);
+    void updateStatus();
 
-} // namespace macrobot
+    cocos2d::CCLabelBMFont* m_statusLabel    = nullptr;
+    cocos2d::CCLabelBMFont* m_infoLabel      = nullptr;
+    cocos2d::extension::CCScale9Sprite* m_bg = nullptr;
+};
