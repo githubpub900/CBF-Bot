@@ -3,12 +3,13 @@
     "gd": {
         "win": "2.2081",
         "mac": "2.2081",
-        "android": "2.2081",
+        "android": "2.2081"
     },
     "id": "cbf.macrobot",
     "name": "CBF Macro Bot",
     "version": "v1.0.0",
     "developer": "Some random ass AI",
     "description": "Vibecoded shit",
-    "repository": ""
+    "repository": "",
+    "tags": ["gameplay", "utility", "enhancement"]
 }
