@@ -47,6 +47,7 @@ void Bot::recordAction(float xPos, int button, bool player2, bool push) {
 void Bot::updatePlayback(PlayLayer* pl) {
     if (!isPlaying || actions.empty()) return;
 
+    // Process all actions that should occur at or before the current player X position
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
         
@@ -55,7 +56,8 @@ void Bot::updatePlayback(PlayLayer* pl) {
         if (!p) p = pl->m_player1; 
 
         if (p && p->m_position.x >= action.xPos) {
-            pl->handleButton(action.push, action.button, action.player2);
+            // Forward directly to GJBaseGameLayer to ensure CBF engine processes the simulated playback input
+            pl->GJBaseGameLayer::handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
             break; 
@@ -159,8 +161,6 @@ void Bot::loadMacro(const std::string& filename) {
 
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void handleButton(bool push, int button, bool player2) {
-        // Intercepting at GJBaseGameLayer hooks inputs before PlayLayer handles them, 
-        // which reliably captures inputs managed under Syzzi's CBF modifications.
         if (Bot::get().isRecording && !Bot::get().isPlaying) {
             auto pl = PlayLayer::get();
             if (pl) {
@@ -173,16 +173,18 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         }
         GJBaseGameLayer::handleButton(push, button, player2);
     }
+
+    void update(float dt) {
+        // Run playback inside GJBaseGameLayer update to track accurately with CBF frame rules
+        auto pl = PlayLayer::get();
+        if (pl && Bot::get().isPlaying) {
+            Bot::get().updatePlayback(pl);
+        }
+        GJBaseGameLayer::update(dt);
+    }
 };
 
 class $modify(BotPlayLayer, PlayLayer) {
-    void update(float dt) {
-        if (Bot::get().isPlaying) {
-            Bot::get().updatePlayback(this);
-        }
-        PlayLayer::update(dt);
-    }
-
     void resetLevel() {
         PlayLayer::resetLevel();
         Bot::get().playbackIndex = 0;
@@ -240,7 +242,6 @@ public:
     }
 
     bool init() override {
-        // Use a higher structural layer priority via FLAlertLayer to absorb screen touches
         if (!FLAlertLayer::init(200)) return false;
 
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
@@ -289,15 +290,10 @@ public:
         playText->setScale(0.45f);
         this->m_mainLayer->addChild(playText);
 
-        // --- Explicit State Alignment Verification ---
-        // Ensures exact Boolean matching on initialization state mapping
-        m_recordToggle->m_toggled = Bot::get().isRecording;
-        m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
-        m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
-
-        m_playToggle->m_toggled = Bot::get().isPlaying;
-        m_playToggle->m_onButton->setVisible(Bot::get().isPlaying);
-        m_playToggle->m_offButton->setVisible(!Bot::get().isPlaying);
+        // --- Clean Initial Toggle Synchronization ---
+        // Sets up correct tracking structures matching the engine state safely
+        m_recordToggle->toggle(Bot::get().isRecording);
+        m_playToggle->toggle(Bot::get().isPlaying);
 
         auto speedLabel = cocos2d::CCLabelBMFont::create("Speedhack Value:", "bigFont.fnt");
         speedLabel->setPosition(winSize.width / 2 - 60, winSize.height / 2 - 35);
@@ -322,7 +318,6 @@ public:
         closeBtn->setPosition(winSize.width / 2, winSize.height / 2 - 125);
         menu->addChild(closeBtn);
 
-        // Force UI menu to consume touch priority so it doesn't leak into elements underneath
         this->setKeypadEnabled(true);
         this->setTouchEnabled(true);
         this->scheduleUpdate();
@@ -330,7 +325,6 @@ public:
         return true;
     }
 
-    // Explicitly swallow touch events so clicks don't register on background levels
     bool ccTouchBegan(cocos2d::CCTouch* pTouch, cocos2d::CCEvent* pEvent) override {
         FLAlertLayer::ccTouchBegan(pTouch, pEvent);
         return true; 
@@ -358,36 +352,28 @@ public:
     }
 
     void onToggleRecord(cocos2d::CCObject* pSender) {
-        Bot::get().isRecording = !Bot::get().isRecording;
-        
-        m_recordToggle->m_toggled = Bot::get().isRecording;
-        m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
-        m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
+        // Use the state passed by the click event to avoid race condition desyncs
+        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
+        Bot::get().isRecording = toggle->m_toggled;
         
         if (Bot::get().isRecording) {
             Bot::get().isPlaying = false;
-            if (m_playToggle) {
-                m_playToggle->m_toggled = false;
-                m_playToggle->m_onButton->setVisible(false);
-                m_playToggle->m_offButton->setVisible(true);
+            if (m_playToggle && m_playToggle->m_toggled) {
+                m_playToggle->toggle(false);
             }
         }
         Bot::get().updateAudioPitch();
     }
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
-        Bot::get().isPlaying = !Bot::get().isPlaying;
-        
-        m_playToggle->m_toggled = Bot::get().isPlaying;
-        m_playToggle->m_onButton->setVisible(Bot::get().isPlaying);
-        m_playToggle->m_offButton->setVisible(!Bot::get().isPlaying);
+        // Use the state passed by the click event to avoid race condition desyncs
+        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
+        Bot::get().isPlaying = toggle->m_toggled;
         
         if (Bot::get().isPlaying) {
             Bot::get().isRecording = false;
-            if (m_recordToggle) {
-                m_recordToggle->m_toggled = false;
-                m_recordToggle->m_onButton->setVisible(false);
-                m_recordToggle->m_offButton->setVisible(true);
+            if (m_recordToggle && m_recordToggle->m_toggled) {
+                m_recordToggle->toggle(false);
             }
             Bot::get().playbackIndex = 0;
         }
