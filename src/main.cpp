@@ -222,24 +222,8 @@ namespace bot {
             return true;
         }
 
-        using CCLayer::keyDown; // Expose the base method overloads to prevent shadowing warnings
-
-#if defined(GEODE_IS_WINDOWS)
-        void keyDown(cocos2d::enumKeyCodes key) override {
-            handleKeyDown(key);
-        }
-#elif defined(GEODE_IS_ANDROID)
+        // RobTop's customized Cocos2d-x uses this dual-parameter keyDown override uniformly
         void keyDown(cocos2d::enumKeyCodes key, double dt) override {
-            handleKeyDown(key);
-        }
-#else
-        void keyDown(cocos2d::enumKeyCodes key) {
-            handleKeyDown(key);
-        }
-#endif
-
-    private:
-        void handleKeyDown(cocos2d::enumKeyCodes key) {
             if (key == cocos2d::enumKeyCodes::KEY_K) {
                 BotManager::get().toggleOverlay();
             }
