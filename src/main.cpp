@@ -14,18 +14,26 @@ enum class CBFStatus {
     Syzzi
 };
 
+// Determine which CBF is actively running on the client by checking settings
 CBFStatus getCBFStatus() {
     auto syzziMod = Loader::get()->getLoadedMod("syzzi.click_between_frames");
     if (syzziMod) {
-        bool isActive = true;
+        bool isActive = true; // Fallback assume true if setting lookup fails
         if (syzziMod->hasSetting("cbf-enabled")) {
             isActive = syzziMod->getSettingValue<bool>("cbf-enabled");
         } else if (syzziMod->hasSetting("enabled")) {
             isActive = syzziMod->getSettingValue<bool>("enabled");
         }
-        if (isActive) return CBFStatus::Syzzi;
+        
+        if (isActive) {
+            return CBFStatus::Syzzi;
+        }
     }
-    if (GameManager::sharedState()->getGameVariable("0115")) return CBFStatus::RobTop;
+    
+    if (GameManager::sharedState()->getGameVariable("0115")) {
+        return CBFStatus::RobTop;
+    }
+    
     return CBFStatus::None;
 }
 
@@ -37,6 +45,7 @@ class $modify(CCScheduler) {
         float speed = BotManager::get().speedMultiplier;
         if (speed < 0.01f) speed = 0.01f;
 
+        // Ensure speedhack does NOT affect players during death/respawn animations
         if (auto playLayer = PlayLayer::get()) {
             if (playLayer->m_player1 && playLayer->m_player1->m_isDead) {
                 speed = 1.0f;
@@ -62,8 +71,13 @@ class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
 
         auto& bot = BotManager::get();
         if (bot.currentState == BotManager::State::Recording) {
+            // Drop clicks immediately if the engine transitions or is dead
+            if (bot.isDead) return;
+
             PlayerObject* player = isPlayer2 ? this->m_player2 : this->m_player1;
             if (player) {
+                if (player->m_isDead) return;
+
                 float delta = CCDirector::sharedDirector()->getDeltaTime();
                 bot.addAction(player->m_position.x, delta, button, push, isPlayer2);
             }
@@ -72,7 +86,7 @@ class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
 };
 
 // ==========================================
-// CUSTOM UI MENU (Rewritten to fix Desyncs)
+// CUSTOM UI MENU
 // ==========================================
 class BotMenuLayer : public FLAlertLayer, public TextInputDelegate {
 private:
@@ -81,7 +95,6 @@ private:
     CCLabelBMFont* m_statusLabel = nullptr;
     CCLabelBMFont* m_macroSizeLabel = nullptr;
     
-    // Using explicit buttons instead of Toggles to guarantee sync
     CCMenuItemSpriteExtra* m_recordBtn = nullptr;
     CCMenuItemSpriteExtra* m_playBtn = nullptr;
 
@@ -153,7 +166,7 @@ public:
         m_macroSizeLabel->setScale(0.55f);
         this->addChild(m_macroSizeLabel);
 
-        // Record Button Initialization
+        // Record Button
         auto dummyRec = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
         m_recordBtn = CCMenuItemSpriteExtra::create(dummyRec, this, menu_selector(BotMenuLayer::onToggleRecord));
         m_recordBtn->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 + 5.0f);
@@ -164,7 +177,7 @@ public:
         recLabel->setScale(0.5f);
         this->addChild(recLabel);
 
-        // Play Button Initialization
+        // Play Button
         auto dummyPlay = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
         m_playBtn = CCMenuItemSpriteExtra::create(dummyPlay, this, menu_selector(BotMenuLayer::onTogglePlay));
         m_playBtn->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 + 5.0f);
@@ -209,7 +222,6 @@ public:
         loadBtn->setPosition(winSize.width / 2 + 75.0f, winSize.height / 2 - 95.0f);
         menu->addChild(loadBtn);
 
-        // Render accurate states manually
         updateUI();
 
         this->setTouchEnabled(true);
@@ -235,11 +247,9 @@ public:
         }
     }
 
-    // Force asset recalculation without giving control up to Cocos core
     void updateUI() {
         auto& bot = BotManager::get();
 
-        // 1. Setup Button Textures safely
         if (m_recordBtn) {
             auto frameName = (bot.currentState == BotManager::State::Recording) ? "GJ_checkOn_001.png" : "GJ_checkOff_001.png";
             auto newSprite = CCSprite::createWithSpriteFrameName(frameName);
@@ -252,7 +262,6 @@ public:
             m_playBtn->setNormalImage(newSprite);
         }
 
-        // 2. Setup Label text updates
         std::string statusText = "Status: ";
         if (bot.currentState == BotManager::State::Recording) statusText += "Recording";
         else if (bot.currentState == BotManager::State::Playing) statusText += "Playing";
@@ -368,19 +377,26 @@ class $modify(MyPlayLayer, PlayLayer) {
         }
         m_fields->lastCheckpointCount = currentCheckpoints;
 
-        // FIXED PLAYBACK INTERACTION LOOP
+        // ACCURATE SUB-PIXEL PLAYBACK LOOP
         if (bot.currentState == BotManager::State::Playing && !bot.macro.empty()) {
             double currentX = this->m_player1->m_position.x;
             
             while (bot.playbackIndex < bot.macro.size()) {
                 BotAction& action = bot.macro[bot.playbackIndex];
                 
-                // If we haven't crossed the execution position yet, stop processing for this frame
                 if (action.xPosition > currentX) {
                     break;
                 }
 
-                // Execute input action
+                // Snap coordinates slightly prior to action firing to avoid path drifting
+                PlayerObject* targetPlayer = action.isPlayer2 ? this->m_player2 : this->m_player1;
+                if (targetPlayer) {
+                    double correctionDifference = std::abs(targetPlayer->m_position.x - action.xPosition);
+                    if (correctionDifference < 10.0) {
+                        targetPlayer->m_position.x = action.xPosition;
+                    }
+                }
+
                 this->handleButton(action.isPush, action.button, action.isPlayer2);
                 bot.playbackIndex++;
             }
@@ -431,7 +447,12 @@ class $modify(MyPlayLayer, PlayLayer) {
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         auto& bot = BotManager::get();
+        
+        // Evaluate the targeted rollback X first using our custom physics snapshot
         double currentX = this->m_player1->m_position.x;
+        if (bot.practiceFixEnabled && bot.checkpointData.contains(checkpoint)) {
+            currentX = bot.checkpointData[checkpoint].p1XPos;
+        }
 
         if (bot.currentState == BotManager::State::Playing) {
             bot.playbackIndex = 0;
@@ -446,6 +467,7 @@ class $modify(MyPlayLayer, PlayLayer) {
             bot.removeInputsAfterX(currentX);
         }
 
+        // Apply visual and physics overrides
         if (bot.practiceFixEnabled && bot.checkpointData.contains(checkpoint)) {
             CheckpointState state = bot.checkpointData[checkpoint];
             this->m_player1->m_position.x = state.p1XPos;
