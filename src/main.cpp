@@ -1,314 +1,771 @@
-// main.cpp
-#include <Geode/Geode.hpp>
-#include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include "Bot.hpp"
+
+#include <Geode/Geode.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iterator>
+#include <limits>
+#include <sstream>
 
 using namespace geode::prelude;
 
-// ---------------------------------------------------------------------------
-// Helper class to wrap static functions into CCObject member callbacks
-// (required by CCMenuItemSpriteExtra's SEL_MenuHandler)
-// ---------------------------------------------------------------------------
-class ButtonWrapper : public CCObject {
-public:
-    std::function<void()> callback;
-    ButtonWrapper(std::function<void()> cb) : callback(cb) {
-        this->retain(); // prevent premature deletion
+namespace bot {
+    namespace {
+        constexpr int kInputLayerTag = 0xB071;
+        constexpr int kOverlayTag = 0xB072;
+        constexpr std::int64_t kNanosPerSecond = 1'000'000'000LL;
+
+        std::string timingModeName(TimingMode mode) {
+            switch (mode) {
+                case TimingMode::Cbf: return "Syzzi CBF";
+                case TimingMode::Cbs: return "RobTop CBS";
+                case TimingMode::None: default: return "Unavailable";
+            }
+        }
+
+        cocos2d::ccColor3B timingModeColor(TimingMode mode) {
+            switch (mode) {
+                case TimingMode::Cbf: return ccc3(0, 255, 0);
+                case TimingMode::Cbs: return ccc3(255, 220, 0);
+                case TimingMode::None: default: return ccc3(255, 0, 0);
+            }
+        }
+
+        std::int64_t toNs(double seconds) {
+            return static_cast<std::int64_t>(std::llround(seconds * static_cast<double>(kNanosPerSecond)));
+        }
+
+        double fromNs(std::int64_t ns) {
+            return static_cast<double>(ns) / static_cast<double>(kNanosPerSecond);
+        }
+
+        void scanForPlayers(CCNode* node, PlayerObject*& p1, PlayerObject*& p2) {
+            if (!node) return;
+            if (auto* player = dynamic_cast<PlayerObject*>(node)) {
+                // The Geode bindings expose isPlayer1()/isPlayer2(); those are the only
+                // player identity hooks we rely on for runtime discovery.
+                if (player->isPlayer1()) p1 = player;
+                if (player->isPlayer2()) p2 = player;
+            }
+
+            auto* children = node->getChildren();
+            if (!children) return;
+            for (int i = 0; i < children->count(); ++i) {
+                scanForPlayers(static_cast<CCNode*>(children->objectAtIndex(i)), p1, p2);
+            }
+        }
+
+        CCMenuItemSpriteExtra* makeButton(const char* title, CCObject* target, SEL_MenuHandler handler) {
+            auto* sprite = ButtonSprite::create(title);
+            return CCMenuItemSpriteExtra::create(sprite, target, handler);
+        }
+
+        std::int64_t currentLayerTimeNs(PlayLayer* layer) {
+            return layer ? toNs(layer->m_currentTime) : 0;
+        }
     }
-    void onTrigger(CCObject*) {
-        callback();
+
+    class BotOverlay final : public CCLayerColor {
+    public:
+        static BotOverlay* create() {
+            auto* ret = new BotOverlay();
+            if (ret && ret->init()) {
+                ret->autorelease();
+                return ret;
+            }
+            CC_SAFE_DELETE(ret);
+            return nullptr;
+        }
+
+        bool init() override {
+            if (!CCLayer::init()) return false;
+            setColor(ccc3(0, 0, 0));
+            setOpacity(160);
+
+            auto win = CCDirector::sharedDirector()->getWinSize();
+            setContentSize(win);
+            setAnchorPoint({0.f, 0.f});
+            setPosition({0.f, 0.f});
+            setZOrder(std::numeric_limits<int>::max() - 4);
+
+            auto* title = CCLabelBMFont::create("Practice Macro Bot", "bigFont.fnt");
+            title->setScale(0.8f);
+            title->setAnchorPoint({0.f, 1.f});
+            title->setPosition({16.f, win.height - 18.f});
+            addChild(title);
+
+            m_status = CCLabelBMFont::create("", "bigFont.fnt");
+            m_status->setScale(0.5f);
+            m_status->setAnchorPoint({0.f, 1.f});
+            m_status->setPosition({16.f, win.height - 44.f});
+            addChild(m_status);
+
+            auto* menu = CCMenu::create();
+            menu->setAnchorPoint({0.f, 0.f});
+            menu->setPosition({0.f, 0.f});
+            addChild(menu);
+
+            std::array<CCMenuItemSpriteExtra*, 7> buttons {
+                makeButton("Record", this, menu_selector(BotOverlay::onRecord)),
+                makeButton("Play", this, menu_selector(BotOverlay::onPlay)),
+                makeButton("Save", this, menu_selector(BotOverlay::onSave)),
+                makeButton("Load", this, menu_selector(BotOverlay::onLoad)),
+                makeButton("Speed -", this, menu_selector(BotOverlay::onSpeedDown)),
+                makeButton("Speed +", this, menu_selector(BotOverlay::onSpeedUp)),
+                makeButton("Close", this, menu_selector(BotOverlay::onClose)),
+            };
+
+            float x = 88.f;
+            float y = win.height - 96.f;
+            for (auto* btn : buttons) {
+                btn->setPosition({x, y});
+                menu->addChild(btn);
+                x += 118.f;
+                if (x > win.width - 140.f) {
+                    x = 88.f;
+                    y -= 44.f;
+                }
+            }
+
+            scheduleUpdate();
+            refresh();
+            return true;
+        }
+
+        void update(float) override {
+            refresh();
+        }
+
+        void onEnter() override {
+            CCLayerColor::onEnter();
+            BotManager::get().setOverlay(this);
+            refresh();
+        }
+
+        void onExit() override {
+            BotManager::get().setOverlay(nullptr);
+            CCLayerColor::onExit();
+        }
+
+    private:
+        void refresh() {
+            auto& bot = BotManager::get();
+            auto mode = bot.detectedMode();
+
+            std::ostringstream ss;
+            ss << timingModeName(mode)
+               << " | " << (bot.isRecording() ? "Recording" : bot.isPlayingBack() ? "Playback" : "Idle")
+               << " | events: " << bot.events().size();
+            if (bot.isPlayingBack()) ss << " | idx: " << bot.playbackIndex();
+            ss << " | speed: " << std::fixed << std::setprecision(2) << bot.speedhack() << "x";
+            ss << (bot.hasPlaybackData() ? " | loaded" : " | empty");
+
+            m_status->setString(ss.str().c_str());
+            m_status->setColor(timingModeColor(mode));
+        }
+
+        void onRecord(CCObject*) {
+            auto& bot = BotManager::get();
+            if (bot.isRecording()) bot.stopRecording(true);
+            else bot.startRecording();
+            refresh();
+        }
+
+        void onPlay(CCObject*) {
+            auto& bot = BotManager::get();
+            if (bot.isPlayingBack()) bot.stopPlayback();
+            else bot.startPlayback();
+            refresh();
+        }
+
+        void onSave(CCObject*) {
+            BotManager::get().saveMacro();
+            refresh();
+        }
+
+        void onLoad(CCObject*) {
+            BotManager::get().loadMacro();
+            refresh();
+        }
+
+        void onSpeedDown(CCObject*) {
+            auto& bot = BotManager::get();
+            bot.setSpeedhack(bot.speedhack() * 0.5);
+            refresh();
+        }
+
+        void onSpeedUp(CCObject*) {
+            auto& bot = BotManager::get();
+            bot.setSpeedhack(bot.speedhack() * 2.0);
+            refresh();
+        }
+
+        void onClose(CCObject*) {
+            removeFromParentAndCleanup(true);
+        }
+
+        CCLabelBMFont* m_status = nullptr;
+    };
+
+    class BotKeyLayer final : public CCLayer {
+    public:
+        static BotKeyLayer* create() {
+            auto* ret = new BotKeyLayer();
+            if (ret && ret->init()) {
+                ret->autorelease();
+                return ret;
+            }
+            CC_SAFE_DELETE(ret);
+            return nullptr;
+        }
+
+        bool init() override {
+            if (!CCLayer::init()) return false;
+            setKeyboardEnabled(true);
+            setKeypadEnabled(true);
+            setTouchEnabled(false);
+            setVisible(false);
+            setZOrder(std::numeric_limits<int>::max() - 6);
+            return true;
+        }
+
+        void keyDown(cocos2d::enumKeyCodes key) override {
+            if (key == cocos2d::enumKeyCodes::KEY_K) {
+                BotManager::get().toggleOverlay();
+            }
+        }
+    };
+
+    BotManager& BotManager::get() {
+        static BotManager s_instance;
+        return s_instance;
+    }
+
+    TimingMode BotManager::detectedMode() const {
+        // Public Geode bindings reliably expose Syzzi's mod id, but not a documented
+        // vanilla CBS state toggle. For the target 2.2081 build, the built-in CBS path is
+        // treated as the conservative fallback.
+        if (Loader::get()->isModLoaded("syzzi.click_between_frames")) return TimingMode::Cbf;
+        return TimingMode::Cbs;
+    }
+
+    bool BotManager::canPlayBack() const {
+        return detectedMode() != TimingMode::None;
+    }
+
+    bool BotManager::hasPlaybackData() const {
+        return !m_events.empty();
+    }
+
+    bool BotManager::isRecording() const {
+        return m_recording;
+    }
+
+    bool BotManager::isPlayingBack() const {
+        return m_playback;
+    }
+
+    bool BotManager::isInjectingPlayback() const {
+        return m_inPlaybackInjection;
+    }
+
+    double BotManager::speedhack() const {
+        return m_speedhack;
+    }
+
+    void BotManager::toggleOverlay() {
+        auto* scene = CCDirector::sharedDirector()->getRunningScene();
+        if (!scene) return;
+
+        if (scene->getChildByTag(kOverlayTag)) {
+            if (auto* existing = dynamic_cast<BotOverlay*>(scene->getChildByTag(kOverlayTag))) {
+                existing->removeFromParentAndCleanup(true);
+            }
+            m_overlay = nullptr;
+            return;
+        }
+
+        auto* overlay = BotOverlay::create();
+        if (!overlay) return;
+        scene->addChild(overlay, std::numeric_limits<int>::max() - 4, kOverlayTag);
+        m_overlay = overlay;
+    }
+
+    void BotManager::setOverlay(BotOverlay* overlay) {
+        m_overlay = overlay;
+    }
+
+    BotOverlay* BotManager::overlay() const {
+        return m_overlay;
+    }
+
+    void BotManager::startRecording() {
+        m_mode = detectedMode();
+        m_recording = true;
+        m_playback = false;
+        m_dead = false;
+        m_inPlaybackInjection = false;
+        m_inUpdateSplit = false;
+        m_playbackIndex = 0;
+        m_events.clear();
+        m_checkpoints.clear();
+        m_checkpointLookup.clear();
+        m_recordBaseNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
+        m_playbackStartNs = 0;
+        m_deathCutoffNs = 0;
+    }
+
+    void BotManager::stopRecording(bool keepData) {
+        m_recording = false;
+        if (!keepData) {
+            m_events.clear();
+            m_checkpoints.clear();
+            m_checkpointLookup.clear();
+        }
+    }
+
+    void BotManager::startPlayback() {
+        if (!canPlayBack() || !hasPlaybackData()) return;
+        m_mode = detectedMode();
+        m_playback = true;
+        m_recording = false;
+        m_playbackIndex = 0;
+        m_playbackStartNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
+        m_inPlaybackInjection = false;
+        m_dead = false;
+        refreshPlayers(m_layer);
+    }
+
+    void BotManager::stopPlayback() {
+        m_playback = false;
+        m_playbackIndex = 0;
+        m_inPlaybackInjection = false;
+        m_inUpdateSplit = false;
+    }
+
+    void BotManager::setSpeedhack(double value) {
+        if (!std::isfinite(value)) return;
+        m_speedhack = std::max(0.01, value);
+    }
+
+    std::filesystem::path BotManager::defaultMacroPath() const {
+        auto saveDir = Mod::get()->getSaveDir();
+        std::filesystem::create_directories(saveDir);
+        return saveDir / "practice_macro.prbm";
+    }
+
+    std::filesystem::path BotManager::macroPath() const {
+        return m_macroPath.empty() ? defaultMacroPath() : m_macroPath;
+    }
+
+    const std::vector<MacroEvent>& BotManager::events() const {
+        return m_events;
+    }
+
+    std::size_t BotManager::playbackIndex() const {
+        return m_playbackIndex;
+    }
+
+    void BotManager::onSceneEnter(PlayLayer* layer) {
+        m_layer = layer;
+        refreshPlayers(layer);
+        if (m_recording && !m_recordBaseNs) {
+            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+        }
+    }
+
+    void BotManager::onSceneExit() {
+        m_layer = nullptr;
+        m_cachedP1 = nullptr;
+        m_cachedP2 = nullptr;
+        m_inPlaybackInjection = false;
+        m_inUpdateSplit = false;
+        stopRecording(true);
+        stopPlayback();
+    }
+
+    void BotManager::refreshPlayers(PlayLayer* layer) {
+        if (!layer) {
+            m_cachedP1 = nullptr;
+            m_cachedP2 = nullptr;
+            return;
+        }
+
+        if (m_cachedP1 && m_cachedP2) {
+            if (m_cachedP1->getParent() && m_cachedP2->getParent()) return;
+        }
+
+        m_cachedP1 = nullptr;
+        m_cachedP2 = nullptr;
+        scanForPlayers(layer, m_cachedP1, m_cachedP2);
+    }
+
+    PlayerObject* BotManager::player1() const { return m_cachedP1; }
+    PlayerObject* BotManager::player2() const { return m_cachedP2; }
+
+    void BotManager::onButton(PlayerObject* player, PlayerButton button, bool down) {
+        if (!m_recording || m_inPlaybackInjection) return;
+        if (!m_layer) return;
+        if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = currentLayerTimeNs(m_layer);
+
+        MacroEvent ev;
+        ev.timeNs = currentLayerTimeNs(m_layer) - m_recordBaseNs;
+        ev.button = static_cast<std::uint8_t>(button);
+        ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player->isPlayer1()) ? 2 : 0));
+        m_events.push_back(ev);
+    }
+
+    void BotManager::trimAfterCurrentTime(PlayLayer* layer) {
+        if (!layer) return;
+        auto cutoff = currentLayerTimeNs(layer) - m_recordBaseNs;
+        if (cutoff < 0) cutoff = 0;
+
+        std::erase_if(m_events, [cutoff](MacroEvent const& ev) { return ev.timeNs > cutoff; });
+        std::erase_if(m_checkpoints, [cutoff](CheckpointSnapshot const& cp) { return cp.timeNs > cutoff; });
+        std::erase_if(m_checkpointLookup, [cutoff](auto const& pair) { return pair.second.timeNs > cutoff; });
+        if (m_playbackIndex > m_events.size()) m_playbackIndex = m_events.size();
+    }
+
+    void BotManager::clearDeadState() {
+        m_dead = false;
+        m_deathCutoffNs = 0;
+    }
+
+    void BotManager::onDeath(PlayLayer*) {
+        m_dead = true;
+        m_deathCutoffNs = m_layer ? currentLayerTimeNs(m_layer) : 0;
+    }
+
+    void BotManager::onRestartPre(PlayLayer* layer) {
+        trimAfterCurrentTime(layer);
+    }
+
+    void BotManager::onRestartPost(PlayLayer* layer) {
+        clearDeadState();
+        if (m_recording) {
+            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+        }
+    }
+
+    PlayerSnapshot BotManager::captureSnapshot(PlayerObject* player) {
+        PlayerSnapshot snapshot;
+        if (!player) return snapshot;
+
+        // Only the publicly accessible, stable state is restored here. Most of the heavy
+        // checkpoint logic remains inside vanilla Geometry Dash's checkpoint system.
+        snapshot.position = player->getPosition();
+        snapshot.rotation = player->getRotation();
+        snapshot.vehicleSize = player->getScale();
+        return snapshot;
+    }
+
+    void BotManager::applySnapshot(PlayerObject* player, PlayerSnapshot const& snapshot) {
+        if (!player) return;
+        player->setPosition(snapshot.position);
+        player->setRotation(snapshot.rotation);
+        player->setScale(snapshot.vehicleSize);
+    }
+
+    void BotManager::onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint) {
+        if (!layer || !checkpoint) return;
+        CheckpointSnapshot snapshot;
+        snapshot.timeNs = currentLayerTimeNs(layer) - m_recordBaseNs;
+        snapshot.player1 = captureSnapshot(m_cachedP1);
+        snapshot.player2 = captureSnapshot(m_cachedP2);
+        m_checkpoints.push_back(snapshot);
+        m_checkpointLookup[checkpoint] = snapshot;
+    }
+
+    void BotManager::onCheckpointLoad(PlayLayer* layer, CheckpointObject* checkpoint) {
+        if (!layer || !checkpoint) return;
+        auto found = m_checkpointLookup.find(checkpoint);
+        if (found == m_checkpointLookup.end()) return;
+
+        refreshPlayers(layer);
+        applySnapshot(m_cachedP1, found->second.player1);
+        applySnapshot(m_cachedP2, found->second.player2);
+
+        if (m_recording) {
+            m_recordBaseNs = currentLayerTimeNs(layer) - found->second.timeNs;
+        }
+        clearDeadState();
+    }
+
+    void BotManager::onLevelComplete(PlayLayer*) {
+        stopRecording(true);
+        stopPlayback();
+    }
+
+    void BotManager::saveMacro() {
+        auto path = macroPath();
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            log::error("Practice macro bot: failed to open {} for writing", path.string());
+            return;
+        }
+
+        std::vector<std::uint8_t> buffer;
+        buffer.reserve(m_events.size() * 6 + 64);
+
+        auto appendRaw = [&](auto value) {
+            auto* ptr = reinterpret_cast<const std::uint8_t*>(&value);
+            buffer.insert(buffer.end(), ptr, ptr + sizeof(value));
+        };
+
+        buffer.insert(buffer.end(), {'P', 'R', 'B', 'M'});
+        std::uint16_t version = 1;
+        appendRaw(version);
+        std::uint8_t mode = static_cast<std::uint8_t>(detectedMode());
+        appendRaw(mode);
+        double recordedSpeed = m_speedhack;
+        appendRaw(recordedSpeed);
+
+        writeVarUInt(buffer, static_cast<std::uint64_t>(m_events.size()));
+        std::int64_t last = 0;
+        for (auto const& ev : m_events) {
+            std::uint64_t delta = static_cast<std::uint64_t>(std::max<std::int64_t>(0, ev.timeNs - last));
+            writeVarUInt(buffer, delta);
+            buffer.push_back(ev.flags);
+            buffer.push_back(ev.button);
+            last = ev.timeNs;
+        }
+
+        // Checkpoints stay runtime-only to keep files tiny and fast to load.
+        writeVarUInt(buffer, 0);
+        out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    }
+
+    bool BotManager::readMacroFromDisk() {
+        auto path = macroPath();
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+
+        std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::uint8_t* cursor = bytes.data();
+        const std::uint8_t* end = bytes.data() + bytes.size();
+
+        auto readRaw = [&](auto& value) -> bool {
+            if (cursor + sizeof(value) > end) return false;
+            std::memcpy(&value, cursor, sizeof(value));
+            cursor += sizeof(value);
+            return true;
+        };
+
+        if (end - cursor < 4 || std::memcmp(cursor, "PRBM", 4) != 0) return false;
+        cursor += 4;
+
+        std::uint16_t version = 0;
+        std::uint8_t mode = 0;
+        double recordedSpeed = 1.0;
+        if (!readRaw(version) || !readRaw(mode) || !readRaw(recordedSpeed)) return false;
+        if (version != 1) return false;
+
+        std::uint64_t eventCount = 0;
+        if (!readVarUInt(cursor, end, eventCount)) return false;
+
+        m_events.clear();
+        m_events.reserve(static_cast<std::size_t>(eventCount));
+
+        std::int64_t running = 0;
+        for (std::uint64_t i = 0; i < eventCount; ++i) {
+            std::uint64_t delta = 0;
+            if (!readVarUInt(cursor, end, delta)) return false;
+            if (cursor + 2 > end) return false;
+            running += static_cast<std::int64_t>(delta);
+            MacroEvent ev;
+            ev.timeNs = running;
+            ev.flags = *cursor++;
+            ev.button = *cursor++;
+            m_events.push_back(ev);
+        }
+
+        std::uint64_t checkpointCount = 0;
+        if (!readVarUInt(cursor, end, checkpointCount)) return false;
+        (void)checkpointCount;
+
+        m_mode = static_cast<TimingMode>(mode);
+        (void)recordedSpeed;
+        return true;
+    }
+
+    void BotManager::loadMacro() {
+        if (!readMacroFromDisk()) {
+            log::warn("Practice macro bot: failed to load macro from {}", macroPath().string());
+            return;
+        }
+        stopRecording(true);
+        stopPlayback();
+        m_playbackIndex = 0;
+    }
+
+    std::uint64_t BotManager::zigZagEncode(std::int64_t value) {
+        return (static_cast<std::uint64_t>(value) << 1) ^ static_cast<std::uint64_t>(value >> 63);
+    }
+
+    std::int64_t BotManager::zigZagDecode(std::uint64_t value) {
+        return static_cast<std::int64_t>((value >> 1) ^ (~(value & 1) + 1));
+    }
+
+    void BotManager::writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value) {
+        while (value >= 0x80) {
+            out.push_back(static_cast<std::uint8_t>(value | 0x80));
+            value >>= 7;
+        }
+        out.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    bool BotManager::readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value) {
+        value = 0;
+        int shift = 0;
+        while (cursor < end && shift < 64) {
+            std::uint8_t byte = *cursor++;
+            value |= static_cast<std::uint64_t>(byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) return true;
+            shift += 7;
+        }
+        return false;
+    }
+
+    void BotManager::onGameUpdate(PlayLayer* layer, float dt) {
+        m_layer = layer;
+        refreshPlayers(layer);
+
+        if (m_playback && (!canPlayBack() || !hasPlaybackData())) {
+            stopPlayback();
+        }
+
+        const double scaledDt = static_cast<double>(dt) * m_speedhack;
+        if (!m_playback || !canPlayBack() || !hasPlaybackData()) {
+            PlayLayer::update(static_cast<float>(scaledDt));
+            return;
+        }
+
+        if (m_inUpdateSplit) {
+            return;
+        }
+
+        m_inUpdateSplit = true;
+        const double startTime = layer->m_currentTime;
+        const double endTime = startTime + scaledDt;
+        const std::int64_t endNs = toNs(endTime);
+
+        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeNs <= endNs) {
+            const auto& ev = m_events[m_playbackIndex];
+            const double eventTime = fromNs(ev.timeNs);
+            const double delta = std::max(0.0, eventTime - layer->m_currentTime);
+            if (delta > 0.0) {
+                PlayLayer::update(static_cast<float>(delta / m_speedhack));
+            }
+
+            refreshPlayers(layer);
+            m_inPlaybackInjection = true;
+            auto* targetPlayer = (ev.flags & 2) ? m_cachedP1 : m_cachedP2;
+            if (targetPlayer) {
+                auto button = static_cast<PlayerButton>(ev.button);
+                if (ev.flags & 1) targetPlayer->pushButton(button);
+                else targetPlayer->releaseButton(button);
+            }
+            m_inPlaybackInjection = false;
+
+            ++m_playbackIndex;
+        }
+
+        const double remaining = std::max(0.0, endTime - layer->m_currentTime);
+        if (remaining > 0.0) {
+            PlayLayer::update(static_cast<float>(remaining / m_speedhack));
+        }
+
+        m_inUpdateSplit = false;
+        if (m_playbackIndex >= m_events.size()) {
+            stopPlayback();
+        }
+    }
+}
+
+namespace bot {
+    void addKeyboardLayer(CCNode* parent) {
+        if (!parent) return;
+        if (parent->getChildByTag(kInputLayerTag)) return;
+        auto* input = BotKeyLayer::create();
+        if (!input) return;
+        parent->addChild(input, std::numeric_limits<int>::max() - 6, kInputLayerTag);
+    }
+}
+
+class $modify(BotMenuLayer, MenuLayer) {
+    void onEnter() {
+        MenuLayer::onEnter();
+        bot::addKeyboardLayer(this);
     }
 };
 
-// =========================================================================
-// Hooks
-// =========================================================================
-
-class PlayLayerHook : public Modify<PlayLayerHook, PlayLayer> {
-public:
-    void storeCheckpoint(CheckpointObject* checkpoint) {
-        PlayLayer::storeCheckpoint(checkpoint);
-        Bot::checkpointStored(checkpoint);
+class $modify(BotPlayLayer, PlayLayer) {
+    void onEnter() {
+        PlayLayer::onEnter();
+        BotManager::get().onSceneEnter(this);
+        bot::addKeyboardLayer(this);
     }
 
-    void checkpointActivated(CheckpointGameObject* object) {
-        PlayLayer::checkpointActivated(object);
-        // GD 2.2's checkpoint restores all required player state.
+    void onExit() {
+        BotManager::get().onSceneExit();
+        PlayLayer::onExit();
     }
 
     void update(float dt) {
-        auto* pl = static_cast<PlayLayer*>(this);
-        if (Bot::isPlaying()) {
-            float step = Bot::m_playBaseStep * Bot::getSpeedhack();
-            float remaining = dt;
-            while (remaining > 0.000001f) {
-                float take = std::min(step, remaining);
-                Bot::processPlaybackStep(pl, take);
-                remaining -= take;
-            }
-            return;
-        }
-        PlayLayer::update(dt);
-    }
-
-    void handleButton(bool down, int button, bool player1) {
-        PlayLayer::handleButton(down, button, player1);
-        if (Bot::isRecording()) {
-            double time = m_gameState.m_levelTime;
-            Bot::recordInput(time, down, button);
-        }
-    }
-
-    void destroyPlayer(PlayerObject* player, GameObject* object) {
-        PlayLayer::destroyPlayer(player, object);
-        Bot::onDeath();
+        BotManager::get().onGameUpdate(this, dt);
     }
 
     void resetLevel() {
+        BotManager::get().onRestartPre(this);
         PlayLayer::resetLevel();
-        Bot::onRestart();
+        BotManager::get().onRestartPost(this);
+    }
+
+    void fullReset() {
+        BotManager::get().onRestartPre(this);
+        PlayLayer::fullReset();
+        BotManager::get().onRestartPost(this);
+    }
+
+    void storeCheckpoint(CheckpointObject* checkpoint) {
+        PlayLayer::storeCheckpoint(checkpoint);
+        BotManager::get().onCheckpointStore(this, checkpoint);
+    }
+
+    void loadFromCheckpoint(CheckpointObject* checkpoint) {
+        PlayLayer::loadFromCheckpoint(checkpoint);
+        BotManager::get().onCheckpointLoad(this, checkpoint);
+    }
+
+    void levelComplete() {
+        BotManager::get().onLevelComplete(this);
+        PlayLayer::levelComplete();
     }
 };
 
-class SchedulerHook : public Modify<SchedulerHook, CCScheduler> {
-public:
-    void update(float dt) {
-        if (!Bot::isPlaying())
-            dt *= Bot::getSpeedhack();
-        CCScheduler::update(dt);
+class $modify(BotPlayerObject, PlayerObject) {
+    bool pushButton(PlayerButton button) {
+        auto ret = PlayerObject::pushButton(button);
+        if (!BotManager::get().isInjectingPlayback()) {
+            BotManager::get().onButton(this, button, true);
+        }
+        return ret;
+    }
+
+    bool releaseButton(PlayerButton button) {
+        auto ret = PlayerObject::releaseButton(button);
+        if (!BotManager::get().isInjectingPlayback()) {
+            BotManager::get().onButton(this, button, false);
+        }
+        return ret;
     }
 };
-
-class KeyboardHook : public Modify<KeyboardHook, CCKeyboardDispatcher> {
-public:
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
-        if (down && key == enumKeyCodes::KEY_K) {
-            auto* pl = GameManager::sharedState()->getPlayLayer();
-            if (pl) Bot::toggleUI(pl);
-            return true;
-        }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
-    }
-};
-
-// =========================================================================
-// Bot implementation
-// =========================================================================
-
-void Bot::startRecording() {
-    m_events.clear();
-    m_checkpointEventIndices.clear();
-    m_recording = true;
-}
-void Bot::stopRecording() { m_recording = false; }
-bool Bot::isRecording() { return m_recording; }
-
-void Bot::startPlayback() {
-    if (getCBSMode() == CBSMode::None) return;
-    m_playing = true;
-    m_playIndex = 0;
-    m_playAccum = 0.0;
-}
-void Bot::stopPlayback() { m_playing = false; }
-bool Bot::isPlaying() { return m_playing; }
-
-void Bot::recordInput(double time, bool down, int button) {
-    m_events.push_back({time, down, button});
-}
-
-// ---------- Dead‑input handling ----------
-void Bot::onDeath() {
-    if (!m_recording) return;
-    if (!m_checkpointEventIndices.empty()) {
-        size_t idx = m_checkpointEventIndices.back();
-        if (m_events.size() > idx)
-            m_events.resize(idx);
-    }
-}
-
-void Bot::onRestart() {
-    if (!m_recording) return;
-    m_events.clear();
-    m_checkpointEventIndices.clear();
-}
-
-// ---------- Checkpoint ----------
-void Bot::checkpointStored(CheckpointObject* cp) {
-    if (m_recording)
-        m_checkpointEventIndices.push_back(m_events.size());
-    // Game's checkpoint already stores all required player state.
-}
-
-// ---------- Speedhack ----------
-float Bot::getSpeedhack() { return m_speed; }
-void Bot::setSpeedhack(float s) { m_speed = std::clamp(s, 0.1f, 10.0f); }
-void Bot::speedhackUp() { setSpeedhack(m_speed + 0.1f); }
-void Bot::speedhackDown() { setSpeedhack(m_speed - 0.1f); }
-
-// ---------- CBS detection ----------
-Bot::CBSMode Bot::getCBSMode() {
-    if (Loader::get()->isModLoaded("syzzi.click_between_frames"))
-        return CBSMode::Syzzi;
-    if (GameManager::sharedState()->getGameVariable("0050"))
-        return CBSMode::RobTop;
-    return CBSMode::None;
-}
-
-// ---------- Playback helpers ----------
-void Bot::injectInput(const InputEvent& ev) {
-    auto* pl = GameManager::sharedState()->getPlayLayer();
-    if (!pl) return;
-    pl->handleButton(ev.down, ev.button, true);
-}
-
-void Bot::processPlaybackStep(PlayLayer* pl, float customDt) {
-    m_playing = false;
-    pl->PlayLayer::update(customDt);
-    m_playing = true;
-
-    m_playAccum += customDt;
-    double curTime = pl->m_gameState.m_levelTime;
-
-    while (m_playIndex < m_events.size()) {
-        const InputEvent& ev = m_events[m_playIndex];
-        if (ev.time <= curTime + 1e-9) {
-            injectInput(ev);
-            ++m_playIndex;
-        } else {
-            break;
-        }
-    }
-}
-
-// ---------- Macro I/O (delta‑encoded binary) ----------
-void Bot::saveMacro(const std::string& path) {
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return;
-    const char magic[4] = {'G','D','M','B'};
-    f.write(magic, 4);
-    uint32_t count = m_events.size();
-    f.write(reinterpret_cast<const char*>(&count), 4);
-    double prev = 0.0;
-    for (const auto& ev : m_events) {
-        double delta = ev.time - prev;
-        f.write(reinterpret_cast<const char*>(&delta), 8);
-        uint8_t flags = (ev.down ? 1 : 0) | ((ev.button & 0xF) << 1);
-        f.write(reinterpret_cast<const char*>(&flags), 1);
-        prev = ev.time;
-    }
-}
-
-void Bot::loadMacro(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return;
-    char magic[4];
-    f.read(magic, 4);
-    if (std::string(magic,4) != "GDMB") return;
-    uint32_t count;
-    f.read(reinterpret_cast<char*>(&count), 4);
-    m_events.clear();
-    m_events.reserve(count);
-    double prev = 0.0;
-    for (uint32_t i = 0; i < count; ++i) {
-        double delta;
-        f.read(reinterpret_cast<char*>(&delta), 8);
-        uint8_t flags;
-        f.read(reinterpret_cast<char*>(&flags), 1);
-        InputEvent ev;
-        ev.time = prev + delta;
-        ev.down = flags & 1;
-        ev.button = (flags >> 1) & 0xF;
-        m_events.push_back(ev);
-        prev = ev.time;
-    }
-}
-
-// ---------- UI ----------
-void Bot::toggleUI(PlayLayer* pl) {
-    if (m_uiVisible) {
-        if (m_uiNode) {
-            m_uiNode->removeFromParent();
-            m_uiNode = nullptr;
-        }
-        // Release stored helpers
-        for (auto* obj : m_uiHelpers)
-            obj->release();
-        m_uiHelpers.clear();
-        m_uiVisible = false;
-        return;
-    }
-
-    auto winSize = CCDirector::sharedDirector()->getWinSize();
-    auto* bg = CCLayerColor::create(ccc4(0,0,0,180));
-    bg->setContentSize(CCSizeMake(200, 240));
-    bg->setPosition(ccp(winSize.width/2 - 100, winSize.height/2 - 120));
-    pl->addChild(bg, 1000);
-
-    // Status label
-    auto status = Bot::getCBSMode();
-    const char* txt;
-    ccColor3B col;
-    switch (status) {
-        case CBSMode::Syzzi: txt = "CBF: Syzzi (Green)"; col = ccc3(0,255,0); break;
-        case CBSMode::RobTop: txt = "CBS: RobTop (Yellow)"; col = ccc3(255,255,0); break;
-        default:              txt = "No CBF/CBS (Red)";     col = ccc3(255,0,0); break;
-    }
-    auto* label = CCLabelBMFont::create(txt, "bigFont.fnt");
-    label->setColor(col);
-    label->setPosition(ccp(100, 200));
-    bg->addChild(label);
-
-    // Speed display
-    auto* speedLabel = CCLabelBMFont::create(
-        fmt::format("Speed: {:.1f}", m_speed).c_str(),
-        "bigFont.fnt");
-    speedLabel->setPosition(ccp(100, -130));
-    bg->addChild(speedLabel);
-
-    // Create menu
-    auto* menu = CCMenu::create();
-    menu->setPosition(ccp(100, 160));
-
-    // Helper lambda to create a button that calls a Bot static function
-    auto addBtn = [&](const char* title, std::function<void()> action, float y) {
-        auto* wrapper = new ButtonWrapper(action); // retained
-        m_uiHelpers.push_back(wrapper);
-        auto* btn = CCMenuItemSpriteExtra::create(
-            CCLabelBMFont::create(title, "bigFont.fnt"),
-            nullptr,                     // no selected sprite
-            wrapper,
-            menu_selector(ButtonWrapper::onTrigger)
-        );
-        btn->setPosition(ccp(0, y));
-        menu->addChild(btn);
-    };
-
-    addBtn("Record", []{ Bot::onRecordButton(nullptr); },  30);
-    addBtn("Play",   []{ Bot::onPlayButton(nullptr); },   -10);
-    addBtn("Save",   []{ Bot::onSaveButton(nullptr); },   -50);
-    addBtn("Load",   []{ Bot::onLoadButton(nullptr); },   -90);
-
-    bg->addChild(menu);
-    m_uiNode = bg;
-    m_uiVisible = true;
-}
-
-// UI callbacks (called from ButtonWrapper)
-void Bot::onRecordButton(CCObject*) {
-    if (isRecording()) stopRecording();
-    else startRecording();
-}
-void Bot::onPlayButton(CCObject*) {
-    if (isPlaying()) stopPlayback();
-    else startPlayback();
-}
-void Bot::onSaveButton(CCObject*) {
-    std::string path = std::string(CCFileUtils::sharedFileUtils()->getWritablePath().c_str()) + "macro.gdmb";
-    saveMacro(path);
-}
-void Bot::onLoadButton(CCObject*) {
-    std::string path = std::string(CCFileUtils::sharedFileUtils()->getWritablePath().c_str()) + "macro.gdmb";
-    loadMacro(path);
-}

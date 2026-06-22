@@ -1,104 +1,223 @@
-// Bot.hpp
 #pragma once
+
 #include <Geode/Geode.hpp>
-#include <vector>
+#include <cstdint>
+#include <filesystem>
 #include <string>
-#include <fstream>
-#include <algorithm>
+#include <unordered_map>
+#include <vector>
 
-using namespace geode::prelude;
+namespace geode::prelude {
+    class PlayLayer;
+    class PlayerObject;
+    class CheckpointObject;
+    enum class PlayerButton : int;
+}
 
-/*
- * Recording format: absolute level-time + input flags.
- *
- * Why this is optimal:
- *  1) Not frame‑based → deterministic under CBS and CBF.
- *  2) Time‑stamps are taken directly from m_gameState.m_levelTime,
- *     which advances only with physics steps – perfect synchronisation.
- *  3) File size ∝ click count, not run length.
- *  4) Delta‑encoding during serialisation keeps files tiny.
- *  5) High‑resolution double preserves sub‑millisecond accuracy,
- *     making it compatible with Syzzi CBF’s enormous timing resolution.
- */
+namespace bot {
+    enum class TimingMode : std::uint8_t {
+        None = 0,
+        Cbf = 1,
+        Cbs = 2,
+    };
 
-struct InputEvent {
-    double time;      // absolute level time
-    bool down;        // true = press, false = release
-    int button;       // 1 = jump (extendable)
-};
+    struct MacroEvent {
+        std::int64_t timeNs = 0;
+        std::uint8_t button = 0;
+        std::uint8_t flags = 0; // bit 0 = down, bit 1 = player1
+    };
 
-class Bot {
-public:
-    // ---------- Recording ----------
-    static void startRecording();
-    static void stopRecording();
-    static bool isRecording();
+    struct PlayerSnapshot {
+        // Position / orientation
+        cocos2d::CCPoint position{};
+        float rotation = 0.f;
 
-    // ---------- Playback ----------
-    static void startPlayback();
-    static void stopPlayback();
-    static bool isPlaying();
+        // High-value motion state
+        double totalTime = 0.0;
+        double platformerXVelocity = 0.0;
+        float playerSpeed = 0.f;
+        float vehicleSize = 1.f;
+        float slopeVelocity = 0.f;
+        double scaleXRelated = 0.0;
+        double scaleXRelatedTime = 0.0;
+        float xVelocityRelated = 0.f;
+        float xVelocityRelated2 = 0.f;
+        float yVelocityRelated3 = 0.f;
+        float audioScale = 1.f;
+        float unkAngle1 = 0.f;
 
-    // ---------- Macro I/O ----------
-    static void saveMacro(const std::string& path);
-    static void loadMacro(const std::string& path);
+        // Mode / gravity state
+        bool isShip = false;
+        bool isBird = false;
+        bool isBall = false;
+        bool isDart = false;
+        bool isRobot = false;
+        bool isSpider = false;
+        bool isSwing = false;
+        bool isUpsideDown = false;
+        bool isDead = false;
+        bool isOnGround = false;
+        bool isOnGround2 = false;
+        bool isOnGround4 = false;
+        bool isGoingLeft = false;
+        bool isSideways = false;
+        bool maybeUpsideDownSlope = false;
+        bool maybeIsBoosted = false;
+        bool maybeGoingCorrectSlopeDirection = false;
+        bool isLocked = false;
+        bool controlsDisabled = false;
+        bool holdingRight = false;
+        bool holdingLeft = false;
+        bool leftPressedFirst = false;
+        bool decreaseBoostSlide = false;
+        bool unkA29 = false;
+        bool isBeingSpawnedByDualPortal = false;
+        bool defaultMiniIcon = false;
+        bool swapColors = false;
+        bool switchDashFireColor = false;
+        bool hasEverJumped = false;
+        bool hasEverHitRing = false;
+        bool fixGravityBug = false;
+        bool reverseSync = false;
+        bool wasTeleported = false;
 
-    // ---------- UI ----------
-    static void toggleUI(PlayLayer* pl);
-    static bool isUIVisible();
+        // State buckets that govern custom physics behavior in different gamemodes.
+        int stateOnGround = 0;
+        std::uint8_t stateUnk = 0;
+        std::uint8_t stateNoStickX = 0;
+        std::uint8_t stateNoStickY = 0;
+        std::uint8_t stateUnk2 = 0;
+        int stateBoostX = 0;
+        int stateBoostY = 0;
+        int maybeStateForce2 = 0;
+        int stateScale = 0;
+        int groundObjectMaterial = 0;
+        int reverseRelated = 0;
+        int followRelated = 0;
+        int dashFireFrame = 0;
+        int collidingWithSlopeId = 0;
+        int maybeSlidingTime = 0;
+        int nextColorKey = 0;
 
-    // ---------- Input capture (called from hook) ----------
-    static void recordInput(double time, bool down, int button);
+        // Object references are intentionally not serialized; vanilla checkpoint loading
+        // already reconstructs them, and persisting raw pointers would be unsafe.
+        cocos2d::CCPoint lastGroundedPos{};
+        cocos2d::CCPoint lastPortalPos{};
+        cocos2d::CCPoint shipRotation{};
+        cocos2d::CCPoint unk3918{};
+        cocos2d::CCPoint unk3920{};
+        float unkUnused3 = 0.f;
+        float unkA99 = 0.f;
+        float unk838 = 0.f;
+        float unk38cc = 0.f;
+        float unk3900 = 0.f;
+        float unk3778 = 0.f;
+        float unk3780 = 0.f;
+        float unk3784 = 0.f;
+        double maybeReverseSpeed = 0.0;
+        double maybeReverseAcceleration = 0.0;
+        double maybeSlopeForce = 0.0;
+        double physDeltaRelated = 0.0;
+        double maybeSlidingStartTime = 0.0;
+        double changedDirectionsTime = 0.0;
+        double slopeEndTime = 0.0;
+        double dashStartTime = 0.0;
+        double slopeStartTime = 0.0;
+        double lastLandTime = 0.0;
+        double maybeHasStopped = 0.0;
+        double totalTimeRelated = 0.0;
+    };
 
-    // ---------- Dead‑input cleanup ----------
-    static void onDeath();
-    static void onRestart();
+    struct CheckpointSnapshot {
+        std::int64_t timeNs = 0;
+        PlayerSnapshot player1;
+        PlayerSnapshot player2;
+    };
 
-    // ---------- Checkpoint ----------
-    static void checkpointStored(CheckpointObject* cp);
+    class BotOverlay;
 
-    // ---------- Speedhack ----------
-    static float getSpeedhack();
-    static void setSpeedhack(float speed);
-    static void speedhackUp();
-    static void speedhackDown();
+    class BotManager {
+    public:
+        static BotManager& get();
 
-    // ---------- Status ----------
-    enum class CBSMode { None, RobTop, Syzzi };
-    static CBSMode getCBSMode();
+        TimingMode detectedMode() const;
+        bool canPlayBack() const;
+        bool hasPlaybackData() const;
+        bool isRecording() const;
+        bool isPlayingBack() const;
+        bool isInjectingPlayback() const;
+        double speedhack() const;
 
-    // UI callbacks (static, kept for use by ButtonWrapper)
-    static void onRecordButton(CCObject*);
-    static void onPlayButton(CCObject*);
-    static void onSaveButton(CCObject*);
-    static void onLoadButton(CCObject*);
+        void toggleOverlay();
+        void setOverlay(BotOverlay* overlay);
+        BotOverlay* overlay() const;
 
-private:
-    // Recording state
-    static inline std::vector<InputEvent> m_events;
-    static inline bool m_recording = false;
-    static inline std::vector<size_t> m_checkpointEventIndices;
+        void startRecording();
+        void stopRecording(bool keepData = true);
+        void startPlayback();
+        void stopPlayback();
+        void saveMacro();
+        void loadMacro();
+        void setSpeedhack(double value);
 
-    // Playback state
-    static inline bool m_playing = false;
-    static inline size_t m_playIndex = 0;
-    static inline double m_playAccum = 0.0;
-    static inline double m_playBaseStep = 1.0 / 480.0;
+        void onGameUpdate(geode::prelude::PlayLayer* layer, float dt);
+        void onButton(geode::prelude::PlayerObject* player, geode::prelude::PlayerButton button, bool down);
+        void onDeath(geode::prelude::PlayLayer* layer);
+        void onRestartPre(geode::prelude::PlayLayer* layer);
+        void onRestartPost(geode::prelude::PlayLayer* layer);
+        void onCheckpointStore(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onCheckpointLoad(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onLevelComplete(geode::prelude::PlayLayer* layer);
+        void onSceneEnter(geode::prelude::PlayLayer* layer);
+        void onSceneExit();
 
-    // UI
-    static inline bool m_uiVisible = false;
-    static inline CCNode* m_uiNode = nullptr;
-    // Keep wrapper objects alive
-    static inline std::vector<CCObject*> m_uiHelpers;
+        void trimAfterCurrentTime(geode::prelude::PlayLayer* layer);
+        void clearDeadState();
+        void refreshPlayers(geode::prelude::PlayLayer* layer);
+        geode::prelude::PlayerObject* player1() const;
+        geode::prelude::PlayerObject* player2() const;
 
-    // Speedhack
-    static inline float m_speed = 1.0f;
+        const std::vector<MacroEvent>& events() const;
+        std::size_t playbackIndex() const;
+        std::filesystem::path macroPath() const;
 
-    // Playback helpers
-    static void injectInput(const InputEvent& ev);
-    static void processPlaybackStep(PlayLayer* pl, float customDt);
+    private:
+        BotManager() = default;
 
-    friend class PlayLayerHook;
-    friend class SchedulerHook;
-    friend class KeyboardHook;
-};
+        std::filesystem::path defaultMacroPath() const;
+        void writeMacroToDisk();
+        bool readMacroFromDisk();
+
+        static std::uint64_t zigZagEncode(std::int64_t value);
+        static std::int64_t zigZagDecode(std::uint64_t value);
+        static void writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value);
+        static bool readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value);
+        static PlayerSnapshot captureSnapshot(geode::prelude::PlayerObject* player);
+        static void applySnapshot(geode::prelude::PlayerObject* player, PlayerSnapshot const& snapshot);
+
+        TimingMode m_mode = TimingMode::None;
+        bool m_recording = false;
+        bool m_playback = false;
+        bool m_dead = false;
+        bool m_inPlaybackInjection = false;
+        bool m_inUpdateSplit = false;
+        double m_speedhack = 1.0;
+        std::int64_t m_recordBaseNs = 0;
+        std::int64_t m_playbackStartNs = 0;
+        std::int64_t m_deathCutoffNs = 0;
+
+        std::vector<MacroEvent> m_events;
+        std::vector<CheckpointSnapshot> m_checkpoints;
+        std::unordered_map<geode::prelude::CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
+        std::size_t m_playbackIndex = 0;
+
+        geode::prelude::PlayLayer* m_layer = nullptr;
+        geode::prelude::PlayerObject* m_cachedP1 = nullptr;
+        geode::prelude::PlayerObject* m_cachedP2 = nullptr;
+
+        BotOverlay* m_overlay = nullptr;
+        std::filesystem::path m_macroPath;
+    };
+
+    class BotOverlay;
+}
