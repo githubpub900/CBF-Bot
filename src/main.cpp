@@ -276,7 +276,6 @@ public:
         m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
         menu->addChild(m_playToggle);
 
-        // Synchronize initial toggles safely without loop interaction
         m_blockToggleCallback = true;
         m_recordToggle->toggle(Bot::get().isRecording);
         m_playToggle->toggle(Bot::get().isPlaying);
@@ -384,11 +383,9 @@ public:
     void onClose(cocos2d::CCObject*) {
         s_activeMenuInstance = nullptr;
         
-        // Block instant processing immediately
         this->setKeypadEnabled(false);
         this->setTouchEnabled(false);
         
-        // Defer actual cleanup to next frame boundary to avoid stack corruption
         auto delay = cocos2d::CCDelayTime::create(0.0f);
         auto callFunc = cocos2d::CCCallFunc::create(this, callfunc_selector(BotUI::deferredClose));
         this->runAction(cocos2d::CCSequence::create(delay, callFunc, nullptr));
@@ -412,7 +409,7 @@ void Bot::toggleUI() {
 
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool repeat, double timestamp) {
-        if (down && key == cocos2d::KEY_F8) {
+        if (down && key == cocos2d::KEY_K) {
             Bot::get().toggleUI();
             return true;
         }
