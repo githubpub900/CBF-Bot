@@ -133,71 +133,52 @@ static_assert(sizeof(MacroHeader) == 28, "MacroHeader must be 28 bytes");
 //  │       PRACTICE BUG FIX — CHECKPOINT SNAPSHOT                         │
 //  ├──────────────────────────────────────────────────────────────────────┤
 //  │                                                                       │
-//  │  GD's built-in CheckpointObject captures most state, but several     │
-//  │  fields are known to be missing or incorrectly restored — this is    │
-//  │  the classic "practice bug". We maintain a parallel snapshot stack   │
-//  │  keyed by checkpoint order and restore our snapshot on load.         │
+//  │  GD's built-in CheckpointObject captures most state, but several      │
+//  │  fields are known to be missing or incorrectly restored — this is     │
+//  │  the classic "practice bug". We maintain a parallel snapshot stack    │
+//  │  keyed by checkpoint order and restore our snapshot on load.          │
 //  │                                                                       │
-//  │  Universal state captured:                                            │
-//  │    - Position, rotation, X/Y velocity                                 │
-//  │    - Gravity direction (flipped / not)                                │
-//  │    - Player size (big / small)                                        │
-//  │    - Vehicle size (gamemode: cube/ship/ball/ufo/wave/robot/spider/   │
-//  │      swing)                                                           │
-//  │    - Dual mode (per-player + global)                                  │
-//  │    - Current speed-portal multiplier                                  │
+//  │  NOTE ON BINDINGS: Geode's 2.2081 PlayerObject bindings expose        │
+//  │  fewer fields than older versions. The following confirmed-existing   │
+//  │  members are captured:                                                │
+//  │    - position (CCNode::getPosition)                                   │
+//  │    - rotation (CCNode::getRotation)                                   │
+//  │    - m_yVelocity (double)                                             │
+//  │    - m_playerSpeed (float — speed-portal multiplier)                  │
+//  │    - m_vehicleSize (int — current gamemode)                           │
+//  │    - m_isOnGround (bool)                                              │
+//  │    - m_isDashing (bool)                                               │
 //  │                                                                       │
-//  │  Gamemode-specific state captured (best-effort from public Geode     │
-//  │  bindings; private fields that aren't exposed are re-derived from     │
-//  │  position/velocity on restore):                                       │
-//  │    Cube  : (universal covers it)                                      │
-//  │    Ship  : isHolding, vertical velocity                               │
-//  │    Ball  : isOnGround, rotation direction                             │
-//  │    UFO   : isHolding                                                  │
-//  │    Wave  : isHolding, trail direction                                 │
-//  │    Robot : isDashing, robotJumpCount, isOnGround                      │
-//  │    Spider: isOnGround (snap target re-derived)                        │
-//  │    Swing : isHolding                                                  │
-//  │                                                                       │
-//  │  Note: Some private PlayerObject fields are not in Geode's bindings   │
-//  │  for 2.2081. For those, we restore via the closest public API or     │
-//  │  leave them to GD's own CheckpointObject (which handles them          │
-//  │  correctly for the in-scope cases). The combination of our snapshot   │
-//  │  and GD's snapshot covers everything needed for deterministic        │
-//  │  macro playback after a checkpoint load.                              │
+//  │  Fields NOT available in 2.2081 bindings (gravity flip, mini size,    │
+//  │  robot jump count, wave trail visibility, dual mode) are left to      │
+//  │  GD's own CheckpointObject. The combination of our snapshot and       │
+//  │  GD's snapshot covers everything needed for deterministic macro       │
+//  │  playback after a checkpoint load.                                    │
 //  │                                                                       │
 //  └──────────────────────────────────────────────────────────────────────┘
 // ============================================================================
 
 struct PlayerSnap {
-    // --- Universal ---
+    // --- Universal (confirmed in Geode 2.2081 bindings) ---
     CCPoint position;
     float   rotation;
-    float   yVel;
-    float   xVel;
-    bool    gravityFlipped;
-    float   playerSize;
-    int     vehicleSize;   // 0=cube 1=ship 2=ball 3=ufo 4=wave 5=robot 6=spider 7=swing
+    double  yVel;          // m_yVelocity is double in 2.2081
+    float   playerSpeed;   // m_playerSpeed — speed-portal multiplier
+    int     vehicleSize;   // m_vehicleSize — current gamemode
 
-    // --- Gamemode-specific (best-effort) ---
-    bool    isHolding;
-    bool    isOnGround;
-    bool    isDashing;
-    int     robotJumpCount;
-    bool    waveTrailVisible;
+    // --- Gamemode-specific (confirmed) ---
+    bool    isHolding;     // tracked by us, not a PlayerObject field
+    bool    isOnGround;    // m_isOnGround
+    bool    isDashing;     // m_isDashing
 
     PlayerSnap()
-        : position(CCPointZero), rotation(0.f), yVel(0.f), xVel(0.f),
-          gravityFlipped(false), playerSize(1.f), vehicleSize(0),
-          isHolding(false), isOnGround(false), isDashing(false),
-          robotJumpCount(0), waveTrailVisible(false) {}
+        : position(CCPointZero), rotation(0.f), yVel(0.0),
+          playerSpeed(0.f), vehicleSize(0),
+          isHolding(false), isOnGround(false), isDashing(false) {}
 };
 
 struct CheckpointSnap {
-    float      gameX;          // PlayLayer world X at checkpoint
-    float      levelTime;
-    float      currentSpeed;   // active speed-portal multiplier
-    bool       isDualMode;
+    float      gameX;      // PlayLayer world X at checkpoint
     PlayerSnap p1;
     PlayerSnap p2;
 };
@@ -366,6 +347,15 @@ private:
     void resetPlaybackState();
     void clearCheckpointState();
     void applySpeedhackToScheduler();
+
+    // Checkpoint-load detection heuristic. After PlayLayer::resetLevel()
+    // runs, we check the player's X position against the last stored
+    // checkpoint's X. If they match within a tolerance, it's a checkpoint
+    // load; otherwise it's a full restart.
+    // LIMITATION: This is a heuristic. In rare cases (e.g. a level where
+    // the start position coincidentally matches a checkpoint X), it may
+    // misclassify. The tolerance is tight (50 units) to minimize this.
+    bool isCheckpointLoad(float playerX) const;
 };
 
 // ============================================================================

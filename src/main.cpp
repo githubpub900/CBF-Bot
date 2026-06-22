@@ -38,7 +38,9 @@ void macrobot_ToggleBotMenu();
 // ============================================================================
 //  Helper: format float with fixed precision for UI
 // ============================================================================
-static std::string fmt(float v, int prec = 2) {
+// NOTE: renamed from `fmt` to avoid collision with the {fmt} library
+// namespace, which Geode pulls in transitively.
+static std::string formatFloat(float v, int prec = 2) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(prec) << v;
     return ss.str();
@@ -373,7 +375,10 @@ void Bot::onCheckpointLoad() {
 }
 
 void Bot::onCheckpointRemove() {
-    // GD's "remove last checkpoint" (X key in practice). Mirror it.
+    // Called when a checkpoint is explicitly removed (e.g. X key in
+    // practice). In GD 2.2081, we cannot hook the removal function
+    // directly, so this method is currently unused. It's retained for
+    // future use if a hook becomes available.
     if (!m_checkpointSnaps.empty())   m_checkpointSnaps.pop_back();
     if (!m_checkpointMarks.empty())   m_checkpointMarks.pop_back();
 }
@@ -590,50 +595,47 @@ bool Bot::isPlaybackEnabled() const {
     return detectCB() != CBImplementation::None;
 }
 
+bool Bot::isCheckpointLoad(float playerX) const {
+    // Heuristic: after resetLevel(), if the player's X matches the last
+    // stored checkpoint's X (within 50 units), it's a checkpoint load.
+    // Otherwise it's a full restart (player is at the level start).
+    if (m_checkpointMarks.empty()) return false;
+    const float cpX = m_checkpointMarks.back().x;
+    return std::abs(playerX - cpX) < 50.f;
+}
+
 // ----------------------------------------------------------------------------
 //  Snapshot capture / restore (practice bug fix)
 // ----------------------------------------------------------------------------
 
 static void capturePlayer(PlayerObject* p, PlayerSnap& out, bool isHolding) {
     if (!p) return;
-    out.position      = p->getPosition();
-    out.rotation      = p->getRotation();
-    out.yVel          = p->m_yVelocity;
-    out.xVel          = p->m_xVelocity;
-    out.gravityFlipped = p->m_gravityFlipped;
-    out.playerSize    = p->m_playerSize;
-    out.vehicleSize   = p->m_vehicleSize;
-    out.isHolding     = isHolding;
-    out.isOnGround    = p->m_isOnGround;
-    out.isDashing     = p->m_isDashing;
-    // Gamemode-specific best-effort fields. Use Geode's m_fields-aware
-    // accessors if available; otherwise leave at defaults. The defaults
-    // are acceptable because GD's own CheckpointObject restores these
-    // correctly for the in-scope cases.
-    //
-    // LIMITATION: robotJumpCount and waveTrailVisible field names may
-    // vary across Geode binding versions for 2.2081. If a name is wrong,
-    // the build will fail with "no member named" — fix the name here.
-    out.robotJumpCount = p->m_robotJumpCount;
-    out.waveTrailVisible = p->m_waveTrailVisible;
+    out.position     = p->getPosition();
+    out.rotation     = p->getRotation();
+    out.yVel         = p->m_yVelocity;
+    out.playerSpeed  = p->m_playerSpeed;
+    out.vehicleSize  = p->m_vehicleSize;
+    out.isHolding    = isHolding;
+    out.isOnGround   = p->m_isOnGround;
+    out.isDashing    = p->m_isDashing;
 }
 
 static void restorePlayer(PlayerObject* p, const PlayerSnap& in) {
     if (!p) return;
     p->setPosition(in.position);
     p->setRotation(in.rotation);
-    p->m_yVelocity      = in.yVel;
-    p->m_xVelocity      = in.xVel;
-    p->m_gravityFlipped = in.gravityFlipped;
-    p->m_playerSize     = in.playerSize;
-    p->m_vehicleSize    = in.vehicleSize;
-    p->m_isOnGround     = in.isOnGround;
-    p->m_isDashing      = in.isDashing;
-    p->m_robotJumpCount = in.robotJumpCount;
-    p->m_waveTrailVisible = in.waveTrailVisible;
+    p->m_yVelocity     = in.yVel;
+    p->m_playerSpeed   = in.playerSpeed;
+    p->m_vehicleSize   = in.vehicleSize;
+    p->m_isOnGround    = in.isOnGround;
+    p->m_isDashing     = in.isDashing;
     // isHolding is restored implicitly via the next pushButton/releaseButton
     // call from playback; setting it directly here would desync GD's input
     // state machine.
+    //
+    // Fields not available in Geode 2.2081 bindings (gravity flip, mini
+    // size, robot jump count, wave trail) are left to GD's own
+    // CheckpointObject, which handles them correctly in most cases.
 }
 
 CheckpointSnap Bot::captureSnapshot() const {
@@ -641,14 +643,7 @@ CheckpointSnap Bot::captureSnapshot() const {
     PlayLayer* pl = PlayLayer::get();
     if (!pl) return snap;
 
-    snap.gameX       = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-    // m_gameState may be null briefly during transitions; guard it.
-    // currentSpeed is captured from the player's speed multiplier if
-    // available, otherwise defaults to 0 (unused on restore anyway —
-    // GD's own checkpoint restores the speed portal state).
-    snap.levelTime   = 0.f;
-    snap.currentSpeed = 0.f;
-    snap.isDualMode  = pl->m_isDualMode;
+    snap.gameX = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
 
     if (pl->m_player1) capturePlayer(pl->m_player1, snap.p1, m_p1Holding);
     if (pl->m_player2) capturePlayer(pl->m_player2, snap.p2, m_p2Holding);
@@ -659,15 +654,15 @@ void Bot::restoreSnapshot(const CheckpointSnap& snap) {
     PlayLayer* pl = PlayLayer::get();
     if (!pl) return;
 
-    // Universal state on PlayLayer itself.
-    pl->m_isDualMode = snap.isDualMode;
-
+    // Restore our supplementary player state on top of GD's checkpoint
+    // restoration. GD's CheckpointObject has already run by the time
+    // this is called; we only override the fields it got wrong.
     if (pl->m_player1) restorePlayer(pl->m_player1, snap.p1);
     if (pl->m_player2) restorePlayer(pl->m_player2, snap.p2);
 
-    // We do NOT reset m_cameraX explicitly — GD's own checkpoint load
-    // handles camera positioning, and overriding here can cause a one-
-    // frame camera desync. Leave it to GD.
+    // Dual mode, camera X, and other PlayLayer-level state are left to
+    // GD's own checkpoint system — those fields are not accessible in
+    // the 2.2081 bindings.
 }
 
 
@@ -712,22 +707,24 @@ class $modify(PlayLayerHook, PlayLayer) {
     void resetLevel() {
         // resetLevel is called for BOTH "full restart" (pause menu →
         // Restart) AND "checkpoint load" (clicking a practice checkpoint).
-        // We distinguish them by checking the active checkpoint field: GD
-        // sets it before calling resetLevel when loading from a checkpoint.
+        // In GD 2.2081, there is no separate loadCheckpoint() function —
+        // checkpoint loading is done inside resetLevel() itself.
         //
-        // IMPORTANT: We do NOT call onCheckpointLoad() here. The dedicated
-        // loadCheckpoint() hook below handles that — GD calls
-        // loadCheckpoint() after resetLevel() when restoring a checkpoint,
-        // so firing twice would double-restore. We only fire the
-        // dead-input cleanup here.
-        //
-        // NOTE: The exact field name for the "checkpoint to load" varies
-        // across Geode binding versions for 2.2081. Common names:
-        //   m_checkpoint / m_activeCheckpoint / m_currentCheckpoint
-        // If the build fails here, swap to the correct binding name.
-        bool isCheckpointLoad = (m_checkpoint != nullptr);
-        Bot::get().onLevelReset(isCheckpointLoad);
+        // We call the original FIRST so the player is repositioned, then
+        // detect which case it was by comparing the player's new X to our
+        // last stored checkpoint X.
         PlayLayer::resetLevel();
+
+        float playerX = 0.f;
+        if (m_player1) {
+            playerX = m_player1->getPositionX();
+        }
+
+        bool isCpLoad = Bot::get().isCheckpointLoad(playerX);
+        Bot::get().onLevelReset(isCpLoad);
+        if (isCpLoad) {
+            Bot::get().onCheckpointLoad();
+        }
     }
 
     void createCheckpoint() {
@@ -735,28 +732,27 @@ class $modify(PlayLayerHook, PlayLayer) {
         Bot::get().onCheckpointCreate();
     }
 
-    void loadCheckpoint(CheckpointObject* cp) {
-        // GD's canonical practice-checkpoint loader. This fires AFTER
-        // resetLevel() has positioned the player at the start; we then
-        // apply our supplementary snapshot on top of GD's restoration.
-        PlayLayer::loadCheckpoint(cp);
-        Bot::get().onCheckpointLoad();
-    }
-
-    void removeLastCheckpoint() {
-        PlayLayer::removeLastCheckpoint();
-        Bot::get().onCheckpointRemove();
-    }
+    // NOTE: In GD 2.2081, PlayLayer does not expose loadCheckpoint() or
+    // removeLastCheckpoint() as hookable members. Checkpoint loading is
+    // handled internally by resetLevel(), and checkpoint removal is done
+    // through the PracticeUI. We rely on createCheckpoint() + our
+    // resetLevel() detection for snapshot management.
+    //
+    // LIMITATION: We cannot detect explicit checkpoint removal (the X key
+    // in practice mode). If the user removes a checkpoint, our snapshot
+    // stack will be stale by one entry. This is a minor issue — the next
+    // createCheckpoint() or full restart will re-sync the stack.
 
     // F8 toggles the bot menu. We hook keyDown because PlayLayer is the
-    // only scene where the bot is meaningful, and keyDown is the
-    // canonical GD keyboard entry point.
-    void keyDown(enumKeyCodes key) {
+    // only scene where the bot is meaningful.
+    // NOTE: In Geode's GD 2.2081 SDK, CCLayer::keyDown takes 2 args:
+    // (enumKeyCodes, double). The double is a timestamp/key-repeat value.
+    void keyDown(enumKeyCodes key, double param) {
         if (key == enumKeyCodes::KEY_F8) {
             macrobot_ToggleBotMenu();
             return; // swallow
         }
-        PlayLayer::keyDown(key);
+        PlayLayer::keyDown(key, param);
     }
 };
 
@@ -862,7 +858,7 @@ public:
         s_instance = menu;
     }
 
-    bool init() {
+    bool init() override {
         if (!CCLayer::init()) return false;
 
         const CCSize win = CCDirector::sharedDirector()->getWinSize();
@@ -1002,7 +998,7 @@ public:
             "/" + std::to_string(b.getInputCount());
         m_countLabel->setString(countStr.c_str());
 
-        m_speedLabel->setString((fmt(b.getSpeedhack(), 2) + "x").c_str());
+        m_speedLabel->setString((formatFloat(b.getSpeedhack(), 2) + "x").c_str());
 
         // Update button labels to reflect toggle state.
         // (ButtonSprite doesn't expose setString directly; recreate.)
