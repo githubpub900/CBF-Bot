@@ -638,7 +638,7 @@ namespace bot {
 // Intercept keyboard messages at the absolute engine source!
 // This fixes keys being swallowed on both Windows and Android.
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool isRepeat) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool isRepeat, double dt) {
         if (down && key == cocos2d::enumKeyCodes::KEY_K) {
             auto* scene = CCDirector::sharedDirector()->getRunningScene();
             if (scene) {
@@ -651,7 +651,7 @@ class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
                 }
             }
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, isRepeat);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, isRepeat, dt);
     }
 };
 
