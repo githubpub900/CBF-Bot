@@ -93,6 +93,7 @@ private:
     CCLabelBMFont* m_macroSizeLabel = nullptr;
     CCMenuItemToggler* m_recordToggle = nullptr;
     CCMenuItemToggler* m_playToggle = nullptr;
+    bool m_ignoreCallbacks = false; // Flag to prevent programmatic state cascades
 
 public:
     static BotMenuLayer* create() {
@@ -176,7 +177,12 @@ public:
         auto onRec = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
         m_recordToggle = CCMenuItemToggler::create(offRec, onRec, this, menu_selector(BotMenuLayer::onToggleRecord));
         m_recordToggle->setPosition(winSize.width / 2 - 50.0f, winSize.height / 2 + 5.0f);
+        
+        // Block callbacks before programmatically setting the toggles
+        m_ignoreCallbacks = true;
         m_recordToggle->toggle(bot.currentState == BotManager::State::Recording);
+        m_ignoreCallbacks = false;
+        
         menu->addChild(m_recordToggle);
 
         auto recLabel = CCLabelBMFont::create("Record", "chatFont.fnt");
@@ -188,7 +194,11 @@ public:
         auto onPlay = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
         m_playToggle = CCMenuItemToggler::create(offPlay, onPlay, this, menu_selector(BotMenuLayer::onTogglePlay));
         m_playToggle->setPosition(winSize.width / 2 + 50.0f, winSize.height / 2 + 5.0f);
+        
+        m_ignoreCallbacks = true;
         m_playToggle->toggle(bot.currentState == BotManager::State::Playing);
+        m_ignoreCallbacks = false;
+        
         menu->addChild(m_playToggle);
 
         auto playLabel = CCLabelBMFont::create("Play", "chatFont.fnt");
@@ -260,14 +270,20 @@ public:
     }
 
     void onToggleRecord(CCObject* sender) {
+        if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        // Checkboxes in Cocos automatically invert state before calling the callback
-        if (m_recordToggle->isToggled()) {
+        auto toggler = static_cast<CCMenuItemToggler*>(sender);
+        
+        if (toggler->isToggled()) {
             bot.currentState = BotManager::State::Recording;
             bot.clearMacro();
+            
+            // Uncheck the Play box without causing callback circular triggers
+            m_ignoreCallbacks = true;
             if (m_playToggle->isToggled()) {
-                m_playToggle->toggle(false); // Disable Play
+                m_playToggle->toggle(false);
             }
+            m_ignoreCallbacks = false;
         } else {
             bot.currentState = BotManager::State::Idle;
         }
@@ -275,14 +291,21 @@ public:
     }
 
     void onTogglePlay(CCObject* sender) {
+        if (m_ignoreCallbacks) return;
         auto& bot = BotManager::get();
-        if (m_playToggle->isToggled()) {
+        auto toggler = static_cast<CCMenuItemToggler*>(sender);
+        
+        if (toggler->isToggled()) {
             bot.currentState = BotManager::State::Playing;
             bot.playbackIndex = 0;
             std::sort(bot.macro.begin(), bot.macro.end());
+            
+            // Uncheck the Record box without causing callback circular triggers
+            m_ignoreCallbacks = true;
             if (m_recordToggle->isToggled()) {
-                m_recordToggle->toggle(false); // Disable Record
+                m_recordToggle->toggle(false);
             }
+            m_ignoreCallbacks = false;
         } else {
             bot.currentState = BotManager::State::Idle;
         }
@@ -352,7 +375,6 @@ class $modify(MyPauseLayer, PauseLayer) {
 // PLAYBACK, LOGIC, & CHECKPOINT HOOKS
 // ==========================================
 class $modify(MyPlayLayer, PlayLayer) {
-    // Add custom fields for Geode to safely track state variables
     struct Fields {
         unsigned int lastCheckpointCount = 0;
     };
