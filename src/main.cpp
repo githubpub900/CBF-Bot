@@ -276,15 +276,19 @@ public:
         m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
         menu->addChild(m_playToggle);
 
-        m_blockToggleCallback = true;
-        m_recordToggle->toggle(Bot::get().isRecording);
-        m_playToggle->toggle(Bot::get().isPlaying);
-        m_blockToggleCallback = false;
-
         auto playText = cocos2d::CCLabelBMFont::create("Playback", "bigFont.fnt");
         playText->setPosition(winSize.width / 2 + 110, winSize.height / 2 + 20);
         playText->setScale(0.45f);
         this->m_mainLayer->addChild(playText);
+
+        // --- Explicit Synchronization of Persistent States ---
+        m_recordToggle->m_toggled = Bot::get().isRecording;
+        m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
+        m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
+
+        m_playToggle->m_toggled = Bot::get().isPlaying;
+        m_playToggle->m_onButton->setVisible(Bot::get().isPlaying);
+        m_playToggle->m_offButton->setVisible(!Bot::get().isPlaying);
 
         auto speedLabel = cocos2d::CCLabelBMFont::create("Speedhack Value:", "bigFont.fnt");
         speedLabel->setPosition(winSize.width / 2 - 60, winSize.height / 2 - 35);
@@ -339,15 +343,19 @@ public:
 
     void onToggleRecord(cocos2d::CCObject* pSender) {
         if (m_blockToggleCallback) return;
-        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isRecording = toggle->m_toggled;
+
+        // Directly flip structural states manually to bypass backend/frontend desync
+        Bot::get().isRecording = !Bot::get().isRecording;
+        m_recordToggle->m_toggled = Bot::get().isRecording;
+        m_recordToggle->m_onButton->setVisible(Bot::get().isRecording);
+        m_recordToggle->m_offButton->setVisible(!Bot::get().isRecording);
         
         if (Bot::get().isRecording) {
             Bot::get().isPlaying = false;
-            if (m_playToggle && m_playToggle->m_toggled) {
-                m_blockToggleCallback = true;
-                m_playToggle->toggle(false);
-                m_blockToggleCallback = false;
+            if (m_playToggle) {
+                m_playToggle->m_toggled = false;
+                m_playToggle->m_onButton->setVisible(false);
+                m_playToggle->m_offButton->setVisible(true);
             }
         }
         Bot::get().updateAudioPitch();
@@ -355,15 +363,19 @@ public:
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
         if (m_blockToggleCallback) return;
-        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isPlaying = toggle->m_toggled;
+
+        // Directly flip structural states manually to bypass backend/frontend desync
+        Bot::get().isPlaying = !Bot::get().isPlaying;
+        m_playToggle->m_toggled = Bot::get().isPlaying;
+        m_playToggle->m_onButton->setVisible(Bot::get().isPlaying);
+        m_playToggle->m_offButton->setVisible(!Bot::get().isPlaying);
         
         if (Bot::get().isPlaying) {
             Bot::get().isRecording = false;
-            if (m_recordToggle && m_recordToggle->m_toggled) {
-                m_blockToggleCallback = true;
-                m_recordToggle->toggle(false);
-                m_blockToggleCallback = false;
+            if (m_recordToggle) {
+                m_recordToggle->m_toggled = false;
+                m_recordToggle->m_onButton->setVisible(false);
+                m_recordToggle->m_offButton->setVisible(true);
             }
             Bot::get().playbackIndex = 0;
         }
