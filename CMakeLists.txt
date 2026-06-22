@@ -16,8 +16,8 @@ else()
     add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 endif()
 
-# Setup the mod using the modern v5 macro name
-geode_mod(${PROJECT_NAME})
+# Fallback setup macro for direct subdirectory inclusion
+setup_geode_mod(${PROJECT_NAME})
 
 # All sources live under src/.
 file(GLOB_RECURSE PROJECT_SOURCES
