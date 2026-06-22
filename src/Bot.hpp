@@ -6,8 +6,8 @@ using namespace geode::prelude;
 
 enum class EngineType {
     None,
-    CBS,       // RobTop's Built-in Click Between Steps
-    SyzziCBF   // Syzzi's Click Between Frames Mod
+    CBS,       
+    SyzziCBF   
 };
 
 struct PlayerState {
@@ -59,6 +59,7 @@ public:
     void toggleUI();
     void recordAction(float xPos, int button, bool player2, bool push);
     void updatePlayback(PlayLayer* pl);
+    void updateAudioPitch();
     
     void saveCheckpoint(PlayLayer* pl);
     void removeLastCheckpoint();
@@ -68,8 +69,4 @@ public:
 
     void saveMacro(const std::string& filename);
     void loadMacro(const std::string& filename);
-
-private:
-    PlayerState captureState(PlayerObject* p);
-    void applyState(PlayerObject* p, const PlayerState& s);
 };

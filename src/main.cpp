@@ -2,9 +2,11 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/modify/FMODAudioEngine.hpp>
 #include <fstream>
 
-// --- Singleton & Engine Detection ---
+class BotUI;
+static BotUI* s_activeMenuInstance = nullptr;
 
 Bot& Bot::get() {
     static Bot instance;
@@ -24,6 +26,17 @@ void Bot::detectEngine() {
     }
 }
 
+void Bot::updateAudioPitch() {
+    auto fmod = FMODAudioEngine::sharedEngine();
+    if (fmod && fmod->m_backgroundMusicChannel) {
+        if (isPlaying || isRecording) {
+            fmod->m_backgroundMusicChannel->setPitch(speedHackValue);
+        } else {
+            fmod->m_backgroundMusicChannel->setPitch(1.0f);
+        }
+    }
+}
+
 // --- Recording & Playback Systems ---
 
 void Bot::recordAction(float xPos, int button, bool player2, bool push) {
@@ -31,24 +44,27 @@ void Bot::recordAction(float xPos, int button, bool player2, bool push) {
 }
 
 void Bot::updatePlayback(PlayLayer* pl) {
-    if (!isPlaying) return;
-    
+    if (!isPlaying || actions.empty()) return;
+
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
-        PlayerObject* p = action.player2 ? pl->m_player2 : pl->m_player1;
         
-        if (!p) break;
-        
+        // Dynamic Player targeting resolves flipped inputs / missing dual components safely
+        bool actualPlayer2 = action.player2 && pl->m_isDualMode;
+        PlayerObject* p = actualPlayer2 ? pl->m_player2 : pl->m_player1;
+        if (!p) p = pl->m_player1; 
+
         if (p->m_position.x >= action.xPos) {
+            // Keep original action.player2 flag so external layout mods process it identically
             pl->handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
-            break;
+            break; 
         }
     }
 }
 
-// --- Practice Mode Bug Fix & Dead Input Handling ---
+// --- Practice Mode Operations ---
 
 PlayerState Bot::captureState(PlayerObject* p) {
     PlayerState s;
@@ -106,7 +122,6 @@ void Bot::restoreCheckpoint(PlayLayer* pl) {
     if (!checkpoints.empty()) {
         auto& cp = checkpoints.back();
         actions.resize(cp.actionIndex); 
-        
         applyState(pl->m_player1, cp.p1);
         if (pl->m_player2) applyState(pl->m_player2, cp.p2);
     } else {
@@ -117,7 +132,7 @@ void Bot::restoreCheckpoint(PlayLayer* pl) {
 void Bot::clearCheckpoints() { checkpoints.clear(); }
 void Bot::clearMacro() { actions.clear(); playbackIndex = 0; }
 
-// --- Efficient Serialization ---
+// --- Serialization Framework ---
 
 void Bot::saveMacro(const std::string& filename) {
     auto path = geode::Mod::get()->getSaveDir() / filename;
@@ -177,7 +192,9 @@ class $modify(BotPlayLayer, PlayLayer) {
     
     void handleButton(bool push, int button, bool player2) {
         if (Bot::get().isRecording && !Bot::get().isPlaying) {
-            auto p = player2 ? this->m_player2 : this->m_player1;
+            // Verify if the input realistically belongs to Player 2 based on active layer configurations
+            bool actualPlayer2 = player2 && this->m_isDualMode;
+            auto p = actualPlayer2 ? this->m_player2 : this->m_player1;
             if (p) {
                 Bot::get().recordAction(p->m_position.x, button, player2, push);
             }
@@ -188,15 +205,25 @@ class $modify(BotPlayLayer, PlayLayer) {
 
 class $modify(BotScheduler, CCScheduler) {
     void update(float dt) {
-        float scale = Bot::get().speedHackValue;
-        CCScheduler::update(dt * scale);
+        CCScheduler::update(dt * Bot::get().speedHackValue);
+    }
+};
+
+class $modify(BotAudioEngine, FMODAudioEngine) {
+    void playMusic(gd::string path, bool loop, float fadeTime, int channel) {
+        FMODAudioEngine::playMusic(path, loop, fadeTime, channel);
+        Bot::get().updateAudioPitch();
     }
 };
 
 // --- User Interface Layer ---
 
-class BotUI : public FLAlertLayer {
+class BotUI : public FLAlertLayer, public TextInputDelegate {
 public:
+    cocos2d::CCLabelBMFont* m_counterLabel = nullptr;
+    CCMenuItemToggler* m_recordToggle = nullptr;
+    CCMenuItemToggler* m_playToggle = nullptr;
+
     static BotUI* create() {
         auto ret = new BotUI();
         if (ret && ret->init()) {
@@ -213,112 +240,147 @@ public:
         auto winSize = cocos2d::CCDirector::sharedDirector()->getWinSize();
         
         auto bg = CCScale9Sprite::create("GJ_square01.png");
-        bg->setContentSize({400.f, 250.f});
+        bg->setContentSize({420.f, 280.f});
         bg->setPosition(winSize / 2);
         this->m_mainLayer->addChild(bg);
 
-        auto title = cocos2d::CCLabelBMFont::create("Macro Bot 2.2081", "goldFont.fnt");
-        title->setPosition(winSize.width / 2, winSize.height / 2 + 100);
+        auto title = cocos2d::CCLabelBMFont::create("Macro Bot Engine", "goldFont.fnt");
+        title->setPosition(winSize.width / 2, winSize.height / 2 + 115);
         title->setScale(0.8f);
         this->m_mainLayer->addChild(title);
 
-        auto statusLabel = cocos2d::CCLabelBMFont::create("", "bigFont.fnt");
-        statusLabel->setPosition(winSize.width / 2, winSize.height / 2 + 50);
-        statusLabel->setScale(0.5f);
-        
-        Bot::get().detectEngine();
-        switch (Bot::get().engine) {
-            case EngineType::SyzziCBF:
-                statusLabel->setString("Status: Syzzi CBF Active");
-                statusLabel->setColor({0, 255, 0});
-                break;
-            case EngineType::CBS:
-                statusLabel->setString("Status: RobTop CBS Active");
-                statusLabel->setColor({255, 255, 0});
-                break;
-            case EngineType::None:
-            default:
-                statusLabel->setString("Status: Disabled (No CBF/CBS)");
-                statusLabel->setColor({255, 0, 0});
-                break;
-        }
-        this->m_mainLayer->addChild(statusLabel);
+        m_counterLabel = cocos2d::CCLabelBMFont::create("Captured Inputs: 0", "bigFont.fnt");
+        m_counterLabel->setPosition(winSize.width / 2, winSize.height / 2 + 80);
+        m_counterLabel->setScale(0.4f);
+        m_counterLabel->setColor({180, 220, 255});
+        this->m_mainLayer->addChild(m_counterLabel);
 
         auto menu = cocos2d::CCMenu::create();
-        menu->setPosition(winSize.width / 2, winSize.height / 2 - 20);
-        
-        auto btnRecord = CCMenuItemSpriteExtra::create(ButtonSprite::create("Record"), this, menu_selector(BotUI::onRecord));
-        auto btnPlay = CCMenuItemSpriteExtra::create(ButtonSprite::create("Play"), this, menu_selector(BotUI::onPlay));
-        auto btnSave = CCMenuItemSpriteExtra::create(ButtonSprite::create("Save"), this, menu_selector(BotUI::onSave));
-        auto btnLoad = CCMenuItemSpriteExtra::create(ButtonSprite::create("Load"), this, menu_selector(BotUI::onLoad));
-        auto btnSpeed = CCMenuItemSpriteExtra::create(ButtonSprite::create("Speed"), this, menu_selector(BotUI::onSpeedHack));
-        
-        menu->addChild(btnRecord);
-        menu->addChild(btnPlay);
-        menu->addChild(btnSave);
-        menu->addChild(btnLoad);
-        menu->addChild(btnSpeed);
-        menu->alignItemsHorizontallyWithPadding(10.f);
-        
+        menu->setPosition({0, 0});
         this->m_mainLayer->addChild(menu);
 
-        auto closeMenu = cocos2d::CCMenu::create();
-        closeMenu->setPosition(winSize.width / 2, winSize.height / 2 - 90);
-        auto closeBtn = CCMenuItemSpriteExtra::create(ButtonSprite::create("Close"), this, menu_selector(BotUI::onClose));
-        closeMenu->addChild(closeBtn);
-        this->m_mainLayer->addChild(closeMenu);
+        auto onLabel = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
+        auto offLabel = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
+        
+        m_recordToggle = CCMenuItemToggler::create(offLabel, onLabel, this, menu_selector(BotUI::onToggleRecord));
+        m_recordToggle->setPosition(winSize.width / 2 - 110, winSize.height / 2 + 20);
+        m_recordToggle->setChecked(Bot::get().isRecording);
+        menu->addChild(m_recordToggle);
+
+        auto recText = cocos2d::CCLabelBMFont::create("Record Mode", "bigFont.fnt");
+        recText->setPosition(winSize.width / 2 - 40, winSize.height / 2 + 20);
+        recText->setScale(0.45f);
+        this->m_mainLayer->addChild(recText);
+
+        auto onLabel2 = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
+        auto offLabel2 = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
+
+        m_playToggle = CCMenuItemToggler::create(offLabel2, onLabel2, this, menu_selector(BotUI::onTogglePlay));
+        m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
+        m_playToggle->setChecked(Bot::get().isPlaying);
+        menu->addChild(m_playToggle);
+
+        auto playText = cocos2d::CCLabelBMFont::create("Playback", "bigFont.fnt");
+        playText->setPosition(winSize.width / 2 + 110, winSize.height / 2 + 20);
+        playText->setScale(0.45f);
+        this->m_mainLayer->addChild(playText);
+
+        auto speedLabel = cocos2d::CCLabelBMFont::create("Speedhack Value:", "bigFont.fnt");
+        speedLabel->setPosition(winSize.width / 2 - 60, winSize.height / 2 - 35);
+        speedLabel->setScale(0.4f);
+        this->m_mainLayer->addChild(speedLabel);
+
+        auto speedInput = TextInput::create(110.f, "1.0", "bigFont.fnt");
+        speedInput->setPosition(winSize.width / 2 + 70, winSize.height / 2 - 35);
+        speedInput->setDelegate(this);
+        speedInput->setString(std::to_string(Bot::get().speedHackValue).substr(0, 4));
+        this->m_mainLayer->addChild(speedInput);
+
+        auto btnSave = CCMenuItemSpriteExtra::create(ButtonSprite::create("Save IO"), this, menu_selector(BotUI::onSaveFile));
+        btnSave->setPosition(winSize.width / 2 - 70, winSize.height / 2 - 85);
+        menu->addChild(btnSave);
+
+        auto btnLoad = CCMenuItemSpriteExtra::create(ButtonSprite::create("Load IO"), this, menu_selector(BotUI::onLoadFile));
+        btnLoad->setPosition(winSize.width / 2 + 70, winSize.height / 2 - 85);
+        menu->addChild(btnLoad);
+
+        auto closeBtn = CCMenuItemSpriteExtra::create(ButtonSprite::create("Close Window"), this, menu_selector(BotUI::onClose));
+        closeBtn->setPosition(winSize.width / 2, winSize.height / 2 - 125);
+        menu->addChild(closeBtn);
 
         this->setKeypadEnabled(true);
         this->setTouchEnabled(true);
+        this->scheduleUpdate();
 
         return true;
     }
-    
-    void onRecord(cocos2d::CCObject*) {
-        Bot::get().isRecording = !Bot::get().isRecording;
-        Bot::get().isPlaying = false;
-        geode::Notification::create(Bot::get().isRecording ? "Recording Started" : "Recording Stopped", geode::NotificationIcon::Info)->show();
-    }
-    
-    void onPlay(cocos2d::CCObject*) {
-        if (Bot::get().engine == EngineType::None) {
-            geode::Notification::create("Playback Locked: No CBF/CBS", geode::NotificationIcon::Error)->show();
-            return;
+
+    void update(float dt) override {
+        FLAlertLayer::update(dt);
+        if (m_counterLabel) {
+            std::string updatedStr = "Captured Inputs: " + std::to_string(Bot::get().actions.size());
+            m_counterLabel->setString(updatedStr.c_str());
         }
-        Bot::get().isPlaying = !Bot::get().isPlaying;
-        Bot::get().isRecording = false;
-        Bot::get().playbackIndex = 0;
-        geode::Notification::create(Bot::get().isPlaying ? "Playback Started" : "Playback Stopped", geode::NotificationIcon::Info)->show();
     }
     
-    void onSave(cocos2d::CCObject*) {
-        Bot::get().saveMacro("macro.dat");
-        geode::Notification::create("Macro Saved", geode::NotificationIcon::Success)->show();
-    }
-    
-    void onLoad(cocos2d::CCObject*) {
-        Bot::get().loadMacro("macro.dat");
-        geode::Notification::create("Macro Loaded", geode::NotificationIcon::Success)->show();
+    void textChanged(TextInput* input) override {
+        std::string rawVal = input->getString();
+        try {
+            if (!rawVal.empty()) {
+                float val = std::stof(rawVal);
+                if (val > 0.001f && val <= 10.f) {
+                    Bot::get().speedHackValue = val;
+                    Bot::get().updateAudioPitch();
+                }
+            }
+        } catch (...) {}
     }
 
-    void onSpeedHack(cocos2d::CCObject*) {
-        auto& bot = Bot::get();
-        if (bot.speedHackValue == 1.0f) bot.speedHackValue = 0.5f;
-        else if (bot.speedHackValue == 0.5f) bot.speedHackValue = 2.0f;
-        else bot.speedHackValue = 1.0f;
-        
-        geode::Notification::create("Speedhack: " + std::to_string(bot.speedHackValue).substr(0,3) + "x", geode::NotificationIcon::Info)->show();
+    void onToggleRecord(cocos2d::CCObject* pSender) {
+        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
+        Bot::get().isRecording = !toggle->isOff();
+        if (Bot::get().isRecording) {
+            Bot::get().isPlaying = false;
+            if (m_playToggle) m_playToggle->setChecked(false);
+        }
+        Bot::get().updateAudioPitch();
+    }
+
+    void onTogglePlay(cocos2d::CCObject* pSender) {
+        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
+        Bot::get().isPlaying = !toggle->isOff();
+        if (Bot::get().isPlaying) {
+            Bot::get().isRecording = false;
+            if (m_recordToggle) m_recordToggle->setChecked(false);
+            Bot::get().playbackIndex = 0;
+        }
+        Bot::get().updateAudioPitch();
+    }
+    
+    void onSaveFile(cocos2d::CCObject*) {
+        Bot::get().saveMacro("macro.dat");
+        geode::Notification::create("Macro Serialized to Storage", geode::NotificationIcon::Success)->show();
+    }
+    
+    void onLoadFile(cocos2d::CCObject*) {
+        Bot::get().loadMacro("macro.dat");
+        geode::Notification::create("Macro Parsed From Storage", geode::NotificationIcon::Success)->show();
     }
 
     void onClose(cocos2d::CCObject*) {
+        s_activeMenuInstance = nullptr;
         this->removeFromParentAndCleanup(true);
     }
 };
 
 void Bot::toggleUI() { 
-    auto ui = BotUI::create();
-    if (ui) {
-        cocos2d::CCDirector::sharedDirector()->getRunningScene()->addChild(ui, 100);
+    if (s_activeMenuInstance) {
+        s_activeMenuInstance->onClose(nullptr);
+    } else {
+        s_activeMenuInstance = BotUI::create();
+        if (s_activeMenuInstance) {
+            cocos2d::CCDirector::sharedDirector()->getRunningScene()->addChild(s_activeMenuInstance, 500);
+        }
     }
 }
 
