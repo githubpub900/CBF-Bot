@@ -1,75 +1,116 @@
+// Bot.hpp
 #pragma once
-
 #include <Geode/Geode.hpp>
+#include <vector>
+#include <string>
 
 using namespace geode::prelude;
 
-enum class EngineType {
-    None,
-    CBS,       
-    SyzziCBF   
-};
+/*
+ * Chosen recording format: time‑stamped input events (absolute game time, double precision).
+ *
+ * Rationale:
+ *  - Not frame‑based, not tied to rendering FPS.
+ *  - Works naturally with CBS and CBF because inputs are recorded exactly when
+ *    they are processed by the game (inside handleButton calls).
+ *  - File size scales with click count, not run duration.
+ *  - Delta‑encoding during serialisation keeps files extremely small.
+ *  - High‑precision double timestamps preserve sub‑millisecond accuracy,
+ *    compatible with Syzzi CBF’s massive input resolution.
+ */
 
-struct PlayerState {
-    cocos2d::CCPoint position;
-    float rotation;
-    double yVelocity;
-    bool isUpsideDown;
-    bool isOnGround;
-    bool isDashing;
-    bool isSliding;
-    float vehicleSize;
-    float speed;
-    bool isShip;
-    bool isBird;
-    bool isBall;
-    bool isDart;
-    bool isRobot;
-    bool isSpider;
-    bool isSwing;
-};
-
-struct CheckpointData {
-    PlayerState p1;
-    PlayerState p2;
-    size_t actionIndex; 
-};
-
-struct MacroAction {
-    float xPos;
-    int button;
-    bool player2;
-    bool push;
+struct InputEvent {
+    double time;      // absolute level time (from m_gameState.m_levelTime)
+    bool down;        // true = press, false = release
+    int button;       // 1 = jump (can be extended)
 };
 
 class Bot {
 public:
-    EngineType engine = EngineType::None;
-    bool isRecording = false;
-    bool isPlaying = false;
-    float speedHackValue = 1.0f;
-    size_t playbackIndex = 0;
+    // ---------- Recording ----------
+    static void startRecording();
+    static void stopRecording();
+    static bool isRecording();
 
-    std::vector<MacroAction> actions;
-    std::vector<CheckpointData> checkpoints;
+    // ---------- Playback ----------
+    static void startPlayback();
+    static void stopPlayback();
+    static bool isPlaying();
 
-    static Bot& get();
+    // ---------- Macro I/O ----------
+    static void saveMacro(const std::string& path);
+    static void loadMacro(const std::string& path);
 
-    void detectEngine();
-    void toggleUI();
-    void recordAction(float xPos, int button, bool player2, bool push);
-    void updatePlayback(PlayLayer* pl);
-    void updateAudioPitch();
-    
-    PlayerState captureState(PlayerObject* p);
-    void applyState(PlayerObject* p, const PlayerState& s);
+    // ---------- UI ----------
+    static void toggleUI(PlayLayer* pl);
+    static bool isUIVisible();
 
-    void saveCheckpoint(PlayLayer* pl);
-    void removeLastCheckpoint();
-    void restoreCheckpoint(PlayLayer* pl);
-    void clearCheckpoints();
-    void clearMacro();
+    // ---------- Input capture (called from hook) ----------
+    static void recordInput(double time, bool down, int button);
 
-    void saveMacro(const std::string& filename);
-    void loadMacro(const std::string& filename);
+    // ---------- Dead‑input cleanup ----------
+    static void onDeath();    // truncate events after last checkpoint
+    static void onRestart();  // clear all events
+
+    // ---------- Checkpoint ----------
+    static void checkpointStored(CheckpointObject* cp);
+    static void checkpointLoaded(CheckpointObject* cp);
+
+    // ---------- Speedhack ----------
+    static float getSpeedhack();
+    static void setSpeedhack(float speed);
+    static void speedhackUp();
+    static void speedhackDown();
+
+    // ---------- Status ----------
+    enum class CBSMode { None, RobTop, Syzzi };
+    static CBSMode getCBSMode();
+
+private:
+    // Recording state
+    static inline std::vector<InputEvent> m_events;
+    static inline bool m_recording = false;
+    static inline std::vector<size_t> m_checkpointEventIndices; // event count at each checkpoint
+
+    // Playback state
+    static inline bool m_playing = false;
+    static inline size_t m_playIndex = 0;
+    static inline double m_playAccum = 0.0;         // time accumulator inside manual stepping
+    static inline double m_playBaseStep = 1.0/480.0; // base physics step for playback (480 Hz)
+    static inline bool m_didInjectThisStep = false;
+
+    // UI
+    static inline bool m_uiVisible = false;
+    static inline CCNode* m_uiNode = nullptr;
+
+    // Speedhack
+    static inline float m_speed = 1.0f;
+
+    // Checkpoint extra data
+    struct ExtraCPData {
+        // Universal
+        bool dual;
+        bool gravityFlipped;
+        float sizeMod;
+        int speedPortal; // 0=normal,1=slow,2=fast,3=veryfast?
+        // Gamemode specifics – store every relevant field from PlayerObject
+        // We’ll store full copies of the vehicle state members
+        // (offsets taken from GD 2.2081)
+        float shipRotation;
+        float ballRotation;
+        float ufoRotation;
+        float waveRotation;
+        float robotRotation;
+        float spiderRotation;
+        float swingRotation;
+        // Add more as needed – this set covers all gamemodes
+    };
+    static inline std::unordered_map<CheckpointObject*, ExtraCPData> m_cpExtra;
+
+    // Helpers
+    static void injectInput(const InputEvent& ev);
+    static void processPlaybackStep(PlayLayer* pl, float customDt);
+    friend class PlayLayerHook;
+    friend class SchedulerHook;
+    friend class KeyboardHook;
 };
