@@ -122,7 +122,6 @@ void Bot::snapshotPlayer(PlayerObject* po, bool isDual, PlayerSnapshot& out) con
     out.isSmall        = po->m_isMini;
     out.speedValue     = po->m_playerSpeed;
 
-    // Encode current gamemode into an integer for the snapshot struct
     int gm = 0; // 0 = Cube
     if (po->m_isShip) gm = 1;
     else if (po->m_isBall) gm = 2;
