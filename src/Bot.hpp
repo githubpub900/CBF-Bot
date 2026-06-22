@@ -62,6 +62,9 @@ public:
     std::vector<BotAction> macro;
     size_t playbackIndex = 0;
     
+    // Safety flag to prevent ghost recording on deaths
+    bool isDead = false;
+    
     // Mapped checkpoint storage
     std::map<void*, CheckpointState> checkpointData;
 
@@ -80,8 +83,18 @@ public:
         playbackIndex = 0;
     }
 
+    // Drops all actions recorded after a specific X position (used for respawns/checkpoints)
+    void removeInputsAfterX(double x) {
+        macro.erase(
+            std::remove_if(macro.begin(), macro.end(),
+                [x](const BotAction& a) { return a.xPosition >= x; }),
+            macro.end()
+        );
+    }
+
     void addAction(double x, float stepDelta, int btn, bool push, bool p2) {
-        if (currentState == State::Recording) {
+        // Prevent recording inputs if the player has already died
+        if (currentState == State::Recording && !isDead) {
             macro.push_back({x, stepDelta, btn, push, p2});
         }
     }
