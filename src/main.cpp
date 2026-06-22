@@ -222,6 +222,8 @@ namespace bot {
             return true;
         }
 
+        using CCLayer::keyDown; // Add this to expose the 2-argument keyDown so the 1-arg override doesn't hide it
+
         void keyDown(cocos2d::enumKeyCodes key) override {
             if (key == cocos2d::enumKeyCodes::KEY_K) {
                 BotManager::get().toggleOverlay();
