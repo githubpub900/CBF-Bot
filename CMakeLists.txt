@@ -32,10 +32,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
-# On Windows we want a console-less DLL so the mod loads cleanly.
+# FIXED: On Windows we format the linker flag so Clang doesn't treat it like a file path
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+        LINK_FLAGS "-Xlinker /SUBSYSTEM:WINDOWS"
     )
 endif()
 
