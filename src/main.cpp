@@ -45,9 +45,8 @@ void Bot::recordAction(float xPos, int button, bool player2, bool push) {
 }
 
 void Bot::updatePlayback(PlayLayer* pl) {
-    if (!isPlaying || actions.empty()) return;
+    if (!pl || !isPlaying || actions.empty()) return;
 
-    // Process all actions that should occur at or before the current player X position
     while (playbackIndex < actions.size()) {
         auto& action = actions[playbackIndex];
         
@@ -56,7 +55,6 @@ void Bot::updatePlayback(PlayLayer* pl) {
         if (!p) p = pl->m_player1; 
 
         if (p && p->m_position.x >= action.xPos) {
-            // Forward directly to GJBaseGameLayer to ensure CBF engine processes the simulated playback input
             pl->GJBaseGameLayer::handleButton(action.push, action.button, action.player2);
             playbackIndex++;
         } else {
@@ -175,12 +173,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     }
 
     void update(float dt) {
-        // Run playback inside GJBaseGameLayer update to track accurately with CBF frame rules
+        GJBaseGameLayer::update(dt);
+        
+        // CRITICAL CRASH FIX: Explicitly ensure PlayLayer exists before evaluating playback metrics
         auto pl = PlayLayer::get();
         if (pl && Bot::get().isPlaying) {
             Bot::get().updatePlayback(pl);
         }
-        GJBaseGameLayer::update(dt);
     }
 };
 
@@ -228,8 +227,8 @@ class $modify(BotAudioEngine, FMODAudioEngine) {
 class BotUI : public FLAlertLayer, public TextInputDelegate {
 public:
     cocos2d::CCLabelBMFont* m_counterLabel = nullptr;
-    CCMenuItemToggler* m_recordToggle = nullptr;
-    CCMenuItemToggler* m_playToggle = nullptr;
+    CCMenuItemSpriteExtra* m_recordBtn = nullptr;
+    CCMenuItemSpriteExtra* m_playBtn = nullptr;
 
     static BotUI* create() {
         auto ret = new BotUI();
@@ -266,34 +265,19 @@ public:
         menu->setPosition({0, 0});
         this->m_mainLayer->addChild(menu);
 
-        auto onLabel = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
-        auto offLabel = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
-        
-        m_recordToggle = CCMenuItemToggler::create(offLabel, onLabel, this, menu_selector(BotUI::onToggleRecord));
-        m_recordToggle->setPosition(winSize.width / 2 - 110, winSize.height / 2 + 20);
-        menu->addChild(m_recordToggle);
+        // --- Refactored Buttons Replacing Instable Toggles ---
+        auto sprRecord = ButtonSprite::create("Record", "goldFont.fnt", "GJ_button_01.png", 0.6f);
+        m_recordBtn = CCMenuItemSpriteExtra::create(sprRecord, this, menu_selector(BotUI::onToggleRecord));
+        m_recordBtn->setPosition(winSize.width / 2 - 95, winSize.height / 2 + 20);
+        menu->addChild(m_recordBtn);
 
-        auto recText = cocos2d::CCLabelBMFont::create("Record Mode", "bigFont.fnt");
-        recText->setPosition(winSize.width / 2 - 40, winSize.height / 2 + 20);
-        recText->setScale(0.45f);
-        this->m_mainLayer->addChild(recText);
+        auto sprPlay = ButtonSprite::create("Play", "goldFont.fnt", "GJ_button_01.png", 0.6f);
+        m_playBtn = CCMenuItemSpriteExtra::create(sprPlay, this, menu_selector(BotUI::onTogglePlay));
+        m_playBtn->setPosition(winSize.width / 2 + 95, winSize.height / 2 + 20);
+        menu->addChild(m_playBtn);
 
-        auto onLabel2 = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
-        auto offLabel2 = cocos2d::CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
-
-        m_playToggle = CCMenuItemToggler::create(offLabel2, onLabel2, this, menu_selector(BotUI::onTogglePlay));
-        m_playToggle->setPosition(winSize.width / 2 + 40, winSize.height / 2 + 20);
-        menu->addChild(m_playToggle);
-
-        auto playText = cocos2d::CCLabelBMFont::create("Playback", "bigFont.fnt");
-        playText->setPosition(winSize.width / 2 + 110, winSize.height / 2 + 20);
-        playText->setScale(0.45f);
-        this->m_mainLayer->addChild(playText);
-
-        // --- Clean Initial Toggle Synchronization ---
-        // Sets up correct tracking structures matching the engine state safely
-        m_recordToggle->toggle(Bot::get().isRecording);
-        m_playToggle->toggle(Bot::get().isPlaying);
+        // Update initial button color highlights based on global persistence flags
+        updateButtonColors();
 
         auto speedLabel = cocos2d::CCLabelBMFont::create("Speedhack Value:", "bigFont.fnt");
         speedLabel->setPosition(winSize.width / 2 - 60, winSize.height / 2 - 35);
@@ -351,32 +335,37 @@ public:
         } catch (...) {}
     }
 
+    void updateButtonColors() {
+        if (m_recordBtn) {
+            // Tint Red if recording, normal white if idle
+            m_recordBtn->setColor(Bot::get().isRecording ? cocos2d::ccColor3B{255, 100, 100} : cocos2d::ccColor3B{255, 255, 255});
+        }
+        if (m_playBtn) {
+            // Tint Red if playing, normal white if idle
+            m_playBtn->setColor(Bot::get().isPlaying ? cocos2d::ccColor3B{255, 100, 100} : cocos2d::ccColor3B{255, 255, 255});
+        }
+    }
+
     void onToggleRecord(cocos2d::CCObject* pSender) {
-        // Use the state passed by the click event to avoid race condition desyncs
-        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isRecording = toggle->m_toggled;
+        Bot::get().isRecording = !Bot::get().isRecording;
         
         if (Bot::get().isRecording) {
             Bot::get().isPlaying = false;
-            if (m_playToggle && m_playToggle->m_toggled) {
-                m_playToggle->toggle(false);
-            }
         }
+        
+        updateButtonColors();
         Bot::get().updateAudioPitch();
     }
 
     void onTogglePlay(cocos2d::CCObject* pSender) {
-        // Use the state passed by the click event to avoid race condition desyncs
-        auto toggle = static_cast<CCMenuItemToggler*>(pSender);
-        Bot::get().isPlaying = toggle->m_toggled;
+        Bot::get().isPlaying = !Bot::get().isPlaying;
         
         if (Bot::get().isPlaying) {
             Bot::get().isRecording = false;
-            if (m_recordToggle && m_recordToggle->m_toggled) {
-                m_recordToggle->toggle(false);
-            }
             Bot::get().playbackIndex = 0;
         }
+        
+        updateButtonColors();
         Bot::get().updateAudioPitch();
     }
     
