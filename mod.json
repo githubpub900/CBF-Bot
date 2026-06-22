@@ -88,7 +88,7 @@
         }
     },
     "dependencies": {
-        "syzzi.cbf": {
+        "syzzi.click_between_frames": {
             "version": ">=1.0.0",
             "importance": "suggested",
             "description": "Optional: enables enhanced sub-frame tick precision beyond GD's built-in CBF."
