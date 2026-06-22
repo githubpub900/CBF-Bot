@@ -49,28 +49,15 @@ class $modify(CCScheduler) {
 // INPUT RECORDING (GJBaseGameLayer Hooks)
 // ==========================================
 class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
-    void pushButton(PlayerButton button, bool isPlayer2) {
-        GJBaseGameLayer::pushButton(button, isPlayer2);
+    void handleButton(bool push, int button, bool isPlayer2) {
+        GJBaseGameLayer::handleButton(push, button, isPlayer2);
 
         auto& bot = BotManager::get();
         if (bot.currentState == BotManager::State::Recording) {
             PlayerObject* player = isPlayer2 ? this->m_player2 : this->m_player1;
             if (player) {
                 float delta = CCDirector::sharedDirector()->getDeltaTime();
-                bot.addAction(player->m_position.x, delta, static_cast<int>(button), true, isPlayer2);
-            }
-        }
-    }
-
-    void releaseButton(PlayerButton button, bool isPlayer2) {
-        GJBaseGameLayer::releaseButton(button, isPlayer2);
-
-        auto& bot = BotManager::get();
-        if (bot.currentState == BotManager::State::Recording) {
-            PlayerObject* player = isPlayer2 ? this->m_player2 : this->m_player1;
-            if (player) {
-                float delta = CCDirector::sharedDirector()->getDeltaTime();
-                bot.addAction(player->m_position.x, delta, static_cast<int>(button), false, isPlayer2);
+                bot.addAction(player->m_position.x, delta, button, push, isPlayer2);
             }
         }
     }
@@ -352,12 +339,8 @@ class $modify(MyPlayLayer, PlayLayer) {
             if (!player) break;
 
             if (player->m_position.x >= action.xPosition) {
-                // Call input routines directly inside PlayerObject bounds
-                if (action.isPush) {
-                    player->pushButton(static_cast<PlayerButton>(action.button));
-                } else {
-                    player->releaseButton(static_cast<PlayerButton>(action.button));
-                }
+                // Call input routines directly inside GJBaseGameLayer bounds
+                this->handleButton(action.isPush, action.button, action.isPlayer2);
                 bot.playbackIndex++;
             } else {
                 break;
