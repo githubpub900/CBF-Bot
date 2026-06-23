@@ -710,7 +710,7 @@ class $modify(MBPause, PauseLayer) {
 
 class $modify(MBKey, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key,
-                             bool down, bool repeat)
+                             bool down, bool repeat, double)
     {
         if (down && !repeat && key == enumKeyCodes::KEY_K) {
             auto& bot = mb::MacroBot::get();
@@ -736,7 +736,7 @@ class $modify(MBKey, CCKeyboardDispatcher) {
             }
         }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(
-            key, down, repeat);
+            key, down, repeat, 0.0);
     }
 };
 
