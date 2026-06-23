@@ -479,12 +479,12 @@ public:
     }
     void onSave(CCObject*) { MacroBot::get().saveMacro(); }
     void onLoad(CCObject*) { MacroBot::get().loadMacro(); }
-    void onSpdSet(CCObject*) {
-        if (!speedInput) return;
-        std::string raw = speedInput->getString();
-        if (raw && raw[0])
-            MacroBot::get().hack.setText(std::string(raw));
-    }
+void onSpdSet(CCObject*) {
+    if (!speedInput) return;
+    std::string raw = speedInput->getString();
+    if (!raw.empty())
+        MacroBot::get().hack.setText(raw);
+}
     void onClose(CCObject*) {
         MacroBot::get().guiOpen = false;
         removeFromParent();
