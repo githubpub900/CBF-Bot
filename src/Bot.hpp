@@ -15,9 +15,6 @@ enum class BotState  : uint8_t { Idle = 0, Recording = 1, Playing = 2 };
 enum class InputType : uint8_t { Press = 0, Release = 1 };
 
 // ═══ Single timed input ═══════════════════════════════════
-// 9 bytes in binary — extremely compact.
-// 'time' is seconds-into-level with full double precision,
-// which gives sub-nanosecond resolution even for hour-long levels.
 struct InputAction {
     double    time    = 0.0;
     bool      isP2    = false;
@@ -26,22 +23,20 @@ struct InputAction {
 };
 
 // ═══ Full player physics snapshot ═════════════════════════
-// Captures every state variable that vanilla practice mode
-// fails to restore (velocity, gravity, gamemode flags, etc.)
+// Only fields confirmed available in GD 2.2081 bindings.
+// 'gravity' stores the raw value including sign (negative =
+// flipped), so it encodes both strength and direction.
 struct PlayerSnap {
     float x = 0.f, y = 0.f;
     float rot = 0.f, rotSpd = 0.f;
-    float speed = 0.9f, speedMult = 1.f;
-    float gravity = 1.f;
-    float yVel = 0.f, xVel = 0.f;
-    float vehicleSize = 1.f;
-    bool  gravFlip   = false;
-    bool  onGround   = false;
-    bool  holding    = false;
-    bool  canJump    = false;
-    bool  justHeld   = false;
-    bool  dashing    = false;
-    int   gameMode   = 0;
+    float speed     = 0.9f;   // m_playerSpeed
+    float speedMult = 1.f;    // m_speedMultiplier
+    float gravity   = 1.f;    // m_gravity  (negative = flipped)
+    float yVel      = 0.f;    // m_yVelocity
+    float xVel      = 0.f;    // m_platformerXVelocity (truncated)
+    float vehicleSize = 1.f;  // m_vehicleSize
+    bool  onGround  = false;  // m_isOnGround
+    bool  dashing   = false;  // m_isDashing
 };
 
 struct CheckpointSnap {
@@ -49,20 +44,18 @@ struct CheckpointSnap {
     PlayerSnap p1{}, p2{};
 };
 
-// ═══ Macro — stored input sequence ════════════════════════
+// ═══ Macro ════════════════════════════════════════════════
 class Macro {
 public:
     std::vector<InputAction> actions;
     int    levelID     = 0;
-    double startOffset = 0.0;   // gameTime of first recorded input
+    double startOffset = 0.0;
     double duration    = 0.0;
 
     void   clear()  { actions.clear(); startOffset = duration = 0; }
     bool   empty()  const { return actions.empty(); }
     size_t size()   const { return actions.size(); }
 
-    // Binary format: "MBOT" | ver(4) | levelID(4) | offset(8) | count(8)
-    //               then per-action: time(8) + flags(1) = 9 bytes each
     bool save(const std::string& path) const;
     bool load(const std::string& path);
     void truncateAfter(double t);
@@ -70,16 +63,13 @@ public:
 };
 
 // ═══ Practice Bug Fix ═════════════════════════════════════
-// Keeps a parallel snapshot stack synced to the game's
-// checkpoint array. On respawn we overwrite the game's
-// incomplete restoration with our full physics state.
 class PracticeFix {
 public:
     std::deque<CheckpointSnap> snaps;
     size_t syncedCount = 0;
 
-    void sync(PlayLayer* layer, double gt);   // call every frame
-    void apply(PlayLayer* layer);              // call after resetLevel
+    void sync(PlayLayer* layer, double gt);
+    void apply(PlayLayer* layer);
     void reset() { snaps.clear(); syncedCount = 0; }
 private:
     PlayerSnap capture(PlayerObject* p);
@@ -87,8 +77,6 @@ private:
 };
 
 // ═══ Speedhack ════════════════════════════════════════════
-// Multiplies dt instead of changing frame-rate, so the bot's
-// time-based tracking stays accurate regardless of speed.
 class Speedhack {
 public:
     float       speed  = 1.f;
@@ -98,7 +86,7 @@ public:
     bool setText(const std::string& s);
 };
 
-// ═══ MacroBot — central controller (singleton) ════════════
+// ═══ MacroBot ═════════════════════════════════════════════
 class MacroBot {
 public:
     static MacroBot& get();

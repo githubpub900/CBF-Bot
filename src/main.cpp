@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <cstdio>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -25,10 +26,10 @@ bool Macro::save(const std::string& path) const {
     std::ofstream f(path, std::ios::binary);
     if (!f) return false;
 
-    int32_t lid  = levelID;
+    int32_t  lid = levelID;
     uint64_t cnt = actions.size();
 
-    f.write(MAGIC, 4);
+    f.write(MB_MAGIC, 4);
     f.write(reinterpret_cast<const char*>(&MB_VER), 4);
     f.write(reinterpret_cast<const char*>(&lid), 4);
     f.write(reinterpret_cast<const char*>(&startOffset), 8);
@@ -36,7 +37,8 @@ bool Macro::save(const std::string& path) const {
 
     for (auto& a : actions) {
         f.write(reinterpret_cast<const char*>(&a.time), 8);
-        uint8_t flags = (a.isP2 ? 1u : 0u) | (static_cast<uint8_t>(a.type) << 1u);
+        uint8_t flags = (a.isP2 ? 1u : 0u)
+                      | (static_cast<uint8_t>(a.type) << 1u);
         f.write(reinterpret_cast<const char*>(&flags), 1);
     }
     return true;
@@ -50,7 +52,8 @@ bool Macro::load(const std::string& path) {
     f.read(magic, 4);
     if (std::memcmp(magic, MB_MAGIC, 4) != 0) return false;
 
-    int ver; f.read(reinterpret_cast<char*>(&ver), 4);
+    int ver;
+    f.read(reinterpret_cast<char*>(&ver), 4);
     if (ver != MB_VER) return false;
 
     int32_t lid;
@@ -92,49 +95,39 @@ void Macro::removeAttempt(uint16_t att) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  PracticeFix — full-state checkpoint restoration
+//  PracticeFix
 // ═══════════════════════════════════════════════════════════
 
 PlayerSnap PracticeFix::capture(PlayerObject* p) {
     PlayerSnap s{};
     auto pos = p->getPosition();
-    s.x          = pos.x;
-    s.y          = pos.y;
-    s.rot        = p->getRotation();
-    s.rotSpd     = p->m_rotationSpeed;
+    s.x           = pos.x;
+    s.y           = pos.y;
+    s.rot         = p->getRotation();
+    s.rotSpd      = p->m_rotationSpeed;
     s.speed       = p->m_playerSpeed;
     s.speedMult   = p->m_speedMultiplier;
     s.gravity     = p->m_gravity;
-    s.gravFlip    = p->m_isGravityFlipped;
-    s.onGround    = p->m_isOnGround;
-    s.holding     = p->m_isHolding;
-    s.canJump     = p->m_canJump;
-    s.justHeld    = p->m_hasJustHeld;
     s.yVel        = p->m_yVelocity;
-    s.xVel        = p->m_platformerXVel;
+    s.xVel        = static_cast<float>(p->m_platformerXVelocity);
     s.vehicleSize = p->m_vehicleSize;
+    s.onGround    = p->m_isOnGround;
     s.dashing     = p->m_isDashing;
-    s.gameMode    = p->m_gameMode;
     return s;
 }
 
 void PracticeFix::restore(PlayerObject* p, const PlayerSnap& s) {
     p->setPosition({s.x, s.y});
     p->setRotation(s.rot);
-    p->m_rotationSpeed    = s.rotSpd;
-    p->m_playerSpeed      = s.speed;
-    p->m_speedMultiplier  = s.speedMult;
-    p->m_gravity          = s.gravity;
-    p->m_isGravityFlipped = s.gravFlip;
-    p->m_isOnGround       = s.onGround;
-    p->m_isHolding        = s.holding;
-    p->m_canJump          = s.canJump;
-    p->m_hasJustHeld      = s.justHeld;
-    p->m_yVelocity        = s.yVel;
-    p->m_platformerXVel   = s.xVel;
-    p->m_vehicleSize      = s.vehicleSize;
-    p->m_isDashing        = s.dashing;
-    p->m_gameMode         = s.gameMode;
+    p->m_rotationSpeed        = s.rotSpd;
+    p->m_playerSpeed          = s.speed;
+    p->m_speedMultiplier      = s.speedMult;
+    p->m_gravity              = s.gravity;
+    p->m_yVelocity            = s.yVel;
+    p->m_platformerXVelocity  = static_cast<double>(s.xVel);
+    p->m_vehicleSize          = s.vehicleSize;
+    p->m_isOnGround           = s.onGround;
+    p->m_isDashing            = s.dashing;
 }
 
 void PracticeFix::sync(PlayLayer* layer, double gt) {
@@ -152,7 +145,8 @@ void PracticeFix::sync(PlayLayer* layer, double gt) {
     }
     while (snaps.size() > cnt) {
         snaps.pop_back();
-        MacroBot::get().chkTime = snaps.empty() ? 0.0 : snaps.back().gameTime;
+        MacroBot::get().chkTime =
+            snaps.empty() ? 0.0 : snaps.back().gameTime;
     }
     syncedCount = cnt;
 }
@@ -193,20 +187,15 @@ MacroBot& MacroBot::get() {
 
 void MacroBot::init() {
     detectCBF();
-    log::info("MacroBot loaded — CBF status: {}", static_cast<int>(cbf));
+    log::info("MacroBot loaded — CBF status: {}",
+              static_cast<int>(cbf));
 }
 
-// ── CBF detection ──────────────────────────────────────────
-// Syzzi's CBF registers inputs at the lowest possible level
-// (sub-frame), giving virtually unlimited click precision.
-// RobTop's built-in CBS caps at a 480 fps input window.
 void MacroBot::detectCBF() {
     if (Loader::get()->getLoadedMod("syzzi.click_between_frames")) {
         cbf = CBFStatus::Syzzi;
         return;
     }
-    // 0099 is the game-variable key RobTop uses for CBS.
-    // If this ever changes across GD updates, adjust here.
     auto* gm = GameManager::sharedState();
     if (gm && gm->getGameVariable("0099")) {
         cbf = CBFStatus::RobTop;
@@ -215,7 +204,7 @@ void MacroBot::detectCBF() {
     cbf = CBFStatus::None;
 }
 
-// ── Level lifecycle ────────────────────────────────────────
+// ── level lifecycle ────────────────────────────────────────
 
 void MacroBot::enterLevel(PlayLayer* l) {
     layer     = l;
@@ -228,7 +217,7 @@ void MacroBot::enterLevel(PlayLayer* l) {
     practice  = l->m_isPracticeMode;
 
     if (l->m_level) {
-        levelID     = l->m_level->m_levelID;
+        levelID       = l->m_level->m_levelID;
         macro.levelID = levelID;
     }
     fix.reset();
@@ -244,10 +233,7 @@ void MacroBot::exitLevel() {
     fix.reset();
 }
 
-// ── Dead-input management ──────────────────────────────────
-// On death, all inputs recorded *after* the last checkpoint
-// belong to the failed attempt and are discarded.  The
-// attempt counter increments so the retry gets fresh tags.
+// ── dead-input management ─────────────────────────────────
 
 void MacroBot::onDeath() {
     if (state == BotState::Recording) {
@@ -257,8 +243,6 @@ void MacroBot::onDeath() {
     gameTime = chkTime;
     deadLast = true;
 }
-
-// Full restart from the pause menu wipes everything.
 
 void MacroBot::onPauseRestart() {
     if (state == BotState::Recording) macro.clear();
@@ -270,17 +254,7 @@ void MacroBot::onPauseRestart() {
     fix.reset();
 }
 
-// ── Recording ──────────────────────────────────────────────
-// Inputs are stored at the current gameTime (seconds into the
-// level).  Because gameTime is accumulated from speedhack-
-// adjusted dt, the timestamps are in "level-time" — they stay
-// correct no matter what speedhack value was used during
-// recording or playback.
-//
-// If recording starts slightly after time 0 (e.g. 0.2 s) the
-// macro's startOffset captures that; during playback the bot
-// naturally waits that fraction of a second before the first
-// input, so nothing desyncs.
+// ── recording ──────────────────────────────────────────────
 
 void MacroBot::startRec() {
     if (state == BotState::Playing) stopPlay();
@@ -303,11 +277,7 @@ void MacroBot::recInput(bool isP2, InputType type) {
     macro.actions.push_back({gameTime, isP2, type, attempt});
 }
 
-// ── Playback ───────────────────────────────────────────────
-// On each update() tick we advance through the sorted action
-// list and fire any input whose timestamp ≤ current gameTime.
-// The vector is naturally sorted because inputs were appended
-// in chronological order during recording.
+// ── playback ───────────────────────────────────────────────
 
 void MacroBot::startPlay() {
     if (cbf == CBFStatus::None || macro.empty()) return;
@@ -324,40 +294,46 @@ void MacroBot::stopPlay() {
 }
 
 void MacroBot::tickPlay() {
-    if (state != BotState::Playing || !playReady || !layer) return;
+    if (state != BotState::Playing || !playReady || !layer)
+        return;
 
     while (playIdx < macro.actions.size()) {
         auto& a = macro.actions[playIdx];
-        if (a.time > gameTime + 1e-9) break;     // future input — wait
+        if (a.time > gameTime + 1e-9) break;
 
-        PlayerObject* p = a.isP2 ? layer->m_player2 : layer->m_player1;
+        PlayerObject* p = a.isP2 ? layer->m_player2
+                                 : layer->m_player1;
         if (p) {
             if (a.type == InputType::Press)
-                p->pushButton(1);
+                p->pushButton(PlayerButton::Jump);
             else
-                p->releaseButton(1);
+                p->releaseButton(PlayerButton::Jump);
         }
         ++playIdx;
     }
     if (playIdx >= macro.actions.size()) stopPlay();
 }
 
-// ── File I/O ───────────────────────────────────────────────
+// ── file I/O ───────────────────────────────────────────────
 
 void MacroBot::saveMacro() {
     auto dir = Mod::get()->getSaveDir() / "macros";
     std::filesystem::create_directories(dir);
-    auto path = dir / ("level_" + std::to_string(macro.levelID) + ".mbot");
+    auto path = dir / ("level_"
+                 + std::to_string(macro.levelID) + ".mbot");
     if (macro.save(path.string()))
-        log::info("Saved {} inputs to {}", macro.size(), path.string());
+        log::info("Saved {} inputs to {}", macro.size(),
+                  path.string());
 }
 
 void MacroBot::loadMacro() {
     auto dir  = Mod::get()->getSaveDir() / "macros";
-    auto path = dir / ("level_" + std::to_string(levelID) + ".mbot");
+    auto path = dir / ("level_"
+                 + std::to_string(levelID) + ".mbot");
     if (macro.load(path.string())) {
         playReady = true;
-        log::info("Loaded {} inputs (offset {:.4f}s)", macro.size(), macro.startOffset);
+        log::info("Loaded {} inputs (offset {:.4f}s)",
+                  macro.size(), macro.startOffset);
     }
 }
 
@@ -381,156 +357,207 @@ public:
         return nullptr;
     }
 
+    // small helper: make a clickable label-button on the menu
+    CCMenuItemLabel* addBtn(CCMenu* menu, const char* text,
+                            SEL_MenuHandler sel,
+                            float bx, float by, float sc = 0.4f)
+    {
+        auto* lbl = CCLabelBMFont::create(text, "bigFont.fnt");
+        lbl->setScale(sc);
+        auto* item = CCMenuItemLabel::create(lbl, this, sel);
+        item->setPosition({bx, by});
+        menu->addChild(item);
+        return item;
+    }
+
     bool init() override {
         if (!CCLayer::init()) return false;
 
         auto ws = CCDirector::sharedDirector()->getWinSize();
         constexpr float pw = 340.f, ph = 310.f;
-        float px = (ws.width  - pw) * .5f;
-        float py = (ws.height - ph) * .5f;
+        float px = (ws.width  - pw) * 0.5f;
+        float py = (ws.height - ph) * 0.5f;
 
         auto& bot = MacroBot::get();
 
-        // ── background ──
-        addChild(CCLayerColor::create({0,0,0,210}, pw, ph), 0)
-            ->setPosition({px, py});
-        addChild(CCLayerColor::create({90,90,90,255}, pw, 2), 1)
-            ->setPosition({px, py+ph-2});
-        addChild(CCLayerColor::create({90,90,90,255}, pw, 2), 1)
-            ->setPosition({px, py});
+        // ── background panel ──
+        auto* bg = CCLayerColor::create({0, 0, 0, 210}, pw, ph);
+        bg->setPosition({px, py});
+        addChild(bg, 0);
 
+        auto* borderTop = CCLayerColor::create(
+            {90, 90, 90, 255}, pw, 2);
+        borderTop->setPosition({px, py + ph - 2});
+        addChild(borderTop, 1);
+
+        auto* borderBot = CCLayerColor::create(
+            {90, 90, 90, 255}, pw, 2);
+        borderBot->setPosition({px, py});
+        addChild(borderBot, 1);
+
+        // ── menu ──
         auto* menu = CCMenu::create();
-        menu->setPosition({0,0});
+        menu->setPosition({0, 0});
         addChild(menu, 2);
 
-        // helper
-        auto btn = [&](const char* t, SEL_MenuHandler sel, float bx, float by) {
-            auto* l = CCLabelBMFont::create(t, "bigFont.fnt");
-            l->setScale(0.4f);
-            auto* it = CCMenuItemLabel::create(l, this, sel);
-            it->setPosition({bx, by});
-            menu->addChild(it);
-        };
-
         // ── title ──
-        auto* title = CCLabelBMFont::create("MacroBot", "bigFont.fnt");
-        title->setPosition({px+pw*.5f, py+ph-22});
+        auto* title = CCLabelBMFont::create("MacroBot",
+                                             "bigFont.fnt");
+        title->setPosition({px + pw * 0.5f, py + ph - 22});
         title->setScale(0.55f);
         addChild(title, 2);
 
         // close X
         auto* xl = CCLabelBMFont::create("X", "bigFont.fnt");
         xl->setScale(0.35f);
-        xl->setColor({255,80,80});
-        auto* xb = CCMenuItemLabel::create(xl, this, menu_selector(GUILayer::onClose));
-        xb->setPosition({px+pw-18, py+ph-18});
+        xl->setColor({255, 80, 80});
+        auto* xb = CCMenuItemLabel::create(
+            xl, this, menu_selector(GUILayer::onClose));
+        xb->setPosition({px + pw - 18, py + ph - 18});
         menu->addChild(xb);
 
         // ── CBF indicator ──
         float cy = py + ph - 55;
 
         const char* cs = "No CBF";
-        ccColor3B cc   = {255,60,60};       // red
-        if (bot.cbf == CBFStatus::Syzzi)  { cs = "Syzzi CBF";  cc = {60,255,60};  }
-        if (bot.cbf == CBFStatus::RobTop) { cs = "RobTop CBS"; cc = {255,255,60}; }
+        ccColor3B cc   = {255, 60, 60};             // red
+        if (bot.cbf == CBFStatus::Syzzi)  {
+            cs = "Syzzi CBF";  cc = {60, 255, 60};  // green
+        }
+        if (bot.cbf == CBFStatus::RobTop) {
+            cs = "RobTop CBS"; cc = {255, 255, 60};  // yellow
+        }
 
         cbfDot = CCLabelBMFont::create(".", "bigFont.fnt");
-        cbfDot->setPosition({px+20, cy});
+        cbfDot->setPosition({px + 20, cy});
         cbfDot->setScale(2.f);
         cbfDot->setColor(cc);
         addChild(cbfDot, 2);
 
         cbfLbl = CCLabelBMFont::create(cs, "chatFont.fnt");
-        cbfLbl->setAnchorPoint({0,.5f});
-        cbfLbl->setPosition({px+38, cy});
+        cbfLbl->setAnchorPoint({0, 0.5f});
+        cbfLbl->setPosition({px + 38, cy});
         cbfLbl->setScale(0.65f);
         cbfLbl->setColor(cc);
         addChild(cbfLbl, 2);
 
-        // ── state ──
+        // ── state label ──
         stateLbl = CCLabelBMFont::create("Idle", "bigFont.fnt");
-        stateLbl->setPosition({px+pw*.5f, py+ph-90});
+        stateLbl->setPosition({px + pw * 0.5f, py + ph - 90});
         stateLbl->setScale(0.45f);
         addChild(stateLbl, 2);
 
-        // ── info ──
+        // ── info label ──
         char ib[128];
-        std::snprintf(ib, sizeof ib, "Inputs: %zu  Time: %.2fs",
-                       bot.macro.size(), bot.gameTime);
+        std::snprintf(ib, sizeof ib,
+            "Inputs: %zu  Time: %.2fs",
+            bot.macro.size(), bot.gameTime);
         infoLbl = CCLabelBMFont::create(ib, "chatFont.fnt");
-        infoLbl->setPosition({px+pw*.5f, py+ph-115});
+        infoLbl->setPosition({px + pw * 0.5f, py + ph - 115});
         infoLbl->setScale(0.55f);
         addChild(infoLbl, 2);
 
-        // ── row 1 : Record / Stop / Play ──
-        float r1y = py+ph-158, bw = 95.f, sx = px+pw*.5f-bw-5;
-        btn("Record", menu_selector(GUILayer::onRec),  sx,              r1y);
-        btn("Stop",   menu_selector(GUILayer::onStop), px+pw*.5f,      r1y);
-        btn("Play",   menu_selector(GUILayer::onPlay), sx+bw+10,       r1y);
+        // ── row 1: Record / Stop / Play ──
+        float r1y = py + ph - 158;
+        float cx  = px + pw * 0.5f;
+        addBtn(menu, "Record",
+               menu_selector(GUILayer::onRec),
+               cx - 100, r1y);
+        addBtn(menu, "Stop",
+               menu_selector(GUILayer::onStop),
+               cx, r1y);
+        addBtn(menu, "Play",
+               menu_selector(GUILayer::onPlay),
+               cx + 100, r1y);
 
-        // ── row 2 : Save / Load ──
+        // ── row 2: Save / Load ──
         float r2y = r1y - 40;
-        btn("Save", menu_selector(GUILayer::onSave), px+pw*.5f-48, r2y);
-        btn("Load", menu_selector(GUILayer::onLoad), px+pw*.5f+48, r2y);
+        addBtn(menu, "Save",
+               menu_selector(GUILayer::onSave),
+               cx - 48, r2y);
+        addBtn(menu, "Load",
+               menu_selector(GUILayer::onLoad),
+               cx + 48, r2y);
 
-        // ── speedhack ──
+        // ── speedhack row ──
         float sy = r2y - 55;
+
         auto* sl = CCLabelBMFont::create("Speed:", "chatFont.fnt");
-        sl->setAnchorPoint({0,.5f});
-        sl->setPosition({px+20, sy});
+        sl->setAnchorPoint({0, 0.5f});
+        sl->setPosition({px + 20, sy});
         sl->setScale(0.6f);
         addChild(sl, 2);
 
-        addChild(CCLayerColor::create({40,40,40,255}, 100, 24), 1)
-            ->setPosition({px+85, sy-12});
+        auto* inputBg = CCLayerColor::create(
+            {40, 40, 40, 255}, 100, 24);
+        inputBg->setPosition({px + 85, sy - 12});
+        addChild(inputBg, 1);
 
-        speedInput = CCTextInputNode::create(100.f, 24.f, "1.0", "chatFont.fnt");
-        speedInput->setPosition({px+135, sy});
+        speedInput = CCTextInputNode::create(
+            100.f, 24.f, "1.0", "chatFont.fnt");
+        speedInput->setPosition({px + 135, sy});
         speedInput->setString(bot.hack.buf.c_str());
         addChild(speedInput, 2);
 
-        btn("Set", menu_selector(GUILayer::onSpdSet), px+240, sy);
+        addBtn(menu, "Set",
+               menu_selector(GUILayer::onSpdSet),
+               px + 240, sy);
 
-        // ── warning ──
+        // ── warning (only when CBF is missing) ──
         warnLbl = CCLabelBMFont::create(
-            "CBF required - install Syzzi CBF", "chatFont.fnt");
-        warnLbl->setPosition({px+pw*.5f, py+22});
+            "CBF required - install Syzzi CBF",
+            "chatFont.fnt");
+        warnLbl->setPosition({px + pw * 0.5f, py + 22});
         warnLbl->setScale(0.5f);
-        warnLbl->setColor({255,60,60});
+        warnLbl->setColor({255, 60, 60});
         warnLbl->setVisible(bot.cbf == CBFStatus::None);
         addChild(warnLbl, 2);
 
         return true;
     }
 
-    // call this whenever state may have changed
+    // ── refresh all labels to current state ──
     void refresh() {
         auto& bot = MacroBot::get();
 
+        // CBF indicator
         const char* cs = "No CBF";
-        ccColor3B cc   = {255,60,60};
-        if (bot.cbf == CBFStatus::Syzzi)  { cs = "Syzzi CBF";  cc = {60,255,60};  }
-        if (bot.cbf == CBFStatus::RobTop) { cs = "RobTop CBS"; cc = {255,255,60}; }
+        ccColor3B cc   = {255, 60, 60};
+        if (bot.cbf == CBFStatus::Syzzi)  {
+            cs = "Syzzi CBF";  cc = {60, 255, 60};
+        }
+        if (bot.cbf == CBFStatus::RobTop) {
+            cs = "RobTop CBS"; cc = {255, 255, 60};
+        }
         cbfDot->setColor(cc);
         cbfLbl->setString(cs);
         cbfLbl->setColor(cc);
 
+        // state
         const char* st = "Idle";
-        ccColor3B sc    = {255,255,255};
-        if (bot.state == BotState::Recording) { st = "Recording"; sc = {255,80,80}; }
-        if (bot.state == BotState::Playing)   { st = "Playing";   sc = {80,200,255}; }
+        ccColor3B sc   = {255, 255, 255};
+        if (bot.state == BotState::Recording) {
+            st = "Recording"; sc = {255, 80, 80};
+        }
+        if (bot.state == BotState::Playing) {
+            st = "Playing"; sc = {80, 200, 255};
+        }
         stateLbl->setString(st);
         stateLbl->setColor(sc);
 
+        // info
         char ib[128];
-        std::snprintf(ib, sizeof ib, "Inputs: %zu  Time: %.2fs",
-                       bot.macro.size(), bot.gameTime);
+        std::snprintf(ib, sizeof ib,
+            "Inputs: %zu  Time: %.2fs",
+            bot.macro.size(), bot.gameTime);
         infoLbl->setString(ib);
 
-        if (warnLbl) warnLbl->setVisible(bot.cbf == CBFStatus::None);
+        // warning
+        if (warnLbl)
+            warnLbl->setVisible(bot.cbf == CBFStatus::None);
     }
 
-    // ── callbacks ──
+    // ── callbacks ──────────────────────────────────────────
     void onRec(CCObject*) {
         auto& b = MacroBot::get();
         b.detectCBF();
@@ -538,12 +565,14 @@ public:
         b.startRec();
         refresh();
     }
+
     void onStop(CCObject*) {
         auto& b = MacroBot::get();
         b.stopRec();
         b.stopPlay();
         refresh();
     }
+
     void onPlay(CCObject*) {
         auto& b = MacroBot::get();
         b.detectCBF();
@@ -552,12 +581,24 @@ public:
         if (!b.macro.empty()) b.startPlay();
         refresh();
     }
-    void onSave(CCObject*) { MacroBot::get().saveMacro(); refresh(); }
-    void onLoad(CCObject*) { MacroBot::get().loadMacro(); refresh(); }
-    void onSpdSet(CCObject*) {
-        if (speedInput)
-            MacroBot::get().hack.setText(std::string(speedInput->getString()));
+
+    void onSave(CCObject*) {
+        MacroBot::get().saveMacro();
+        refresh();
     }
+
+    void onLoad(CCObject*) {
+        MacroBot::get().loadMacro();
+        refresh();
+    }
+
+    void onSpdSet(CCObject*) {
+        if (speedInput) {
+            MacroBot::get().hack.setText(
+                std::string(speedInput->getString()));
+        }
+    }
+
     void onClose(CCObject*) {
         MacroBot::get().guiOpen = false;
         removeFromParent();
@@ -584,29 +625,26 @@ class $modify(MBPlayLayer, PlayLayer) {
         auto& bot = mb::MacroBot::get();
         if (!bot.inLevel) { PlayLayer::update(dt); return; }
 
-        // speedhack — multiply dt before everything else
+        // speedhack
         float modDt = dt;
         bot.hack.apply(modDt);
 
-        // tick playback inputs *before* physics so they
-        // affect the same frame they were recorded in
+        // fire recorded inputs before physics
         if (bot.state == mb::BotState::Playing)
             bot.tickPlay();
 
         PlayLayer::update(modDt);
 
-        // advance our independent clock
+        // advance our clock
         bot.gameTime += modDt;
 
-        // death detection (rising-edge)
+        // death rising-edge
         bool dead = (m_player1 && m_player1->m_isDead)
                  || (m_player2 && m_player2->m_isDead);
-        if (dead && !bot.deadLast)
-            bot.onDeath();
-        if (!dead)
-            bot.deadLast = false;
+        if (dead && !bot.deadLast) bot.onDeath();
+        if (!dead)                 bot.deadLast = false;
 
-        // keep practice snapshots in sync with game checkpoints
+        // keep practice snapshots synced
         if (m_isPracticeMode)
             bot.fix.sync(this, bot.gameTime);
     }
@@ -614,7 +652,6 @@ class $modify(MBPlayLayer, PlayLayer) {
     void resetLevel() {
         auto& bot = mb::MacroBot::get();
 
-        // flag was set by PauseLayer::onRestart hook
         if (bot.pauseFlag) {
             bot.onPauseRestart();
             bot.pauseFlag = false;
@@ -622,7 +659,7 @@ class $modify(MBPlayLayer, PlayLayer) {
 
         PlayLayer::resetLevel();
 
-        // overwrite the game's incomplete state restoration
+        // overwrite vanilla's incomplete restoration
         if (m_isPracticeMode && bot.inLevel)
             bot.fix.apply(this);
     }
@@ -637,63 +674,69 @@ class $modify(MBPlayLayer, PlayLayer) {
 
 class $modify(MBPlayerObj, PlayerObject) {
 
-    void pushButton(int btn) {
+    bool pushButton(PlayerButton button) {
         auto& bot = mb::MacroBot::get();
-        if (bot.state == mb::BotState::Recording && bot.inLevel && bot.layer) {
+        if (bot.state == mb::BotState::Recording
+            && bot.inLevel && bot.layer)
+        {
             bool p2 = (this == bot.layer->m_player2);
             bot.recInput(p2, mb::InputType::Press);
         }
-        PlayerObject::pushButton(btn);
+        return PlayerObject::pushButton(button);
     }
 
-    void releaseButton(int btn) {
+    bool releaseButton(PlayerButton button) {
         auto& bot = mb::MacroBot::get();
-        if (bot.state == mb::BotState::Recording && bot.inLevel && bot.layer) {
+        if (bot.state == mb::BotState::Recording
+            && bot.inLevel && bot.layer)
+        {
             bool p2 = (this == bot.layer->m_player2);
             bot.recInput(p2, mb::InputType::Release);
         }
-        PlayerObject::releaseButton(btn);
+        return PlayerObject::releaseButton(button);
     }
 };
 
-// ── PauseLayer — detect restart-from-pause ────────────────
+// ── PauseLayer — detect restart ───────────────────────────
 
 class $modify(MBPause, PauseLayer) {
-    void onRestart(CCObject* s) {
+    void onRestart(CCObject* sender) {
         mb::MacroBot::get().pauseFlag = true;
-        PauseLayer::onRestart(s);
+        PauseLayer::onRestart(sender);
     }
 };
 
-// ── Keyboard — K toggles the GUI ──────────────────────────
+// ── Keyboard — K toggles GUI ─────────────────────────────
 
 class $modify(MBKey, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool) {
-        if (down && key == enumKeyCodes::KEY_K) {
+    bool dispatchKeyboardMSG(enumKeyCodes key,
+                             bool down, bool repeat)
+    {
+        if (down && !repeat && key == enumKeyCodes::KEY_K) {
             auto& bot = mb::MacroBot::get();
-            if (!bot.inLevel) goto skip;
-
-            bot.guiOpen = !bot.guiOpen;
-
-            if (auto* lay = bot.layer) {
+            if (bot.inLevel && bot.layer) {
+                bot.guiOpen = !bot.guiOpen;
                 constexpr int TAG = 0xB07;
+
                 if (bot.guiOpen) {
-                    if (!lay->getChildByTag(TAG)) {
+                    auto* existing = dynamic_cast<mb::GUILayer*>(
+                        bot.layer->getChildByTag(TAG));
+                    if (!existing) {
                         auto* g = mb::GUILayer::create();
                         g->setTag(TAG);
-                        lay->addChild(g, 9999);
+                        bot.layer->addChild(g, 9999);
                     } else {
-                        lay->getChildByTag(TAG)->setVisible(true);
-                        static_cast<mb::GUILayer*>(
-                            lay->getChildByTag(TAG))->refresh();
+                        existing->setVisible(true);
+                        existing->refresh();
                     }
-                } else if (auto* c = lay->getChildByTag(TAG)) {
-                    c->removeFromParent();
+                } else {
+                    auto* c = bot.layer->getChildByTag(TAG);
+                    if (c) c->removeFromParent();
                 }
             }
         }
-    skip:
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, false);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(
+            key, down, repeat);
     }
 };
 
