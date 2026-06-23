@@ -75,7 +75,7 @@ namespace bot {
         }
     }
 
-    class BotOverlay final : public CCLayerColor, public CCTextInputDelegate {
+    class BotOverlay final : public CCLayerColor, public TextInputDelegate {
     public:
         static BotOverlay* create() {
             auto* ret = new BotOverlay();
@@ -138,7 +138,6 @@ namespace bot {
 
             m_speedInput = CCTextInputNode::create(80.f, 30.f, "1.0", "bigFont.fnt");
             m_speedInput->setLabelPlaceholderColor({150, 150, 150});
-            m_speedInput->setLabelColor({255, 255, 255});
             m_speedInput->setAllowedChars("0123456789.");
             m_speedInput->setMaxLabelLength(5);
             m_speedInput->setPosition({x + 110.f, y});
