@@ -1,5 +1,6 @@
 #pragma once
 #include <Geode/Geode.hpp>
+#include <Geode/ui/Popup.hpp>
 #include <map>
 #include <vector>
 
@@ -33,7 +34,7 @@ struct MacroInput {
 struct PlayerCheckpointState {
     CCPoint m_position;
     double m_yVelocity;
-    double m_xVelocity;
+    double m_platformerXVelocity;
     float m_rotation;
     float m_rotationRate;
     bool m_isDashing;
@@ -41,8 +42,6 @@ struct PlayerCheckpointState {
     bool m_isUpsideDown;
     bool m_isMini;
     int m_vehicleSize;
-    float m_jumpPower;
-    // Add additional physical traits as needed for perfect accuracy
 };
 
 struct CheckpointData {
@@ -122,8 +121,8 @@ protected:
     void onRecord(CCObject*);
     void onPlay(CCObject*);
     void onDisable(CCObject*);
-    void onSpeedhackChange(CCTextInputNode*);
-    void onClose(CCObject*);
+    void onSpeedhackChange(CCObject*);
+    void onClose(CCObject*) override;
 
     CCLabelBMFont* m_statusLabel;
     CCLabelBMFont* m_cbfIndicator;
