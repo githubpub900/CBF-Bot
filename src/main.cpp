@@ -2,11 +2,13 @@
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -22,6 +24,11 @@ namespace bot {
     namespace {
         constexpr int kOverlayTag = 0xB072;
         constexpr std::int64_t kNanosPerSecond = 1'000'000'000LL;
+
+        // Subframe capturing states
+        std::chrono::high_resolution_clock::time_point g_lastFrameTime;
+        double g_lastFrameGameTime = 0.0;
+        double g_lastFrameDt = 0.0;
 
         std::string timingModeName(TimingMode mode) {
             switch (mode) {
@@ -55,9 +62,20 @@ namespace bot {
         std::int64_t currentLayerTimeNs(PlayLayer* layer) {
             return layer ? toNs(layer->m_currentTime) : 0;
         }
+
+        // Speedhacks the background music stream dynamically
+        void updateAudioSpeed(double speed) {
+            auto ae = FMODAudioEngine::sharedEngine();
+            if (!ae) return;
+            
+            float s = static_cast<float>(speed);
+            if (ae->m_backgroundMusicChannel) {
+                ae->m_backgroundMusicChannel->setPitch(s);
+            }
+        }
     }
 
-    class BotOverlay final : public CCLayerColor {
+    class BotOverlay final : public CCLayerColor, public CCTextInputDelegate {
     public:
         static BotOverlay* create() {
             auto* ret = new BotOverlay();
@@ -70,7 +88,6 @@ namespace bot {
         }
 
         bool init() override {
-            // Correctly initialize CCLayerColor's shader, blend, and vertex arrays to prevent crashes on draw.
             if (!CCLayerColor::initWithColor(ccc4(0, 0, 0, 160))) return false;
 
             auto win = CCDirector::sharedDirector()->getWinSize();
@@ -96,13 +113,11 @@ namespace bot {
             menu->setPosition({0.f, 0.f});
             addChild(menu);
 
-            std::array<CCMenuItemSpriteExtra*, 7> buttons {
+            std::array<CCMenuItemSpriteExtra*, 5> buttons {
                 makeButton("Record", this, menu_selector(BotOverlay::onRecord)),
                 makeButton("Play", this, menu_selector(BotOverlay::onPlay)),
                 makeButton("Save", this, menu_selector(BotOverlay::onSave)),
                 makeButton("Load", this, menu_selector(BotOverlay::onLoad)),
-                makeButton("Speed -", this, menu_selector(BotOverlay::onSpeedDown)),
-                makeButton("Speed +", this, menu_selector(BotOverlay::onSpeedUp)),
                 makeButton("Close", this, menu_selector(BotOverlay::onClose)),
             };
 
@@ -112,11 +127,34 @@ namespace bot {
                 btn->setPosition({x, y});
                 menu->addChild(btn);
                 x += 118.f;
-                if (x > win.width - 140.f) {
-                    x = 88.f;
-                    y -= 44.f;
-                }
             }
+
+            // Create decimal input field for speedhack
+            auto* speedLabel = CCLabelBMFont::create("Speed:", "bigFont.fnt");
+            speedLabel->setScale(0.5f);
+            speedLabel->setAnchorPoint({0.f, 0.5f});
+            speedLabel->setPosition({x, y + 10.f});
+            addChild(speedLabel);
+
+            m_speedInput = CCTextInputNode::create(80.f, 30.f, "1.0", "bigFont.fnt");
+            m_speedInput->setLabelPlaceholderColor({150, 150, 150});
+            m_speedInput->setLabelColor({255, 255, 255});
+            m_speedInput->setAllowedChars("0123456789.");
+            m_speedInput->setMaxLabelLength(5);
+            m_speedInput->setPosition({x + 110.f, y});
+            m_speedInput->setDelegate(this);
+
+            // Simple safe input background
+            auto* inputBg = CCLayerColor::create(ccc4(0, 0, 0, 100), 90.f, 30.f);
+            inputBg->setPosition({x + 65.f, y - 15.f});
+            addChild(inputBg);
+
+            addChild(m_speedInput);
+
+            // Populate the textbox with the current speed configuration
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << BotManager::get().speedhack();
+            m_speedInput->setString(ss.str());
 
             scheduleUpdate();
             refresh();
@@ -136,6 +174,20 @@ namespace bot {
         void onExit() override {
             BotManager::get().setOverlay(nullptr);
             CCLayerColor::onExit();
+        }
+
+        void textChanged(CCTextInputNode* input) override {
+            if (input == m_speedInput) {
+                std::string text = input->getString();
+                if (!text.empty()) {
+                    try {
+                        double val = std::stod(text);
+                        if (val > 0.0) {
+                            BotManager::get().setSpeedhack(val);
+                        }
+                    } catch (...) {}
+                }
+            }
         }
 
     private:
@@ -179,23 +231,12 @@ namespace bot {
             refresh();
         }
 
-        void onSpeedDown(CCObject*) {
-            auto& bot = BotManager::get();
-            bot.setSpeedhack(bot.speedhack() * 0.5);
-            refresh();
-        }
-
-        void onSpeedUp(CCObject*) {
-            auto& bot = BotManager::get();
-            bot.setSpeedhack(bot.speedhack() * 2.0);
-            refresh();
-        }
-
         void onClose(CCObject*) {
             removeFromParentAndCleanup(true);
         }
 
         CCLabelBMFont* m_status = nullptr;
+        CCTextInputNode* m_speedInput = nullptr;
     };
 
     BotManager& BotManager::get() {
@@ -305,6 +346,7 @@ namespace bot {
     void BotManager::setSpeedhack(double value) {
         if (!std::isfinite(value)) return;
         m_speedhack = std::max(0.01, value);
+        updateAudioSpeed(m_speedhack);
     }
 
     std::filesystem::path BotManager::defaultMacroPath() const {
@@ -339,8 +381,7 @@ namespace bot {
         m_cachedP2 = nullptr;
         m_inPlaybackInjection = false;
         m_inUpdateSplit = false;
-        stopRecording(true);
-        stopPlayback();
+        // Do NOT stop recording/playback automatically here, ensuring that configurations persist smoothly.
     }
 
     void BotManager::refreshPlayers(PlayLayer* layer) {
@@ -360,10 +401,19 @@ namespace bot {
     void BotManager::onButton(PlayerObject* player, PlayerButton button, bool down) {
         if (!m_recording || m_inPlaybackInjection) return;
         if (!m_layer) return;
-        if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = currentLayerTimeNs(m_layer);
+
+        // Calculate hyper-precise real-world frame offset using the high-resolution system clock
+        auto now = std::chrono::high_resolution_clock::now();
+        double realDelta = std::chrono::duration<double>(now - g_lastFrameTime).count();
+        if (realDelta > g_lastFrameDt) realDelta = g_lastFrameDt;
+        if (realDelta < 0.0) realDelta = 0.0;
+
+        double preciseGameTime = g_lastFrameGameTime + realDelta;
+
+        if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = toNs(preciseGameTime);
 
         MacroEvent ev;
-        ev.timeNs = currentLayerTimeNs(m_layer) - m_recordBaseNs;
+        ev.timeNs = toNs(preciseGameTime) - m_recordBaseNs;
         ev.button = static_cast<std::uint8_t>(button);
         ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player == m_cachedP1) ? 2 : 0));
         m_events.push_back(ev);
@@ -581,11 +631,19 @@ namespace bot {
         m_layer = layer;
         refreshPlayers(layer);
 
+        // Keep audio speed aligned
+        updateAudioSpeed(m_speedhack);
+
+        // Track precise subframe timeline clock for capture/playback
+        g_lastFrameTime = std::chrono::high_resolution_clock::now();
+        g_lastFrameGameTime = layer->m_currentTime;
+        g_lastFrameDt = static_cast<double>(dt);
+
         if (m_playback && (!canPlayBack() || !hasPlaybackData())) {
             stopPlayback();
         }
 
-        const double scaledDt = static_cast<double>(dt) * m_speedhack;
+        const double scaledDt = static_cast<double>(dt);
         if (!m_playback || !canPlayBack() || !hasPlaybackData()) {
             originalUpdate(static_cast<float>(scaledDt));
             return;
@@ -606,7 +664,7 @@ namespace bot {
             const double eventTime = fromNs(ev.timeNs);
             const double delta = std::max(0.0, eventTime - layer->m_currentTime);
             if (delta > 0.0) {
-                originalUpdate(static_cast<float>(delta / m_speedhack));
+                originalUpdate(static_cast<float>(delta));
             }
 
             refreshPlayers(layer);
@@ -624,7 +682,7 @@ namespace bot {
 
         const double remaining = std::max(0.0, endTime - layer->m_currentTime);
         if (remaining > 0.0) {
-            originalUpdate(static_cast<float>(remaining / m_speedhack));
+            originalUpdate(static_cast<float>(remaining));
         }
 
         m_inUpdateSplit = false;
@@ -633,6 +691,30 @@ namespace bot {
         }
     }
 }
+
+// Multi-step high-accuracy custom scheduler updates bypass the engine physics caps and allow safe, infinite speedhacking.
+class $modify(BotScheduler, CCScheduler) {
+    void update(float dt) {
+        auto& bot = bot::BotManager::get();
+        double speed = bot.speedhack();
+        
+        auto playLayer = PlayLayer::get();
+        if (playLayer && !bot.isInjectingPlayback() && std::abs(speed - 1.0) > 1e-4) {
+            static double accumulator = 0.0;
+            accumulator += static_cast<double>(dt) * speed;
+            
+            int updatesRun = 0;
+            const double targetStep = static_cast<double>(dt);
+            while (accumulator >= targetStep && updatesRun < 100) {
+                CCScheduler::update(static_cast<float>(targetStep));
+                accumulator -= targetStep;
+                updatesRun++;
+            }
+        } else {
+            CCScheduler::update(dt);
+        }
+    }
+};
 
 // Intercept keyboard messages at the absolute engine source!
 // This fixes keys being swallowed on both Windows and Android.
