@@ -301,7 +301,7 @@ namespace bot {
         m_events.clear();
         m_checkpoints.clear();
         m_checkpointLookup.clear();
-        m_recordBaseSec = m_layer ? m_layer->m_currentTime : 0.0;
+        m_recordBaseSec = 0.0; // Absolutized timeline
         m_playbackStartSec = 0.0;
         m_deathCutoffSec = 0.0;
     }
@@ -366,8 +366,8 @@ namespace bot {
     void BotManager::onSceneEnter(PlayLayer* layer) {
         m_layer = layer;
         refreshPlayers(layer);
-        if (m_recording && m_recordBaseSec == 0.0) {
-            m_recordBaseSec = layer ? layer->m_currentTime : 0.0;
+        if (m_recording) {
+            m_recordBaseSec = 0.0;
         }
     }
 
@@ -405,18 +405,19 @@ namespace bot {
 
         double preciseGameTime = g_lastFrameGameTime + realDelta;
 
-        if (m_events.empty() && m_recordBaseSec == 0.0) m_recordBaseSec = preciseGameTime;
-
         MacroEvent ev;
-        ev.timeSec = preciseGameTime - m_recordBaseSec;
+        ev.timeSec = preciseGameTime; // Always use exact level timeline time
         ev.button = static_cast<std::uint8_t>(button);
-        ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player == m_cachedP1) ? 2 : 0));
+        
+        // Dynamic Player 1 or Player 2 check
+        bool isPlayer1 = (player == m_layer->m_player1);
+        ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | (isPlayer1 ? 2 : 0));
         m_events.push_back(ev);
     }
 
     void BotManager::trimAfterCurrentTime(PlayLayer* layer) {
         if (!layer) return;
-        double cutoff = layer->m_currentTime - m_recordBaseSec;
+        double cutoff = layer->m_currentTime;
         if (cutoff < 0) cutoff = 0;
 
         std::erase_if(m_events, [cutoff](MacroEvent const& ev) { return ev.timeSec > cutoff; });
@@ -443,7 +444,7 @@ namespace bot {
         clearDeadState();
         m_playbackIndex = 0; // Seamlessly reset playhead back to zero on restart
         if (m_recording) {
-            m_recordBaseSec = layer ? layer->m_currentTime : 0.0;
+            m_recordBaseSec = 0.0;
         }
     }
 
@@ -467,7 +468,7 @@ namespace bot {
     void BotManager::onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint) {
         if (!layer || !checkpoint) return;
         CheckpointSnapshot snapshot;
-        snapshot.timeSec = layer->m_currentTime - m_recordBaseSec;
+        snapshot.timeSec = layer->m_currentTime;
         snapshot.player1 = captureSnapshot(m_cachedP1);
         snapshot.player2 = captureSnapshot(m_cachedP2);
         m_checkpoints.push_back(snapshot);
@@ -483,9 +484,13 @@ namespace bot {
         applySnapshot(m_cachedP1, found->second.player1);
         applySnapshot(m_cachedP2, found->second.player2);
 
-        if (m_recording) {
-            m_recordBaseSec = layer->m_currentTime - found->second.timeSec;
+        // Re-align playhead to the loaded checkpoint time!
+        double targetTime = found->second.timeSec;
+        m_playbackIndex = 0;
+        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeSec < targetTime) {
+            m_playbackIndex++;
         }
+
         clearDeadState();
     }
 
@@ -703,16 +708,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         PlayLayer::onExit();
     }
 
-    void handleButton(bool down, PlayerButton button, bool isPlayer1) {
-        PlayLayer::handleButton(down, static_cast<int>(button), isPlayer1);
-
-        auto& bot = bot::BotManager::get();
-        if (bot.isRecording() && !bot.isInjectingPlayback()) {
-            auto* player = isPlayer1 ? m_player1 : m_player2;
-            bot.onButton(player, button, down);
-        }
-    }
-
     void update(float dt) {
         bot::BotManager::get().onGameUpdate(this, dt, [this](float step) {
             PlayLayer::update(step);
@@ -744,5 +739,25 @@ class $modify(BotPlayLayer, PlayLayer) {
     void levelComplete() {
         bot::BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
+    }
+};
+
+class $modify(BotPlayerObject, PlayerObject) {
+    void pushButton(PlayerButton button) {
+        PlayerObject::pushButton(button);
+        
+        auto& bot = bot::BotManager::get();
+        if (bot.isRecording() && !bot.isInjectingPlayback()) {
+            bot.onButton(this, button, true);
+        }
+    }
+
+    void releaseButton(PlayerButton button) {
+        PlayerObject::releaseButton(button);
+        
+        auto& bot = bot::BotManager::get();
+        if (bot.isRecording() && !bot.isInjectingPlayback()) {
+            bot.onButton(this, button, false);
+        }
     }
 };
