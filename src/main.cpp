@@ -4,6 +4,7 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
 #include <algorithm>
@@ -23,11 +24,6 @@ using namespace geode::prelude;
 namespace bot {
     namespace {
         constexpr int kOverlayTag = 0xB072;
-
-        // Subframe capturing states
-        std::chrono::high_resolution_clock::time_point g_lastFrameTime;
-        double g_lastFrameGameTime = 0.0;
-        double g_lastFrameDt = 0.0;
 
         std::string timingModeName(TimingMode mode) {
             switch (mode) {
@@ -397,19 +393,13 @@ namespace bot {
         if (!m_recording || m_inPlaybackInjection) return;
         if (!m_layer) return;
 
-        // Calculate precise real-world millisecond timing offset of the subframe click
-        auto now = std::chrono::high_resolution_clock::now();
-        double realDelta = std::chrono::duration<double>(now - g_lastFrameTime).count();
-        if (realDelta > g_lastFrameDt) realDelta = g_lastFrameDt;
-        if (realDelta < 0.0) realDelta = 0.0;
-
-        double preciseGameTime = g_lastFrameGameTime + realDelta;
+        // CBF updates timeline sub-steps sequentially, making layer->m_currentTime absolute and hyper-precise.
+        double preciseGameTime = m_layer->m_currentTime;
 
         MacroEvent ev;
-        ev.timeSec = preciseGameTime; // Always use exact level timeline time
+        ev.timeSec = preciseGameTime; 
         ev.button = static_cast<std::uint8_t>(button);
         
-        // Dynamic Player 1 or Player 2 check
         bool isPlayer1 = (player == m_layer->m_player1);
         ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | (isPlayer1 ? 2 : 0));
         m_events.push_back(ev);
@@ -596,11 +586,6 @@ namespace bot {
         // Keep audio speed aligned
         updateAudioSpeed(m_speedhack);
 
-        // Track precise subframe timeline clock for capture/playback
-        g_lastFrameTime = std::chrono::high_resolution_clock::now();
-        g_lastFrameGameTime = layer->m_currentTime;
-        g_lastFrameDt = static_cast<double>(dt);
-
         if (m_playback && (!canPlayBack() || !hasPlaybackData())) {
             stopPlayback();
         }
@@ -630,12 +615,11 @@ namespace bot {
 
             refreshPlayers(layer);
             m_inPlaybackInjection = true;
-            auto* targetPlayer = (ev.flags & 2) ? m_cachedP1 : m_cachedP2;
-            if (targetPlayer) {
-                auto button = static_cast<PlayerButton>(ev.button);
-                if (ev.flags & 1) targetPlayer->pushButton(button);
-                else targetPlayer->releaseButton(button);
-            }
+            
+            bool isPlayer1 = (ev.flags & 2) != 0;
+            bool down = (ev.flags & 1) != 0;
+            layer->handleButton(down, static_cast<int>(ev.button), isPlayer1);
+
             m_inPlaybackInjection = false;
 
             ++m_playbackIndex;
@@ -697,6 +681,18 @@ class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
     }
 };
 
+class $modify(BotGJBaseGameLayer, GJBaseGameLayer) {
+    void handleButton(bool down, int button, bool isPlayer1) {
+        GJBaseGameLayer::handleButton(down, button, isPlayer1);
+
+        auto& bot = bot::BotManager::get();
+        if (bot.isRecording() && !bot.isInjectingPlayback()) {
+            auto* player = isPlayer1 ? m_player1 : m_player2;
+            bot.onButton(player, static_cast<PlayerButton>(button), down);
+        }
+    }
+};
+
 class $modify(BotPlayLayer, PlayLayer) {
     void onEnter() {
         PlayLayer::onEnter();
@@ -739,25 +735,5 @@ class $modify(BotPlayLayer, PlayLayer) {
     void levelComplete() {
         bot::BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
-    }
-};
-
-class $modify(BotPlayerObject, PlayerObject) {
-    void pushButton(PlayerButton button) {
-        PlayerObject::pushButton(button);
-        
-        auto& bot = bot::BotManager::get();
-        if (bot.isRecording() && !bot.isInjectingPlayback()) {
-            bot.onButton(this, button, true);
-        }
-    }
-
-    void releaseButton(PlayerButton button) {
-        PlayerObject::releaseButton(button);
-        
-        auto& bot = bot::BotManager::get();
-        if (bot.isRecording() && !bot.isInjectingPlayback()) {
-            bot.onButton(this, button, false);
-        }
     }
 };
