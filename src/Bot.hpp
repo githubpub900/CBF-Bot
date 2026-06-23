@@ -1,111 +1,135 @@
 #pragma once
 #include <Geode/Geode.hpp>
+#include <map>
 #include <vector>
-#include <algorithm>
 
 using namespace geode::prelude;
 
-// Struct to hold input data with high-precision time
-struct BotInput {
-    double time;    // Time of input (handles basically infinite frame decimal precision)
-    bool push;      // True if pushed, False if released
-    bool player2;   // P1 or P2
-    int button;     // Button ID (PlayerButton)
+// ==========================================
+// ENUMS & DATA STRUCTURES
+// ==========================================
+
+enum class BotMode {
+    Disabled,
+    Recording,
+    Playing
 };
 
-// Struct for the practice bug fix and syncing
-struct BotCheckpoint {
-    double time; // Time at checkpoint creation
-    cocos2d::CCPoint pos;
-    double yAccel;
-    double xAccel;
-    double jumpAccel;
-    bool isDashing;
-    bool isUpsideDown;
-    float vehicleSize;
-    float rotation;
+enum class CBFState {
+    None,       // Red
+    RobTopCBS,  // Yellow
+    SyzziCBF    // Green
 };
+
+// Stores the precise time-based input
+struct MacroInput {
+    double time;        // Extremely high precision time (double gives ~15-17 decimal places)
+    int button;         // 1 = Jump, 2 = Left, 3 = Right, etc.
+    bool push;          // true = push, false = release
+    bool isPlayer2;     // true = player 2, false = player 1
+};
+
+// Extensive practice bug fix state
+struct PlayerCheckpointState {
+    CCPoint m_position;
+    double m_yVelocity;
+    double m_xVelocity;
+    float m_rotation;
+    float m_rotationRate;
+    bool m_isDashing;
+    bool m_isSliding;
+    bool m_isUpsideDown;
+    bool m_isMini;
+    int m_vehicleSize;
+    float m_jumpPower;
+    // Add additional physical traits as needed for perfect accuracy
+};
+
+struct CheckpointData {
+    double m_time;
+    PlayerCheckpointState m_p1;
+    PlayerCheckpointState m_p2;
+};
+
+// ==========================================
+// BOT SINGLETON CLASS
+// ==========================================
 
 class Bot {
+private:
+    Bot() {} // Singleton
+    
+    BotMode m_mode = BotMode::Disabled;
+    CBFState m_cbfState = CBFState::None;
+    
+    std::vector<MacroInput> m_inputs;
+    std::map<CheckpointObject*, CheckpointData> m_checkpoints;
+    
+    size_t m_playbackIndex = 0;
+    double m_currentLevelTime = 0.0;
+    
+    float m_speedhack = 1.0f;
+    bool m_botUIOpen = false;
+
 public:
     static Bot& get() {
         static Bot instance;
         return instance;
     }
 
-    std::vector<BotInput> m_inputs;
-    std::vector<BotCheckpoint> m_checkpoints;
+    // --- State Management ---
+    void setMode(BotMode mode);
+    BotMode getMode() const { return m_mode; }
     
-    double m_time = 0.0;
-    size_t m_playbackIndex = 0;
+    void updateCBFState();
+    CBFState getCBFState() const { return m_cbfState; }
+
+    void setSpeedhack(float speed);
+    float getSpeedhack() const { return m_speedhack; }
+
+    void toggleUI();
+    bool isUIOpen() const { return m_botUIOpen; }
+    void setUIOpen(bool open) { m_botUIOpen = open; }
+
+    // --- Core Logic ---
+    void updateTime(double dt);
+    double getTime() const { return m_currentLevelTime; }
+    void setTime(double time) { m_currentLevelTime = time; }
     
-    bool m_recording = false;
-    bool m_playing = false;
-    bool m_botTriggered = false; // Prevents recursive loop when bot presses button
+    void recordInput(int button, bool push, bool isPlayer2);
+    void processPlayback(GJBaseGameLayer* layer);
+    
+    void discardDeadInputs(double revertTime);
+    void reset();
 
-    // Check for Syzzi CBF or RobTop CBS
-    // Returns: 2 = Syzzi (Green), 1 = RobTop CBS (Yellow), 0 = None (Red)
-    int getCBFStatus() {
-        if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
-            return 2; 
-        }
-        // Fallback for RobTop CBS (Standard Game Variable for 'Click Between Steps')
-        if (GameManager::get()->getGameVariable("0175") || GameManager::get()->getGameVariable("0173")) {
-            return 1;
-        }
-        return 0;
-    }
+    // --- Practice Bug Fix ---
+    void saveCheckpoint(CheckpointObject* cp, PlayLayer* layer);
+    void loadCheckpoint(CheckpointObject* cp, PlayLayer* layer);
 
-    void addInput(bool push, bool player2, int button) {
-        if (getCBFStatus() == 0) return; // Discard if no CBF
+private:
+    PlayerCheckpointState capturePlayerState(PlayerObject* player);
+    void applyPlayerState(PlayerObject* player, const PlayerCheckpointState& state);
+};
 
-        BotInput input;
-        input.time = m_time;
-        input.push = push;
-        input.player2 = player2;
-        input.button = button;
+// ==========================================
+// UI LAYER
+// ==========================================
 
-        m_inputs.push_back(input);
-    }
+class BotUI : public geode::Popup<> {
+protected:
+    bool setup() override;
+    
+    void onRecord(CCObject*);
+    void onPlay(CCObject*);
+    void onDisable(CCObject*);
+    void onSpeedhackChange(CCTextInputNode*);
+    void onClose(CCObject*);
 
-    void resetInputs(double time) {
-        // Discard dead inputs on practice death/pause reset
-        auto it = std::lower_bound(m_inputs.begin(), m_inputs.end(), time,
-            [](const BotInput& a, double t) { return a.time < t; });
-        m_inputs.erase(it, m_inputs.end());
-    }
+    CCLabelBMFont* m_statusLabel;
+    CCLabelBMFont* m_cbfIndicator;
+    CCTextInputNode* m_speedhackInput;
 
-    void saveCheckpoint(PlayerObject* player) {
-        BotCheckpoint cp;
-        cp.time = m_time;
-        cp.pos = player->getPosition();
-        cp.yAccel = player->m_yAccel;
-        cp.xAccel = player->m_xAccel;
-        cp.jumpAccel = player->m_jumpAccel;
-        cp.isDashing = player->m_isDashing;
-        cp.isUpsideDown = player->m_isUpsideDown;
-        cp.vehicleSize = player->m_vehicleSize;
-        cp.rotation = player->getRotation();
-        m_checkpoints.push_back(cp);
-    }
-
-    void loadCheckpoint(PlayerObject* player) {
-        if (m_checkpoints.empty()) return;
-        auto& cp = m_checkpoints.back();
-        
-        player->setPosition(cp.pos);
-        player->m_yAccel = cp.yAccel;
-        player->m_xAccel = cp.xAccel;
-        player->m_jumpAccel = cp.jumpAccel;
-        player->m_isDashing = cp.isDashing;
-        player->m_isUpsideDown = cp.isUpsideDown;
-        player->m_vehicleSize = cp.vehicleSize;
-        player->setRotation(cp.rotation);
-    }
-
-    void removeLastCheckpoint() {
-        if (!m_checkpoints.empty()) {
-            m_checkpoints.pop_back();
-        }
-    }
+public:
+    static BotUI* create();
+    void updateUIState();
 };
