@@ -276,7 +276,7 @@ void MacroBot::tickPlay() {
         if (g_dispatcher) {
             // P1 = Space, P2 = Left-Shift
             enumKeyCodes key = a.isP2
-                ? enumKeyCodes::KEY_LShift
+                ? enumKeyCodes::KEY_Shift
                 : enumKeyCodes::KEY_Space;
             g_dispatcher->dispatchKeyboardMSG(
                 key,
@@ -420,7 +420,6 @@ public:
             100.f, 24.f, "1.0", "chatFont.fnt");
         speedInput->setPosition({px+135, sy});
         speedInput->setString("1.0");
-        speedInput->setMaxCharCount(10);
         speedInput->setAllowedChars("0123456789.");
         addChild(speedInput, 2);
 
@@ -482,7 +481,7 @@ public:
     void onLoad(CCObject*) { MacroBot::get().loadMacro(); }
     void onSpdSet(CCObject*) {
         if (!speedInput) return;
-        const char* raw = speedInput->getString();
+        std::string raw = speedInput->getString();
         if (raw && raw[0])
             MacroBot::get().hack.setText(std::string(raw));
     }
