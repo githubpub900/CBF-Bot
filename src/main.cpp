@@ -710,7 +710,6 @@ CheckpointState capturePlayerState(PlayLayer* playLayer) {
         auto p1 = playLayer->m_player1;
         state.p1_position = p1->getPosition();
         state.p1_rotation = p1->getRotation();
-        state.p1_isHolding = p1->m_isHolding;
         state.p1_isOnGround = p1->m_isOnGround;
         state.p1_isDashing = p1->m_isDashing;
         state.p1_isUpsideDown = p1->m_isUpsideDown;
@@ -729,7 +728,6 @@ CheckpointState capturePlayerState(PlayLayer* playLayer) {
         auto p2 = playLayer->m_player2;
         state.p2_position = p2->getPosition();
         state.p2_rotation = p2->getRotation();
-        state.p2_isHolding = p2->m_isHolding;
         state.p2_isOnGround = p2->m_isOnGround;
         state.p2_isDashing = p2->m_isDashing;
         state.p2_isUpsideDown = p2->m_isUpsideDown;
@@ -759,7 +757,6 @@ void restorePlayerState(PlayLayer* playLayer, const CheckpointState& state) {
         auto p1 = playLayer->m_player1;
         p1->setPosition(state.p1_position);
         p1->setRotation(state.p1_rotation);
-        p1->m_isHolding = state.p1_isHolding;
         p1->m_isOnGround = state.p1_isOnGround;
         p1->m_isDashing = state.p1_isDashing;
         p1->m_isUpsideDown = state.p1_isUpsideDown;
@@ -771,7 +768,6 @@ void restorePlayerState(PlayLayer* playLayer, const CheckpointState& state) {
         auto p2 = playLayer->m_player2;
         p2->setPosition(state.p2_position);
         p2->setRotation(state.p2_rotation);
-        p2->m_isHolding = state.p2_isHolding;
         p2->m_isOnGround = state.p2_isOnGround;
         p2->m_isDashing = state.p2_isDashing;
         p2->m_isUpsideDown = state.p2_isUpsideDown;
@@ -982,7 +978,8 @@ class $modify(CCKeyboardDispatcherHook, CCKeyboardDispatcher) {
             return true;
         }
 
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isPressed, isRepeat);
+        // FIX: dispatchKeyboardMSG requires 4 arguments in 2.2081 bindings
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isPressed, isRepeat, 0.0);
     }
 };
 

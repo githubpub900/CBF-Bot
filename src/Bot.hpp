@@ -67,13 +67,14 @@ struct MacroInput {
 };
 
 // ==================== CHECKPOINT STATE ====================
+// Note: m_isHolding is not exposed in Geode bindings for 2.2081
+// so we track what we can and use handleButton for input restoration
 struct CheckpointState {
     cocos2d::CCPoint p1_position;
     cocos2d::CCPoint p1_lastPosition;
     cocos2d::CCPoint p1_velocity;
     float p1_rotation;
     float p1_rotationSpeed;
-    bool p1_isHolding;
     bool p1_isOnGround;
     bool p1_isDashing;
     bool p1_isUpsideDown;
@@ -89,7 +90,6 @@ struct CheckpointState {
     cocos2d::CCPoint p2_velocity;
     float p2_rotation;
     float p2_rotationSpeed;
-    bool p2_isHolding;
     bool p2_isOnGround;
     bool p2_isDashing;
     bool p2_isUpsideDown;
