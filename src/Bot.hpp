@@ -1,136 +1,145 @@
-// ═══════════════════════════════════════════════════════════════
-// Bot.hpp — GDBot Core Declarations
-// ═══════════════════════════════════════════════════════════════
 #pragma once
 
 #include <Geode/Geode.hpp>
 #include <vector>
+#include <deque>
 #include <string>
-#include <cmath>
-#include <algorithm>
+#include <cstdint>
 
 using namespace geode::prelude;
 
-// ── Enums ──────────────────────────────────────────────────────
+namespace mb {
 
-enum class CBFStatus : uint8_t {
-    None       = 0,  // Red  — no CBF at all
-    RobTopCBS  = 1,  // Yellow — built-in Click Between Steps (480 fps cap)
-    SyzziCBF   = 2   // Green  — syzzi.click_between_frames (practically infinite)
+enum class CBFStatus : uint8_t { None = 0, RobTop = 1, Syzzi = 2 };
+enum class BotState  : uint8_t { Idle = 0, Recording = 1, Playing = 2 };
+enum class InputType : uint8_t { Press = 0, Release = 1 };
+
+// ═══ Single timed input ═══════════════════════════════════
+// 9 bytes in binary — extremely compact.
+// 'time' is seconds-into-level with full double precision,
+// which gives sub-nanosecond resolution even for hour-long levels.
+struct InputAction {
+    double    time    = 0.0;
+    bool      isP2    = false;
+    InputType type    = InputType::Press;
+    uint16_t  attempt = 0;
 };
 
-enum class BotState : uint8_t {
-    Idle      = 0,
-    Recording = 1,
-    Playing   = 2
+// ═══ Full player physics snapshot ═════════════════════════
+// Captures every state variable that vanilla practice mode
+// fails to restore (velocity, gravity, gamemode flags, etc.)
+struct PlayerSnap {
+    float x = 0.f, y = 0.f;
+    float rot = 0.f, rotSpd = 0.f;
+    float speed = 0.9f, speedMult = 1.f;
+    float gravity = 1.f;
+    float yVel = 0.f, xVel = 0.f;
+    float vehicleSize = 1.f;
+    bool  gravFlip   = false;
+    bool  onGround   = false;
+    bool  holding    = false;
+    bool  canJump    = false;
+    bool  justHeld   = false;
+    bool  dashing    = false;
+    int   gameMode   = 0;
 };
 
-// ── Data Structures ────────────────────────────────────────────
-
-// A single input event — only stores *actions*, never per-frame snapshots.
-// Even a 10-minute level with 8 000 clicks is only ~88 KB.
-struct MacroInput {
-    double  time;    // seconds into the level (high-precision double)
-    bool    isPress; // true = pushButton, false = releaseButton
-    uint8_t player;  // 0 = P1, 1 = P2 (dual)
-    uint8_t button;  // maps to PlayerButton: 1 = Jump, 2 = Left, 3 = Right
+struct CheckpointSnap {
+    double     gameTime = 0.0;
+    PlayerSnap p1{}, p2{};
 };
 
-// Full physics snapshot stored at every checkpoint — fixes the
-// "practice bug" where checkpoints don't save velocity / state
-// for ship, ball, UFO, wave, robot, spider, swing.
-struct PlayerCheckpointState {
-    double time;
-    float  x, y;
-    float  yAccel, jumpAccel;
-    float  playerSpeed;
-    float  rotation;
-    // gamemode flags
-    bool   isShip, isBall, isBird, isDart, isRobot, isSpider, isSwing;
-    // physics flags
-    bool   isGravityFlipped;
-    bool   isOnGround;
-    bool   isMini;
-    bool   isSecondPlayer;
-    float  playerScale;
+// ═══ Macro — stored input sequence ════════════════════════
+class Macro {
+public:
+    std::vector<InputAction> actions;
+    int    levelID     = 0;
+    double startOffset = 0.0;   // gameTime of first recorded input
+    double duration    = 0.0;
+
+    void   clear()  { actions.clear(); startOffset = duration = 0; }
+    bool   empty()  const { return actions.empty(); }
+    size_t size()   const { return actions.size(); }
+
+    // Binary format: "MBOT" | ver(4) | levelID(4) | offset(8) | count(8)
+    //               then per-action: time(8) + flags(1) = 9 bytes each
+    bool save(const std::string& path) const;
+    bool load(const std::string& path);
+    void truncateAfter(double t);
+    void removeAttempt(uint16_t att);
 };
 
-struct CheckpointEntry {
-    double time;
-    int    stateIndex;
+// ═══ Practice Bug Fix ═════════════════════════════════════
+// Keeps a parallel snapshot stack synced to the game's
+// checkpoint array. On respawn we overwrite the game's
+// incomplete restoration with our full physics state.
+class PracticeFix {
+public:
+    std::deque<CheckpointSnap> snaps;
+    size_t syncedCount = 0;
+
+    void sync(PlayLayer* layer, double gt);   // call every frame
+    void apply(PlayLayer* layer);              // call after resetLevel
+    void reset() { snaps.clear(); syncedCount = 0; }
+private:
+    PlayerSnap capture(PlayerObject* p);
+    void       restore(PlayerObject* p, const PlayerSnap& s);
 };
 
-// ── MacroBot Singleton ─────────────────────────────────────────
+// ═══ Speedhack ════════════════════════════════════════════
+// Multiplies dt instead of changing frame-rate, so the bot's
+// time-based tracking stays accurate regardless of speed.
+class Speedhack {
+public:
+    float       speed  = 1.f;
+    bool        active = false;
+    std::string buf    = "1.0";
+    void apply(float& dt) const { if (active) dt *= speed; }
+    bool setText(const std::string& s);
+};
 
+// ═══ MacroBot — central controller (singleton) ════════════
 class MacroBot {
 public:
-    static MacroBot& get() { static MacroBot i; return i; }
+    static MacroBot& get();
 
-    // --- state ---
-    BotState  m_state     = BotState::Idle;
-    CBFStatus m_cbfStatus = CBFStatus::None;
+    Macro       macro;
+    PracticeFix fix;
+    Speedhack   hack;
 
-    // --- macro data ---
-    std::vector<MacroInput>            m_inputs;
-    std::vector<PlayerCheckpointState> m_checkpointStates;   // P1
-    std::vector<PlayerCheckpointState> m_checkpointStatesP2; // P2 (dual)
-    std::vector<CheckpointEntry>       m_checkpointEntries;
+    BotState    state     = BotState::Idle;
+    CBFStatus   cbf       = CBFStatus::None;
+    double      gameTime  = 0.0;
+    double      chkTime   = 0.0;
+    uint16_t    attempt   = 0;
+    bool        inLevel   = false;
+    bool        practice  = false;
+    bool        deadLast  = false;
+    int         levelID   = 0;
+    PlayLayer*  layer     = nullptr;
 
-    // --- playback cursor ---
-    int    m_nextInputIndex     = 0;
-    double m_levelTime          = 0.0;   // accumulated level-time (seconds)
-    double m_recordingStartOff  = 0.0;   // time of first recorded input
-    int64_t m_levelID           = 0;
+    size_t playIdx   = 0;
+    bool   playReady = false;
+    bool   guiOpen   = false;
+    bool   pauseFlag = false;
 
-    // --- speedhack ---
-    float m_speedMultiplier = 1.0f;
-
-    // --- practice-bug fix state ---
-    bool m_needsStateRestore   = false;
-    int  m_restoreCheckpointIdx = -1;
-    int  m_restoreFrameCount    = 0;
-
-    // --- gui ---
-    bool        m_guiOpen       = false;
-    bool        m_isDispatching = false;  // re-entrancy guard for playback
-    std::string m_statusMessage = "Ready";
-    std::string m_saveName      = "macro";
-    void*       m_panelPtr      = nullptr; // BotPanel* (avoids header dep)
-
-    // --- core ---
     void init();
-    void updateCBFStatus();
-    bool hasCBF() const { return m_cbfStatus != CBFStatus::None; }
+    void detectCBF();
+    void enterLevel(PlayLayer* l);
+    void exitLevel();
+    void onDeath();
+    void onPauseRestart();
 
-    // --- recording ---
-    void startRecording(PlayLayer* pl);
-    void stopRecording();
-    void recordInput(double time, bool press, uint8_t player, uint8_t button);
-    void onDeath(PlayLayer* pl);
-    void onCheckpoint(PlayLayer* pl);
-    void onRestartFromPause();
-    void pruneDeadInputs();
+    void startRec();
+    void stopRec();
+    void recInput(bool isP2, InputType t);
 
-    // --- playback ---
-    void startPlayback(PlayLayer* pl);
-    void stopPlayback();
-    void processFrame(PlayLayer* pl, double dt);
+    void startPlay();
+    void stopPlay();
+    void tickPlay();
 
-    // --- file I/O ---
-    bool saveMacro(const std::string& filename);
-    bool loadMacro(const std::string& filename);
-    std::vector<std::string> listMacroFiles();
-
-    // --- speedhack ---
-    void setSpeed(float s);
-
-    // --- practice fix ---
-    PlayerCheckpointState captureState(PlayerObject* p, double time);
-    void applyState(PlayerObject* p, const PlayerCheckpointState& s);
-
-    // --- gui ---
-    void toggleGUI();
-    std::string cbfText() const;
-    cocos2d::ccColor3B cbfColor() const;
-    std::string stateText() const;
+    void saveMacro();
+    void loadMacro();
 };
+
+} // namespace mb
