@@ -70,9 +70,8 @@ namespace bot {
         }
 
         bool init() override {
-            if (!CCLayer::init()) return false;
-            setColor(ccc3(0, 0, 0));
-            setOpacity(160);
+            // Correctly initialize CCLayerColor's shader, blend, and vertex arrays to prevent crashes on draw.
+            if (!CCLayerColor::initWithColor(ccc4(0, 0, 0, 160))) return false;
 
             auto win = CCDirector::sharedDirector()->getWinSize();
             setContentSize(win);
