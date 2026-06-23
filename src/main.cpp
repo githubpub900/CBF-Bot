@@ -449,20 +449,32 @@ std::string MacroBot::getMacrosDir() {
 
 // ==================== GUI ====================
 void MacroBot::toggleGUI() {
-    m_guiOpen = !m_guiOpen;
+    log::info("toggleGUI called, current state: {}", m_guiOpen.load());
+
     if (m_guiOpen) {
-        createGUI();
-    } else {
         destroyGUI();
+        m_guiOpen = false;
+    } else {
+        createGUI();
+        m_guiOpen = true;
     }
 }
 
 void MacroBot::createGUI() {
-    auto scene = CCDirector::get()->getRunningScene();
-    if (!scene) return;
+    // Destroy existing GUI if any
+    if (m_guiLayer) {
+        destroyGUI();
+    }
+
+    auto playLayer = PlayLayer::get();
+    if (!playLayer) {
+        log::warn("Cannot create GUI: PlayLayer is null");
+        return;
+    }
 
     m_guiLayer = CCLayer::create();
     m_guiLayer->setZOrder(1000);
+    m_guiLayer->setID("cbf-macro-bot-gui");
 
     auto bg = cocos2d::extension::CCScale9Sprite::create("square01_001.png");
     bg->setContentSize({300, 400});
@@ -519,7 +531,10 @@ void MacroBot::createGUI() {
     menu->setPosition({0, 0});
     m_guiLayer->addChild(menu);
 
-    scene->addChild(m_guiLayer);
+    // Add to PlayLayer instead of scene for reliability
+    playLayer->addChild(m_guiLayer);
+
+    log::info("GUI created and added to PlayLayer");
     updateStatusLabel();
 }
 
@@ -530,6 +545,7 @@ void MacroBot::destroyGUI() {
         m_statusLabel = nullptr;
         m_cbfStatusLabel = nullptr;
         m_speedhackLabel = nullptr;
+        log::info("GUI destroyed");
     }
 }
 
@@ -886,6 +902,49 @@ class $modify(PlayLayerHook, PlayLayer) {
 
         PlayLayer::onQuit();
     }
+
+    // KEYBIND HANDLING: Hook keyDown for reliable in-game key capture
+    void keyDown(cocos2d::enumKeyCodes key) {
+        log::debug("PlayLayer::keyDown: key={}", static_cast<int>(key));
+
+        auto& bot = MacroBot::getInstance();
+        bool consumed = false;
+
+        if (key == cocos2d::KEY_K) {
+            log::info("K key pressed - toggling GUI");
+            bot.toggleGUI();
+            consumed = true;
+        }
+        else if (key == cocos2d::KEY_R) {
+            log::info("R key pressed - toggling recording");
+            if (bot.getState() == BotState::RECORDING) {
+                bot.stopRecording();
+            } else {
+                bot.startRecording();
+            }
+            consumed = true;
+        }
+        else if (key == cocos2d::KEY_P) {
+            log::info("P key pressed - toggling playback");
+            if (bot.getState() == BotState::PLAYING) {
+                bot.stopPlayback();
+            } else {
+                bot.startPlayback();
+            }
+            consumed = true;
+        }
+
+        if (!consumed) {
+            PlayLayer::keyDown(key);
+        }
+    }
+
+    void keyUp(cocos2d::enumKeyCodes key) {
+        // Only pass through if it's not one of our keybinds
+        if (key != cocos2d::KEY_K && key != cocos2d::KEY_R && key != cocos2d::KEY_P) {
+            PlayLayer::keyUp(key);
+        }
+    }
 };
 
 class $modify(PlayerObjectHook, PlayerObject) {
@@ -950,36 +1009,46 @@ class $modify(CCDirectorHook, CCDirector) {
     }
 };
 
+// FIX: Match the exact 4-parameter signature from the bindings
 class $modify(CCKeyboardDispatcherHook, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool isPressed, bool isRepeat) {
-        if (key == cocos2d::KEY_K && isPressed && !isRepeat) {
-            auto& bot = MacroBot::getInstance();
-            bot.toggleGUI();
-            return true;
-        }
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool isKeyDown, bool isKeyRepeat, double time) {
+        log::debug("CCKeyboardDispatcher::dispatchKeyboardMSG: key={}, down={}, repeat={}", 
+                   static_cast<int>(key), isKeyDown, isKeyRepeat);
 
-        if (key == cocos2d::KEY_R && isPressed && !isRepeat) {
-            auto& bot = MacroBot::getInstance();
-            if (bot.getState() == BotState::RECORDING) {
-                bot.stopRecording();
-            } else {
-                bot.startRecording();
+        auto& bot = MacroBot::getInstance();
+        bool consumed = false;
+
+        if (isKeyDown && !isKeyRepeat) {
+            if (key == cocos2d::KEY_K) {
+                log::info("K key detected in dispatcher - toggling GUI");
+                bot.toggleGUI();
+                consumed = true;
             }
-            return true;
-        }
-
-        if (key == cocos2d::KEY_P && isPressed && !isRepeat) {
-            auto& bot = MacroBot::getInstance();
-            if (bot.getState() == BotState::PLAYING) {
-                bot.stopPlayback();
-            } else {
-                bot.startPlayback();
+            else if (key == cocos2d::KEY_R) {
+                log::info("R key detected in dispatcher - toggling recording");
+                if (bot.getState() == BotState::RECORDING) {
+                    bot.stopRecording();
+                } else {
+                    bot.startRecording();
+                }
+                consumed = true;
             }
+            else if (key == cocos2d::KEY_P) {
+                log::info("P key detected in dispatcher - toggling playback");
+                if (bot.getState() == BotState::PLAYING) {
+                    bot.stopPlayback();
+                } else {
+                    bot.startPlayback();
+                }
+                consumed = true;
+            }
+        }
+
+        if (consumed) {
             return true;
         }
 
-        // FIX: dispatchKeyboardMSG requires 4 arguments in 2.2081 bindings
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isPressed, isRepeat, 0.0);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat, time);
     }
 };
 
