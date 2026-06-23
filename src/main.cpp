@@ -301,9 +301,9 @@ namespace bot {
         m_events.clear();
         m_checkpoints.clear();
         m_checkpointLookup.clear();
-        m_recordBaseNs = m_layer ? m_layer->m_currentTime : 0.0;
-        m_playbackStartNs = 0.0;
-        m_deathCutoffNs = 0.0;
+        m_recordBaseSec = m_layer ? m_layer->m_currentTime : 0.0;
+        m_playbackStartSec = 0.0;
+        m_deathCutoffSec = 0.0;
     }
 
     void BotManager::stopRecording(bool keepData) {
@@ -366,8 +366,8 @@ namespace bot {
     void BotManager::onSceneEnter(PlayLayer* layer) {
         m_layer = layer;
         refreshPlayers(layer);
-        if (m_recording && m_recordBaseNs == 0.0) {
-            m_recordBaseNs = layer ? layer->m_currentTime : 0.0;
+        if (m_recording && m_recordBaseSec == 0.0) {
+            m_recordBaseSec = layer ? layer->m_currentTime : 0.0;
         }
     }
 
@@ -405,10 +405,10 @@ namespace bot {
 
         double preciseGameTime = g_lastFrameGameTime + realDelta;
 
-        if (m_events.empty() && m_recordBaseNs == 0.0) m_recordBaseNs = preciseGameTime;
+        if (m_events.empty() && m_recordBaseSec == 0.0) m_recordBaseSec = preciseGameTime;
 
         MacroEvent ev;
-        ev.timeSec = preciseGameTime - m_recordBaseNs;
+        ev.timeSec = preciseGameTime - m_recordBaseSec;
         ev.button = static_cast<std::uint8_t>(button);
         ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player == m_cachedP1) ? 2 : 0));
         m_events.push_back(ev);
@@ -416,7 +416,7 @@ namespace bot {
 
     void BotManager::trimAfterCurrentTime(PlayLayer* layer) {
         if (!layer) return;
-        double cutoff = layer->m_currentTime - m_recordBaseNs;
+        double cutoff = layer->m_currentTime - m_recordBaseSec;
         if (cutoff < 0) cutoff = 0;
 
         std::erase_if(m_events, [cutoff](MacroEvent const& ev) { return ev.timeSec > cutoff; });
@@ -427,12 +427,12 @@ namespace bot {
 
     void BotManager::clearDeadState() {
         m_dead = false;
-        m_deathCutoffNs = 0.0;
+        m_deathCutoffSec = 0.0;
     }
 
     void BotManager::onDeath(PlayLayer*) {
         m_dead = true;
-        m_deathCutoffNs = m_layer ? m_layer->m_currentTime : 0.0;
+        m_deathCutoffSec = m_layer ? m_layer->m_currentTime : 0.0;
     }
 
     void BotManager::onRestartPre(PlayLayer* layer) {
@@ -443,7 +443,7 @@ namespace bot {
         clearDeadState();
         m_playbackIndex = 0; // Seamlessly reset playhead back to zero on restart
         if (m_recording) {
-            m_recordBaseNs = layer ? layer->m_currentTime : 0.0;
+            m_recordBaseSec = layer ? layer->m_currentTime : 0.0;
         }
     }
 
@@ -467,7 +467,7 @@ namespace bot {
     void BotManager::onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint) {
         if (!layer || !checkpoint) return;
         CheckpointSnapshot snapshot;
-        snapshot.timeSec = layer->m_currentTime - m_recordBaseNs;
+        snapshot.timeSec = layer->m_currentTime - m_recordBaseSec;
         snapshot.player1 = captureSnapshot(m_cachedP1);
         snapshot.player2 = captureSnapshot(m_cachedP2);
         m_checkpoints.push_back(snapshot);
@@ -484,7 +484,7 @@ namespace bot {
         applySnapshot(m_cachedP2, found->second.player2);
 
         if (m_recording) {
-            m_recordBaseNs = layer->m_currentTime - found->second.timeSec;
+            m_recordBaseSec = layer->m_currentTime - found->second.timeSec;
         }
         clearDeadState();
     }

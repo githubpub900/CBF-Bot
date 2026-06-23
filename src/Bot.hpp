@@ -16,7 +16,7 @@ namespace bot {
     };
 
     struct MacroEvent {
-        std::int64_t timeNs = 0;
+        double timeSec = 0.0;
         std::uint8_t button = 0;
         std::uint8_t flags = 0; // bit 0 = down, bit 1 = player1
     };
@@ -123,7 +123,7 @@ namespace bot {
     };
 
     struct CheckpointSnapshot {
-        std::int64_t timeNs = 0;
+        double timeSec = 0.0;
         PlayerSnapshot player1;
         PlayerSnapshot player2;
     };
@@ -154,22 +154,22 @@ namespace bot {
         void loadMacro();
         void setSpeedhack(double value);
 
-        void onGameUpdate(PlayLayer* layer, float dt, std::function<void(float)> const& originalUpdate);
-        void onButton(PlayerObject* player, PlayerButton button, bool down);
-        void onDeath(PlayLayer* layer);
-        void onRestartPre(PlayLayer* layer);
-        void onRestartPost(PlayLayer* layer);
-        void onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint);
-        void onCheckpointLoad(PlayLayer* layer, CheckpointObject* checkpoint);
-        void onLevelComplete(PlayLayer* layer);
-        void onSceneEnter(PlayLayer* layer);
+        void onGameUpdate(geode::prelude::PlayLayer* layer, float dt, std::function<void(float)> const& originalUpdate);
+        void onButton(geode::prelude::PlayerObject* player, geode::prelude::PlayerButton button, bool down);
+        void onDeath(geode::prelude::PlayLayer* layer);
+        void onRestartPre(geode::prelude::PlayLayer* layer);
+        void onRestartPost(geode::prelude::PlayLayer* layer);
+        void onCheckpointStore(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onCheckpointLoad(geode::prelude::PlayLayer* layer, geode::prelude::CheckpointObject* checkpoint);
+        void onLevelComplete(geode::prelude::PlayLayer* layer);
+        void onSceneEnter(geode::prelude::PlayLayer* layer);
         void onSceneExit();
 
-        void trimAfterCurrentTime(PlayLayer* layer);
+        void trimAfterCurrentTime(geode::prelude::PlayLayer* layer);
         void clearDeadState();
-        void refreshPlayers(PlayLayer* layer);
-        PlayerObject* player1() const;
-        PlayerObject* player2() const;
+        void refreshPlayers(geode::prelude::PlayLayer* layer);
+        geode::prelude::PlayerObject* player1() const;
+        geode::prelude::PlayerObject* player2() const;
 
         const std::vector<MacroEvent>& events() const;
         std::size_t playbackIndex() const;
@@ -181,12 +181,8 @@ namespace bot {
         std::filesystem::path defaultMacroPath() const;
         bool readMacroFromDisk();
 
-        static std::uint64_t zigZagEncode(std::int64_t value);
-        static std::int64_t zigZagDecode(std::uint64_t value);
-        static void writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value);
-        static bool readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value);
-        static PlayerSnapshot captureSnapshot(PlayerObject* player);
-        static void applySnapshot(PlayerObject* player, PlayerSnapshot const& snapshot);
+        static PlayerSnapshot captureSnapshot(geode::prelude::PlayerObject* player);
+        static void applySnapshot(geode::prelude::PlayerObject* player, PlayerSnapshot const& snapshot);
 
         TimingMode m_mode = TimingMode::None;
         bool m_recording = false;
@@ -195,18 +191,18 @@ namespace bot {
         bool m_inPlaybackInjection = false;
         bool m_inUpdateSplit = false;
         double m_speedhack = 1.0;
-        std::int64_t m_recordBaseNs = 0;
-        std::int64_t m_playbackStartNs = 0;
-        std::int64_t m_deathCutoffNs = 0;
+        double m_recordBaseSec = 0.0;
+        double m_playbackStartSec = 0.0;
+        double m_deathCutoffSec = 0.0;
 
         std::vector<MacroEvent> m_events;
         std::vector<CheckpointSnapshot> m_checkpoints;
-        std::unordered_map<CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
+        std::unordered_map<geode::prelude::CheckpointObject*, CheckpointSnapshot> m_checkpointLookup;
         std::size_t m_playbackIndex = 0;
 
-        PlayLayer* m_layer = nullptr;
-        PlayerObject* m_cachedP1 = nullptr;
-        PlayerObject* m_cachedP2 = nullptr;
+        geode::prelude::PlayLayer* m_layer = nullptr;
+        geode::prelude::PlayerObject* m_cachedP1 = nullptr;
+        geode::prelude::PlayerObject* m_cachedP2 = nullptr;
 
         BotOverlay* m_overlay = nullptr;
         std::filesystem::path m_macroPath;
