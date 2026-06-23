@@ -23,7 +23,6 @@ using namespace geode::prelude;
 namespace bot {
     namespace {
         constexpr int kOverlayTag = 0xB072;
-        constexpr std::int64_t kNanosPerSecond = 1'000'000'000LL;
 
         // Subframe capturing states
         std::chrono::high_resolution_clock::time_point g_lastFrameTime;
@@ -46,21 +45,9 @@ namespace bot {
             }
         }
 
-        std::int64_t toNs(double seconds) {
-            return static_cast<std::int64_t>(std::llround(seconds * static_cast<double>(kNanosPerSecond)));
-        }
-
-        double fromNs(std::int64_t ns) {
-            return static_cast<double>(ns) / static_cast<double>(kNanosPerSecond);
-        }
-
         CCMenuItemSpriteExtra* makeButton(const char* title, CCObject* target, SEL_MenuHandler handler) {
             auto* sprite = ButtonSprite::create(title);
             return CCMenuItemSpriteExtra::create(sprite, target, handler);
-        }
-
-        std::int64_t currentLayerTimeNs(PlayLayer* layer) {
-            return layer ? toNs(layer->m_currentTime) : 0;
         }
 
         // Speedhacks the background music stream dynamically
@@ -121,36 +108,41 @@ namespace bot {
                 makeButton("Close", this, menu_selector(BotOverlay::onClose)),
             };
 
-            float x = 88.f;
-            float y = win.height - 96.f;
+            // Compacted layout row 1: buttons
+            float x = 70.f;
+            float y = win.height - 85.f;
+            float spacingX = 90.f;
             for (auto* btn : buttons) {
                 btn->setPosition({x, y});
                 menu->addChild(btn);
-                x += 118.f;
+                x += spacingX;
             }
 
-            // Create decimal input field for speedhack
+            // Dedicated layout row 2: Speedhack Input Field
+            float labelX = 70.f;
+            float labelY = win.height - 125.f;
+
             auto* speedLabel = CCLabelBMFont::create("Speed:", "bigFont.fnt");
             speedLabel->setScale(0.5f);
             speedLabel->setAnchorPoint({0.f, 0.5f});
-            speedLabel->setPosition({x, y + 10.f});
+            speedLabel->setPosition({labelX, labelY});
             addChild(speedLabel);
 
             m_speedInput = CCTextInputNode::create(80.f, 30.f, "1.0", "bigFont.fnt");
             m_speedInput->setLabelPlaceholderColor({150, 150, 150});
             m_speedInput->setAllowedChars("0123456789.");
             m_speedInput->setMaxLabelLength(5);
-            m_speedInput->setPosition({x + 110.f, y});
+            m_speedInput->setPosition({labelX + 85.f, labelY});
             m_speedInput->setDelegate(this);
 
-            // Simple safe input background
+            // Text background wrapper
             auto* inputBg = CCLayerColor::create(ccc4(0, 0, 0, 100), 90.f, 30.f);
-            inputBg->setPosition({x + 65.f, y - 15.f});
+            inputBg->setPosition({labelX + 40.f, labelY - 15.f});
             addChild(inputBg);
 
             addChild(m_speedInput);
 
-            // Populate the textbox with the current speed configuration
+            // Populate speed string
             std::ostringstream ss;
             ss << std::fixed << std::setprecision(2) << BotManager::get().speedhack();
             m_speedInput->setString(ss.str());
@@ -309,9 +301,9 @@ namespace bot {
         m_events.clear();
         m_checkpoints.clear();
         m_checkpointLookup.clear();
-        m_recordBaseNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
-        m_playbackStartNs = 0;
-        m_deathCutoffNs = 0;
+        m_recordBaseNs = m_layer ? m_layer->m_currentTime : 0.0;
+        m_playbackStartNs = 0.0;
+        m_deathCutoffNs = 0.0;
     }
 
     void BotManager::stopRecording(bool keepData) {
@@ -328,9 +320,14 @@ namespace bot {
         m_mode = detectedMode();
         m_playback = true;
         m_recording = false;
+
+        // Automatically fast-forward playhead index to match where the player is in the run right now!
+        double currentSec = m_layer ? m_layer->m_currentTime : 0.0;
         m_playbackIndex = 0;
-        m_playbackStartNs = m_layer ? toNs(m_layer->m_currentTime) : 0;
-        m_inPlaybackInjection = false;
+        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeSec < currentSec) {
+            m_playbackIndex++;
+        }
+
         m_dead = false;
         refreshPlayers(m_layer);
     }
@@ -369,8 +366,8 @@ namespace bot {
     void BotManager::onSceneEnter(PlayLayer* layer) {
         m_layer = layer;
         refreshPlayers(layer);
-        if (m_recording && !m_recordBaseNs) {
-            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+        if (m_recording && m_recordBaseNs == 0.0) {
+            m_recordBaseNs = layer ? layer->m_currentTime : 0.0;
         }
     }
 
@@ -380,7 +377,6 @@ namespace bot {
         m_cachedP2 = nullptr;
         m_inPlaybackInjection = false;
         m_inUpdateSplit = false;
-        // Do NOT stop recording/playback automatically here, ensuring that configurations persist smoothly.
     }
 
     void BotManager::refreshPlayers(PlayLayer* layer) {
@@ -401,7 +397,7 @@ namespace bot {
         if (!m_recording || m_inPlaybackInjection) return;
         if (!m_layer) return;
 
-        // Calculate hyper-precise real-world frame offset using the high-resolution system clock
+        // Calculate precise real-world millisecond timing offset of the subframe click
         auto now = std::chrono::high_resolution_clock::now();
         double realDelta = std::chrono::duration<double>(now - g_lastFrameTime).count();
         if (realDelta > g_lastFrameDt) realDelta = g_lastFrameDt;
@@ -409,10 +405,10 @@ namespace bot {
 
         double preciseGameTime = g_lastFrameGameTime + realDelta;
 
-        if (m_events.empty() && !m_recordBaseNs) m_recordBaseNs = toNs(preciseGameTime);
+        if (m_events.empty() && m_recordBaseNs == 0.0) m_recordBaseNs = preciseGameTime;
 
         MacroEvent ev;
-        ev.timeNs = toNs(preciseGameTime) - m_recordBaseNs;
+        ev.timeSec = preciseGameTime - m_recordBaseNs;
         ev.button = static_cast<std::uint8_t>(button);
         ev.flags = static_cast<std::uint8_t>((down ? 1 : 0) | ((player && player == m_cachedP1) ? 2 : 0));
         m_events.push_back(ev);
@@ -420,23 +416,23 @@ namespace bot {
 
     void BotManager::trimAfterCurrentTime(PlayLayer* layer) {
         if (!layer) return;
-        auto cutoff = currentLayerTimeNs(layer) - m_recordBaseNs;
+        double cutoff = layer->m_currentTime - m_recordBaseNs;
         if (cutoff < 0) cutoff = 0;
 
-        std::erase_if(m_events, [cutoff](MacroEvent const& ev) { return ev.timeNs > cutoff; });
-        std::erase_if(m_checkpoints, [cutoff](CheckpointSnapshot const& cp) { return cp.timeNs > cutoff; });
-        std::erase_if(m_checkpointLookup, [cutoff](auto const& pair) { return pair.second.timeNs > cutoff; });
+        std::erase_if(m_events, [cutoff](MacroEvent const& ev) { return ev.timeSec > cutoff; });
+        std::erase_if(m_checkpoints, [cutoff](CheckpointSnapshot const& cp) { return cp.timeSec > cutoff; });
+        std::erase_if(m_checkpointLookup, [cutoff](auto const& pair) { return pair.second.timeSec > cutoff; });
         if (m_playbackIndex > m_events.size()) m_playbackIndex = m_events.size();
     }
 
     void BotManager::clearDeadState() {
         m_dead = false;
-        m_deathCutoffNs = 0;
+        m_deathCutoffNs = 0.0;
     }
 
     void BotManager::onDeath(PlayLayer*) {
         m_dead = true;
-        m_deathCutoffNs = m_layer ? currentLayerTimeNs(m_layer) : 0;
+        m_deathCutoffNs = m_layer ? m_layer->m_currentTime : 0.0;
     }
 
     void BotManager::onRestartPre(PlayLayer* layer) {
@@ -445,8 +441,9 @@ namespace bot {
 
     void BotManager::onRestartPost(PlayLayer* layer) {
         clearDeadState();
+        m_playbackIndex = 0; // Seamlessly reset playhead back to zero on restart
         if (m_recording) {
-            m_recordBaseNs = layer ? toNs(layer->m_currentTime) : 0;
+            m_recordBaseNs = layer ? layer->m_currentTime : 0.0;
         }
     }
 
@@ -470,7 +467,7 @@ namespace bot {
     void BotManager::onCheckpointStore(PlayLayer* layer, CheckpointObject* checkpoint) {
         if (!layer || !checkpoint) return;
         CheckpointSnapshot snapshot;
-        snapshot.timeNs = currentLayerTimeNs(layer) - m_recordBaseNs;
+        snapshot.timeSec = layer->m_currentTime - m_recordBaseNs;
         snapshot.player1 = captureSnapshot(m_cachedP1);
         snapshot.player2 = captureSnapshot(m_cachedP2);
         m_checkpoints.push_back(snapshot);
@@ -487,7 +484,7 @@ namespace bot {
         applySnapshot(m_cachedP2, found->second.player2);
 
         if (m_recording) {
-            m_recordBaseNs = currentLayerTimeNs(layer) - found->second.timeNs;
+            m_recordBaseNs = layer->m_currentTime - found->second.timeSec;
         }
         clearDeadState();
     }
@@ -506,7 +503,7 @@ namespace bot {
         }
 
         std::vector<std::uint8_t> buffer;
-        buffer.reserve(m_events.size() * 6 + 64);
+        buffer.reserve(m_events.size() * 10 + 64);
 
         auto appendRaw = [&](auto value) {
             auto* ptr = reinterpret_cast<const std::uint8_t*>(&value);
@@ -514,24 +511,22 @@ namespace bot {
         };
 
         buffer.insert(buffer.end(), {'P', 'R', 'B', 'M'});
-        std::uint16_t version = 1;
+        std::uint16_t version = 2; // Incremented file format version to reflect robust seconds-based timing
         appendRaw(version);
         std::uint8_t mode = static_cast<std::uint8_t>(detectedMode());
         appendRaw(mode);
         double recordedSpeed = m_speedhack;
         appendRaw(recordedSpeed);
 
-        writeVarUInt(buffer, static_cast<std::uint64_t>(m_events.size()));
-        std::int64_t last = 0;
+        // Binary dump of events containing pure high-precision time double fields
+        std::uint64_t eventSize = m_events.size();
+        appendRaw(eventSize);
         for (auto const& ev : m_events) {
-            std::uint64_t delta = static_cast<std::uint64_t>(std::max<std::int64_t>(0, ev.timeNs - last));
-            writeVarUInt(buffer, delta);
+            appendRaw(ev.timeSec);
             buffer.push_back(ev.flags);
             buffer.push_back(ev.button);
-            last = ev.timeNs;
         }
 
-        writeVarUInt(buffer, 0);
         out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
     }
 
@@ -558,33 +553,24 @@ namespace bot {
         std::uint8_t mode = 0;
         double recordedSpeed = 1.0;
         if (!readRaw(version) || !readRaw(mode) || !readRaw(recordedSpeed)) return false;
-        if (version != 1) return false;
+        if (version != 2) return false;
 
         std::uint64_t eventCount = 0;
-        if (!readVarUInt(cursor, end, eventCount)) return false;
+        if (!readRaw(eventCount)) return false;
 
         m_events.clear();
         m_events.reserve(static_cast<std::size_t>(eventCount));
 
-        std::int64_t running = 0;
         for (std::uint64_t i = 0; i < eventCount; ++i) {
-            std::uint64_t delta = 0;
-            if (!readVarUInt(cursor, end, delta)) return false;
-            if (cursor + 2 > end) return false;
-            running += static_cast<std::int64_t>(delta);
             MacroEvent ev;
-            ev.timeNs = running;
+            if (!readRaw(ev.timeSec)) return false;
+            if (cursor + 2 > end) return false;
             ev.flags = *cursor++;
             ev.button = *cursor++;
             m_events.push_back(ev);
         }
 
-        std::uint64_t checkpointCount = 0;
-        if (!readVarUInt(cursor, end, checkpointCount)) return false;
-        (void)checkpointCount;
-
         m_mode = static_cast<TimingMode>(mode);
-        (void)recordedSpeed;
         return true;
     }
 
@@ -596,34 +582,6 @@ namespace bot {
         stopRecording(true);
         stopPlayback();
         m_playbackIndex = 0;
-    }
-
-    std::uint64_t BotManager::zigZagEncode(std::int64_t value) {
-        return (static_cast<std::uint64_t>(value) << 1) ^ static_cast<std::uint64_t>(value >> 63);
-    }
-
-    std::int64_t BotManager::zigZagDecode(std::uint64_t value) {
-        return static_cast<std::int64_t>((value >> 1) ^ (~(value & 1) + 1));
-    }
-
-    void BotManager::writeVarUInt(std::vector<std::uint8_t>& out, std::uint64_t value) {
-        while (value >= 0x80) {
-            out.push_back(static_cast<std::uint8_t>(value | 0x80));
-            value >>= 7;
-        }
-        out.push_back(static_cast<std::uint8_t>(value));
-    }
-
-    bool BotManager::readVarUInt(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value) {
-        value = 0;
-        int shift = 0;
-        while (cursor < end && shift < 64) {
-            std::uint8_t byte = *cursor++;
-            value |= static_cast<std::uint64_t>(byte & 0x7F) << shift;
-            if ((byte & 0x80) == 0) return true;
-            shift += 7;
-        }
-        return false;
     }
 
     void BotManager::onGameUpdate(PlayLayer* layer, float dt, std::function<void(float)> const& originalUpdate) {
@@ -656,12 +614,11 @@ namespace bot {
         m_inUpdateSplit = true;
         const double startTime = layer->m_currentTime;
         const double endTime = startTime + scaledDt;
-        const std::int64_t endNs = toNs(endTime);
 
-        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeNs <= endNs) {
+        // Playback updates split and process clicks relative to exact simulation seconds
+        while (m_playbackIndex < m_events.size() && m_events[m_playbackIndex].timeSec <= endTime) {
             const auto& ev = m_events[m_playbackIndex];
-            const double eventTime = fromNs(ev.timeNs);
-            const double delta = std::max(0.0, eventTime - layer->m_currentTime);
+            const double delta = std::max(0.0, ev.timeSec - layer->m_currentTime);
             if (delta > 0.0) {
                 originalUpdate(static_cast<float>(delta));
             }
@@ -746,6 +703,16 @@ class $modify(BotPlayLayer, PlayLayer) {
         PlayLayer::onExit();
     }
 
+    void handleButton(bool down, PlayerButton button, bool isPlayer1) {
+        PlayLayer::handleButton(down, button, isPlayer1);
+
+        auto& bot = bot::BotManager::get();
+        if (bot.isRecording() && !bot.isInjectingPlayback()) {
+            auto* player = isPlayer1 ? m_player1 : m_player2;
+            bot.onButton(player, button, down);
+        }
+    }
+
     void update(float dt) {
         bot::BotManager::get().onGameUpdate(this, dt, [this](float step) {
             PlayLayer::update(step);
@@ -777,21 +744,5 @@ class $modify(BotPlayLayer, PlayLayer) {
     void levelComplete() {
         bot::BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
-    }
-};
-
-class $modify(BotPlayerObject, PlayerObject) {
-    void pushButton(PlayerButton button) {
-        PlayerObject::pushButton(button);
-        if (!bot::BotManager::get().isInjectingPlayback()) {
-            bot::BotManager::get().onButton(this, button, true);
-        }
-    }
-
-    void releaseButton(PlayerButton button) {
-        PlayerObject::releaseButton(button);
-        if (!bot::BotManager::get().isInjectingPlayback()) {
-            bot::BotManager::get().onButton(this, button, false);
-        }
     }
 };
