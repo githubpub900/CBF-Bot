@@ -704,7 +704,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 
     void handleButton(bool down, PlayerButton button, bool isPlayer1) {
-        PlayLayer::handleButton(down, button, isPlayer1);
+        PlayLayer::handleButton(down, static_cast<int>(button), isPlayer1);
 
         auto& bot = bot::BotManager::get();
         if (bot.isRecording() && !bot.isInjectingPlayback()) {
