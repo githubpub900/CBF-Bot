@@ -88,11 +88,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    void processCommands(float dt) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (isPlay(this)) {
             BotManager::get().fireDueInputs(this);
         }
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
     // ---- playback (backstop, per frame) ----------------------------------
@@ -114,11 +114,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
-    float getModifiedDelta(float dt) {
-        float modified = GJBaseGameLayer::getModifiedDelta(dt);
+    double getModifiedDelta(float dt) {
+        double modified = GJBaseGameLayer::getModifiedDelta(dt);
         auto& bot = BotManager::get();
         if (bot.speedhackEnabled && isPlay(this)) {
-            modified *= static_cast<float>(bot.speedMultiplier());
+            modified *= bot.speedMultiplier();
         }
         return modified;
     }
@@ -275,17 +275,8 @@ $on_mod(Loaded) {
     log::info("[Bot] Geode Time Macro loaded. Press K in a level to open the menu.");
 }
 
-// Persist options on unload.
-$on_mod(Unloaded) {
-    auto& bot = BotManager::get();
-    Mod::get()->setSavedValue<double>("speed", bot.speed);
-    Mod::get()->setSavedValue<bool>("speedhack", bot.speedhackEnabled);
-    Mod::get()->setSavedValue<bool>("practice-fix", bot.practiceFixEnabled);
-    Mod::get()->setSavedValue<bool>("discard-dead", bot.discardDeadInputs);
-    Mod::get()->setSavedValue<bool>("quantize-robtop", bot.quantizeForRobTopCBS);
-    Mod::get()->setSavedValue<bool>("auto-save", bot.autoSaveOnComplete);
-    Mod::get()->setSavedValue<std::string>("macro-name", bot.macroName);
-}
+// Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
+// BotManager::persist() whenever they change (see Bot.hpp).
 
 // ============================================================================
 //  BUILD, INSTALL & TROUBLESHOOTING NOTES

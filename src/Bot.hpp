@@ -972,12 +972,26 @@ public:
         return speed;
     }
 
+    // Write the current options to the mod's saved values. Called whenever an
+    // option changes (there is no on-unload event in Geode, so we persist eagerly).
+    void persist() {
+        auto m = Mod::get();
+        m->setSavedValue<double>("speed", speed);
+        m->setSavedValue<bool>("speedhack", speedhackEnabled);
+        m->setSavedValue<bool>("practice-fix", practiceFixEnabled);
+        m->setSavedValue<bool>("discard-dead", discardDeadInputs);
+        m->setSavedValue<bool>("quantize-robtop", quantizeForRobTopCBS);
+        m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
+        m->setSavedValue<std::string>("macro-name", macroName);
+    }
+
     void setSpeedFromString(std::string const& s) {
         try {
             double v = std::stod(s);
             if (std::isfinite(v) && v > 0.0) {
                 speed = v;
                 log::info("[Bot] Speed set to {}", speed);
+                persist();
             }
         } catch (...) {
             // ignore malformed input; keep the previous value
@@ -1390,7 +1404,7 @@ public:
     }
 
     // --- keyboard: toggle the panel on K ----------------------------------
-    void keyDown(cocos2d::enumKeyCodes key) override {
+    void keyDown(cocos2d::enumKeyCodes key, double timing) override {
         auto& bot = BotManager::get();
         switch (key) {
             case bot::TOGGLE_KEY:                       // K -> toggle the menu
@@ -1411,7 +1425,7 @@ public:
             default:
                 break;
         }
-        CCLayer::keyDown(key);
+        CCLayer::keyDown(key, timing);
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }
@@ -1545,6 +1559,7 @@ public:
         if (m_deadToggle)   m_deadToggle->toggle(bot.discardDeadInputs);
         if (m_quantToggle)  m_quantToggle->toggle(bot.quantizeForRobTopCBS);
         if (m_autoSaveToggle) m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
+        bot.persist(); // options changed -> save eagerly
     }
 
 private:
@@ -1648,7 +1663,7 @@ private:
         m_nameInput->setPosition({ 222.f, yName });
         m_nameInput->setScale(0.9f);
         m_nameInput->setCallback([](std::string const& s) {
-            if (!s.empty()) BotManager::get().macroName = s;
+            if (!s.empty()) { BotManager::get().macroName = s; BotManager::get().persist(); }
         });
         m_panel->addChild(m_nameInput);
 
@@ -1754,7 +1769,7 @@ private:
 
     CCMenuItemToggler* makeToggle(CCMenu* menu, CCPoint pos,
                                   cocos2d::SEL_MenuHandler sel, const char* label) {
-        auto toggle = CCMenuItemToggler::createWithStandardSprites(this, 0.6f, sel);
+        auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
         toggle->setPosition(pos);
         menu->addChild(toggle);
 
