@@ -54,6 +54,8 @@
 #include <Geode/binding/GJBaseGameLayer.hpp>
 #include <Geode/binding/GameManager.hpp>
 #include <Geode/binding/CCMenuItemToggler.hpp>
+#include <Geode/binding/PlatformToolbox.hpp>
+#include <Geode/binding/FMODAudioEngine.hpp>
 #include <Geode/ui/TextInput.hpp>
 
 #include <vector>
@@ -512,6 +514,11 @@ public:
     // knows not to record them back into the macro.
     bool      injecting = false;
 
+    // True while the GUI panel is open. The physics hooks freeze the level (no
+    // time advances) while this is set, so opening the menu pauses gameplay
+    // without spawning the vanilla pause menu over our UI.
+    bool      guiPaused = false;
+
     // Speedhack.
     bool      speedhackEnabled = false;
     double    speed = 1.0;
@@ -590,6 +597,24 @@ public:
             case bot::CBFState::RobTop: return 1.0 / bot::ROBTOP_CBS_FPS;
             case bot::CBFState::None:
             default:                    return 1.0 / 240.0;
+        }
+    }
+
+    // ----- gui pause / cursor / music -------------------------------------
+
+    // Open/close the GUI: freeze the level, reveal the OS cursor, and pause the
+    // song. Closing reverses all three. The actual physics freeze is enforced by
+    // the GJBaseGameLayer hooks reading `guiPaused`.
+    void setGuiOpen(bool open) {
+        guiPaused = open;
+        if (open) {
+            PlatformToolbox::showCursor();
+            if (auto fae = FMODAudioEngine::sharedEngine()) fae->pauseAllMusic(true);
+        } else {
+            if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
+            // GD hides the cursor during gameplay; only re-hide it if we are
+            // actually in a level (so we don't hide it back on a menu).
+            if (PlayLayer::get()) PlatformToolbox::hideCursor();
         }
     }
 
@@ -1380,6 +1405,9 @@ public:
     }
 
     ~BotUILayer() override {
+        // If we are torn down while open (e.g. the player quits the level with the
+        // menu up), make sure we don't leave the game frozen / cursor showing.
+        if (BotManager::get().guiPaused) BotManager::get().setGuiOpen(false);
         if (BotManager::get().ui == this) BotManager::get().ui = nullptr;
     }
 
@@ -1434,8 +1462,31 @@ public:
         m_visible = v;
         if (m_panel) m_panel->setVisible(v);
         if (m_badge) m_badge->setVisible(!v); // badge shows only when panel hidden
-        if (v) refreshAll();
-        else   refreshBadge();
+
+        // Pause the level + show the cursor + pause music while open.
+        BotManager::get().setGuiOpen(v);
+
+        if (v) {
+            bringToFront(); // sit above every other layer / GUI
+            refreshAll();
+        } else {
+            refreshBadge();
+        }
+    }
+
+    // Re-parent ourselves to the very top of the current running scene so the
+    // panel renders above the pause menu, other mods' overlays, everything.
+    void bringToFront() {
+        auto scene = CCDirector::sharedDirector()->getRunningScene();
+        if (!scene) return;
+        if (this->getParent() != scene) {
+            this->retain();
+            this->removeFromParentAndCleanup(false); // keep us (and our state) alive
+            scene->addChild(this, (std::numeric_limits<int>::max)());
+            this->release();
+        } else {
+            scene->reorderChild(this, (std::numeric_limits<int>::max)());
+        }
     }
 
     // ---- touch: high priority so our clicks land first, swallow the panel ---
@@ -1568,10 +1619,12 @@ private:
         constexpr float W = 320.f, H = 452.f;
         auto winSize = CCDirector::sharedDirector()->getWinSize();
 
-        // Container node, centred on screen.
+        // Container node, centred on screen. Scaled down so the panel is compact
+        // and doesn't dominate the screen.
         m_panel = CCNode::create();
         m_panel->setContentSize({ W, H });
         m_panel->setAnchorPoint({ 0.5f, 0.5f });
+        m_panel->setScale(0.72f);
         m_panel->setPosition({ winSize.width * 0.5f, winSize.height * 0.5f });
         this->addChild(m_panel);
 

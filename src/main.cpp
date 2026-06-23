@@ -101,6 +101,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
     void update(float dt) {
+        // Freeze gameplay while the GUI is open (our own pause -- no menu).
+        if (isPlay(this) && BotManager::get().guiPaused) {
+            return;
+        }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
             BotManager::get().fireDueInputs(this);
@@ -115,8 +119,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
     double getModifiedDelta(float dt) {
-        double modified = GJBaseGameLayer::getModifiedDelta(dt);
         auto& bot = BotManager::get();
+        // While the GUI is open the level is frozen: hand back a zero delta so no
+        // physics steps run and m_levelTime does not advance (keeps the bot in sync).
+        if (isPlay(this) && bot.guiPaused) {
+            return 0.0;
+        }
+        double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
         }
