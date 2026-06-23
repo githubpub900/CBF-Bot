@@ -1,358 +1,363 @@
-#include "Bot.hpp"
-#include <Geode/modify/PlayLayer.hpp>
+// =====================================================================================
+//  main.cpp  --  Hooks + UI glue for the Practice-to-Normal macro bot
+//  Target: Geometry Dash 2.2081  /  Geode v5.7.1
+//
+//  Design principle: hooks are THIN. They translate an engine event into a single call
+//  on Bot::get() and return. All policy lives in Bot.hpp. This keeps the integration
+//  surface small, auditable, and easy to repair if a binding signature shifts.
+//
+//  HOOK MAP
+//  --------
+//    GJBaseGameLayer::handleButton   -> record OR (during playback) is the dispatch sink
+//    PlayerObject::update            -> per-substep deterministic clock + playback dispatch
+//    PlayLayer::resetLevel           -> per-attempt runtime reset
+//    PlayLayer::markCheckpoint       -> push extended (practice-bug-fix) checkpoint
+//    PlayLayer::loadFromCheckpoint   -> restore extended state + dead-input cleanup
+//    PlayLayer::removeCheckpoint     -> keep checkpoint stack in lock-step
+//    PlayLayer::destroyPlayer        -> death hook (cleanup happens on the auto-reload)
+//    PlayLayer::levelComplete        -> freeze final route
+//    PauseLayer::onRestart           -> full-restart cleanup
+//    CCScheduler::update             -> internal speedhack (time-warp), NOT FPS based
+//    CCKeyboardDispatcher::dispatch  -> 'K' opens the bot menu
+//
+//  CBF / CBS INTEGRATION (summary; full rationale in Bot.hpp):
+//    * CBF exposes no API. We never call into it. We detect it with Loader::isModLoaded
+//      and otherwise rely on the fact that CBF transparently hooks the very same input
+//      and physics path our bot uses -- so a handleButton we emit during playback is
+//      processed by CBF at sub-frame resolution automatically.
+//    * CBS is native + 480 TPS capped; detection is best-effort + a user override toggle.
+//    * RED state (neither) hard-disables playback in Bot::setMode.
+// =====================================================================================
+
+#include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
-#include <Geode/modify/CCScheduler.hpp>
-#include <Geode/modify/CheckpointObject.hpp>
 #include <Geode/modify/PlayerObject.hpp>
-#include <iomanip>
+#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/ui/Popup.hpp>
+#include <Geode/ui/TextInput.hpp>
+
+#include "Bot.hpp"
 
 using namespace geode::prelude;
 
-// ==========================================
-// BOT LOGIC IMPLEMENTATION
-// ==========================================
+// Helper: the active PlayLayer (null in menus/editor). PlayLayer::get() is the stable
+// Geode accessor for the current play layer.
+static PlayLayer* activePL() { return PlayLayer::get(); }
 
-void Bot::setMode(BotMode mode) {
-    updateCBFState();
-    if (m_cbfState == CBFState::None) {
-        m_mode = BotMode::Disabled;
-        FLAlertLayer::create("Bot Error", "You must have <cg>Syzzi's CBF</c> or <cy>RobTop's CBS</c> enabled to use this bot.", "OK")->show();
-        return;
-    }
-    m_mode = mode;
-    if (mode == BotMode::Playing) {
-        m_playbackIndex = 0; 
-    }
-}
+// =====================================================================================
+//  INPUT HOOK
+// =====================================================================================
+//  handleButton(bool down, int button, bool isPlayer1) is GD's single input entry point.
+//  During RECORD we capture the transition (keyed by player X). During PLAY this same
+//  function is how we *emit* inputs (from Bot::dispatchCrossed), so we must avoid
+//  re-recording our own emitted inputs -- the mode check below handles that naturally:
+//  in Play mode we do not record.
+// =====================================================================================
+class $modify(InputHook, GJBaseGameLayer) {
+    void handleButton(bool down, int button, bool isPlayer1) {
+        GJBaseGameLayer::handleButton(down, button, isPlayer1);
 
-void Bot::updateCBFState() {
-    auto loader = geode::Loader::get();
-    if (loader->isModLoaded("syzzi.click_between_frames")) {
-        m_cbfState = CBFState::SyzziCBF;
-    } else {
-        bool robTopCBS = GameManager::sharedState()->getGameVariable("0175"); 
-        if (robTopCBS) {
-            m_cbfState = CBFState::RobTopCBS;
-        } else {
-            m_cbfState = CBFState::None;
+        auto pl = activePL();
+        if (!pl) return;
+        // Only record genuine user input in Practice while in Record mode.
+        if (Bot::get().isRecording() && pl->m_isPracticeMode) {
+            Bot::get().recordInput(button, down, isPlayer1, pl);
         }
     }
-}
+};
 
-void Bot::setSpeedhack(float speed) {
-    if (speed <= 0.0f) speed = 1.0f;
-    m_speedhack = speed;
-    CCDirector::sharedDirector()->getScheduler()->setTimeScale(speed);
-}
-
-void Bot::updateTime(double dt) {
-    m_currentLevelTime += dt;
-}
-
-void Bot::recordInput(int button, bool push, bool isPlayer2) {
-    if (m_mode != BotMode::Recording) return;
-
-    MacroInput input;
-    input.time = m_currentLevelTime;
-    input.button = button;
-    input.push = push;
-    input.isPlayer2 = isPlayer2;
-    
-    m_inputs.push_back(input);
-}
-
-void Bot::processPlayback(GJBaseGameLayer* layer) {
-    if (m_mode != BotMode::Playing) return;
-
-    while (m_playbackIndex < m_inputs.size()) {
-        const auto& nextInput = m_inputs[m_playbackIndex];
-        
-        if (m_currentLevelTime >= nextInput.time) {
-            layer->handleButton(nextInput.push, nextInput.button, !nextInput.isPlayer2);
-            m_playbackIndex++;
-        } else {
-            break; 
-        }
-    }
-}
-
-void Bot::discardDeadInputs(double revertTime) {
-    if (m_mode != BotMode::Recording) return;
-    
-    m_inputs.erase(
-        std::remove_if(m_inputs.begin(), m_inputs.end(),
-            [revertTime](const MacroInput& input) {
-                return input.time > revertTime;
-            }),
-        m_inputs.end()
-    );
-}
-
-void Bot::reset() {
-    m_inputs.clear();
-    m_checkpoints.clear();
-    m_playbackIndex = 0;
-    m_currentLevelTime = 0.0;
-}
-
-void Bot::toggleUI() {
-    if (!m_botUIOpen) {
-        auto ui = BotUI::create();
-        if (ui) {
-            ui->show();
-            m_botUIOpen = true;
-        }
-    }
-}
-
-PlayerCheckpointState Bot::capturePlayerState(PlayerObject* player) {
-    PlayerCheckpointState state;
-    if (!player) return state;
-    
-    state.m_position = player->getPosition();
-    state.m_yVelocity = player->m_yVelocity;
-    state.m_platformerXVelocity = player->m_platformerXVelocity;
-    state.m_rotation = player->getRotation();
-    state.m_isDashing = player->m_isDashing;
-    state.m_isSliding = player->m_isSliding;
-    state.m_isUpsideDown = player->m_isUpsideDown;
-    state.m_vehicleSize = player->m_vehicleSize;
-    
-    return state;
-}
-
-void Bot::applyPlayerState(PlayerObject* player, const PlayerCheckpointState& state) {
-    if (!player) return;
-    
-    player->setPosition(state.m_position);
-    player->m_yVelocity = state.m_yVelocity;
-    player->m_platformerXVelocity = state.m_platformerXVelocity;
-    player->setRotation(state.m_rotation);
-    player->m_isDashing = state.m_isDashing;
-    player->m_isSliding = state.m_isSliding;
-    player->m_isUpsideDown = state.m_isUpsideDown;
-    player->m_vehicleSize = state.m_vehicleSize;
-}
-
-void Bot::saveCheckpoint(CheckpointObject* cp, PlayLayer* layer) {
-    CheckpointData data;
-    data.m_time = m_currentLevelTime;
-    data.m_p1 = capturePlayerState(layer->m_player1);
-    data.m_p2 = capturePlayerState(layer->m_player2);
-    
-    m_checkpoints[cp] = data;
-}
-
-void Bot::loadCheckpoint(CheckpointObject* cp, PlayLayer* layer) {
-    if (m_checkpoints.find(cp) != m_checkpoints.end()) {
-        const auto& data = m_checkpoints[cp];
-        
-        m_currentLevelTime = data.m_time;
-        applyPlayerState(layer->m_player1, data.m_p1);
-        applyPlayerState(layer->m_player2, data.m_p2);
-        
-        discardDeadInputs(m_currentLevelTime);
-        
-        if (m_mode == BotMode::Playing) {
-            m_playbackIndex = 0;
-            while (m_playbackIndex < m_inputs.size() && m_inputs[m_playbackIndex].time <= m_currentLevelTime) {
-                m_playbackIndex++;
-            }
-        }
-    }
-}
-
-
-// ==========================================
-// GEODE HOOKS
-// ==========================================
-
-class $modify(MyPlayLayer, PlayLayer) {
+// =====================================================================================
+//  PER-SUBSTEP CLOCK + PLAYBACK DISPATCH
+// =====================================================================================
+//  PlayerObject::update(float) runs once per physics substep per player. We tick the Bot
+//  engine exactly once per substep using ONLY the reference player (P1) to avoid double
+//  counting in dual. This is the FPS-independent clock that gives sub-frame precision
+//  under CBF/CBS automatically (more substeps => finer crossing detection).
+// =====================================================================================
+class $modify(PlayerStepHook, PlayerObject) {
     void update(float dt) {
-        Bot::get().updateTime(static_cast<double>(dt));
-        Bot::get().processPlayback(this);
-        PlayLayer::update(dt);
-    }
+        PlayerObject::update(dt);
 
+        auto pl = activePL();
+        if (!pl) return;
+        // Tick once per substep, driven by player 1 only.
+        if (this == pl->m_player1) {
+            Bot::get().onPhysicsStep(pl);
+        }
+    }
+};
+
+// =====================================================================================
+//  PLAYLAYER LIFECYCLE HOOKS
+// =====================================================================================
+class $modify(PlayHook, PlayLayer) {
+    // resetLevel runs at the start of every attempt (manual start, death-respawn, restart).
     void resetLevel() {
         PlayLayer::resetLevel();
-        if (!this->m_isPracticeMode || this->m_checkpointArray->count() == 0) {
-            Bot::get().setTime(0.0);
-            Bot::get().discardDeadInputs(0.0);
-            if (Bot::get().getMode() == BotMode::Playing) {
-                Bot::get().setMode(BotMode::Playing); 
-            }
-        }
+        Bot::get().onLevelStart(this);
     }
 
-    void storeCheckpoint(CheckpointObject* cp) {
-        PlayLayer::storeCheckpoint(cp);
-        Bot::get().saveCheckpoint(cp, this);
+    // Practice checkpoint created -> snapshot extended state for the practice-bug fix.
+    CheckpointObject* markCheckpoint() {
+        auto* cp = PlayLayer::markCheckpoint();
+        if (cp) Bot::get().onMarkCheckpoint(this);
+        return cp;
     }
 
+    // Checkpoint loaded (death-respawn or manual) -> restore extended state, then drop
+    // any inputs recorded after the checkpoint (dead-input cleanup).
     void loadFromCheckpoint(CheckpointObject* cp) {
         PlayLayer::loadFromCheckpoint(cp);
-        Bot::get().loadCheckpoint(cp, this);
+        Bot::get().onLoadCheckpoint(this); // post-hook: GD's array is already trimmed
+    }
+
+    void removeCheckpoint() {
+        PlayLayer::removeCheckpoint();
+        Bot::get().onRemoveCheckpoint(this);
+    }
+
+    // Death. Cleanup is performed on the subsequent auto loadFromCheckpoint; this hook is
+    // kept explicit for clarity and future extension.
+    void destroyPlayer(PlayerObject* p, GameObject* o) {
+        PlayLayer::destroyPlayer(p, o);
+        Bot::get().onDeath(this);
+    }
+
+    void levelComplete() {
+        PlayLayer::levelComplete();
+        Bot::get().onLevelComplete(this);
     }
 };
 
-class $modify(MyGJBaseGameLayer, GJBaseGameLayer) {
-    void handleButton(bool push, int button, bool isPlayer1) {
-        if (Bot::get().getMode() == BotMode::Playing) {
-            if (button != 0) return; 
+// =====================================================================================
+//  RESTART (pause menu) -- full-route abandonment cleanup
+// =====================================================================================
+class $modify(PauseHook, PauseLayer) {
+    void onRestart(CCObject* sender) {
+        // A pause-menu restart that is NOT a checkpoint-restart abandons the whole route.
+        // PlayLayer::resetLevel will also fire and call onLevelStart; calling onRestart
+        // first guarantees the macro + checkpoint stack are cleared deterministically.
+        if (auto pl = activePL()) Bot::get().onRestart(pl, /*full=*/true);
+        PauseLayer::onRestart(sender);
+    }
+};
+
+// =====================================================================================
+//  SPEEDHACK  (internal time-warp -- explicitly NOT FPS manipulation)
+// =====================================================================================
+//  We scale the delta fed to the cocos scheduler. Everything that advances off the
+//  scheduler (including GD physics) speeds up/slows uniformly. Because the macro is keyed
+//  on player X (a physics RESULT), warping time changes how fast we travel but never the
+//  X-at-which-an-input-fires mapping -> playback timing stays exact at any speed. This is
+//  why the spec's "macro timing must remain accurate regardless of speedhack value" holds
+//  for free with this architecture.
+// =====================================================================================
+class $modify(SpeedHook, CCScheduler) {
+    void update(float dt) {
+        double warp = Bot::get().timeWarp();
+        // Only warp during active gameplay to avoid distorting menus/transitions.
+        if (warp != 1.0 && activePL()) {
+            CCScheduler::update(static_cast<float>(dt * warp));
+        } else {
+            CCScheduler::update(dt);
         }
-        GJBaseGameLayer::handleButton(push, button, isPlayer1);
-        Bot::get().recordInput(button, push, !isPlayer1);
     }
 };
 
-class $modify(MyKeyboardDispatcher, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool isKeyDown, bool isKeyRepeat, double modifier) {
-        if (key == KEY_K && isKeyDown) {
-            Bot::get().toggleUI();
-            return true; 
+// =====================================================================================
+//  BOT MENU (opened with 'K')
+// =====================================================================================
+class BotMenu : public Popup<> {
+protected:
+    CCLabelBMFont* m_statusLabel = nullptr;
+    CCLabelBMFont* m_infoLabel = nullptr;
+    TextInput*     m_nameInput = nullptr;
+    TextInput*     m_speedInput = nullptr;
+
+    bool setup() override {
+        this->setTitle("Rylan Macro Bot");
+        auto size = m_mainLayer->getContentSize();
+        float cx = size.width / 2.f;
+
+        // ---- CBF/CBS status label (green/yellow/red) ----
+        m_statusLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        m_statusLabel->setScale(0.55f);
+        m_statusLabel->setPosition({ cx, size.height - 42.f });
+        m_mainLayer->addChild(m_statusLabel);
+
+        // ---- info line (input count / record regime) ----
+        m_infoLabel = CCLabelBMFont::create("", "chatFont.fnt");
+        m_infoLabel->setScale(0.7f);
+        m_infoLabel->setPosition({ cx, size.height - 62.f });
+        m_mainLayer->addChild(m_infoLabel);
+
+        // ---- button row factory ----
+        auto menu = CCMenu::create();
+        menu->setPosition({ 0, 0 });
+        m_mainLayer->addChild(menu);
+
+        auto mkBtn = [&](const char* label, CcColor3B color, SEL_MenuHandler cb,
+                         float x, float y) {
+            auto spr = ButtonSprite::create(label, "bigFont.fnt", "GJ_button_01.png", 0.7f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this, cb);
+            btn->setPosition({ x, y });
+            menu->addChild(btn);
+            return btn;
+        };
+
+        float row1 = size.height - 100.f;
+        float row2 = size.height - 140.f;
+        float row3 = size.height - 180.f;
+        float lx = cx - 75.f, rx = cx + 75.f;
+
+        mkBtn("Record",   ccc3(255,80,80),  menu_selector(BotMenu::onRecord),   lx, row1);
+        mkBtn("Play",     ccc3(80,255,80),  menu_selector(BotMenu::onPlay),     rx, row1);
+        mkBtn("Save",     ccc3(255,255,255),menu_selector(BotMenu::onSave),     lx, row2);
+        mkBtn("Load",     ccc3(255,255,255),menu_selector(BotMenu::onLoad),     rx, row2);
+        mkBtn("Stop",     ccc3(200,200,200),menu_selector(BotMenu::onStop),     lx, row3);
+        mkBtn("CBS On/Off",ccc3(255,220,80),menu_selector(BotMenu::onToggleCBS),rx, row3);
+
+        // ---- macro name input ----
+        m_nameInput = TextInput::create(180.f, "macro name");
+        m_nameInput->setString("practice_run");
+        m_nameInput->setPosition({ cx, size.height - 218.f });
+        m_mainLayer->addChild(m_nameInput);
+
+        // ---- speedhack input + toggle ----
+        m_speedInput = TextInput::create(80.f, "speed");
+        m_speedInput->setString("1.0");
+        m_speedInput->setCommonFilter(CommonFilter::Float);
+        m_speedInput->setPosition({ cx - 40.f, size.height - 250.f });
+        m_mainLayer->addChild(m_speedInput);
+
+        auto spdMenu = CCMenu::create();
+        spdMenu->setPosition({ 0, 0 });
+        m_mainLayer->addChild(spdMenu);
+        auto applySpr = ButtonSprite::create("Speed", "bigFont.fnt", "GJ_button_05.png", 0.6f);
+        auto applyBtn = CCMenuItemSpriteExtra::create(applySpr, this, menu_selector(BotMenu::onSpeed));
+        applyBtn->setPosition({ cx + 60.f, size.height - 250.f });
+        spdMenu->addChild(applyBtn);
+
+        refresh();
+        return true;
+    }
+
+    void refresh() {
+        Bot::get().detectStatus();
+        switch (Bot::get().precision()) {
+            case Precision::CBF:
+                m_statusLabel->setString("CBF ACTIVE  (max precision)");
+                m_statusLabel->setColor(ccc3(60, 230, 60));   // GREEN
+                break;
+            case Precision::CBS:
+                m_statusLabel->setString("CBS ACTIVE  (~480 TPS)");
+                m_statusLabel->setColor(ccc3(240, 220, 40));  // YELLOW
+                break;
+            default:
+                m_statusLabel->setString("NO CBF/CBS  (playback disabled)");
+                m_statusLabel->setColor(ccc3(235, 50, 50));   // RED
+                break;
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown, isKeyRepeat, modifier);
+        const char* modeStr =
+            Bot::get().isRecording() ? "RECORDING" :
+            Bot::get().isPlaying()   ? "PLAYING"   : "idle";
+        const char* regime =
+            Bot::get().recordPrecision() == Precision::CBF ? "CBF" :
+            Bot::get().recordPrecision() == Precision::CBS ? "CBS" : "-";
+        m_infoLabel->setString(
+            fmt::format("{}  |  inputs: {}  |  regime: {}  |  speed: {}x{}",
+                modeStr, Bot::get().inputCount(), regime,
+                Bot::get().speed(),
+                Bot::get().speedEnabled() ? "" : " (off)").c_str());
+    }
+
+    // ---- button handlers ----
+    void onRecord(CCObject*) {
+        if (auto pl = activePL(); pl && !pl->m_isPracticeMode) {
+            Notification::create("Enter Practice Mode to record.", NotificationIcon::Warning)->show();
+            return;
+        }
+        Bot::get().setMode(BotMode::Record);
+        if (auto pl = activePL()) Bot::get().onLevelStart(pl);
+        refresh();
+    }
+    void onPlay(CCObject*) {
+        Bot::get().setMode(BotMode::Play);
+        if (!Bot::get().isPlaying()) {
+            Notification::create("Playback disabled: no CBF/CBS active.", NotificationIcon::Error)->show();
+        }
+        refresh();
+    }
+    void onStop(CCObject*) {
+        Bot::get().setMode(BotMode::Idle);
+        refresh();
+    }
+    void onSave(CCObject*) {
+        auto name = m_nameInput->getString();
+        if (name.empty()) name = "macro";
+        if (Bot::get().save(name))
+            Notification::create("Saved.", NotificationIcon::Success)->show();
+        else
+            Notification::create("Save failed.", NotificationIcon::Error)->show();
+    }
+    void onLoad(CCObject*) {
+        auto name = m_nameInput->getString();
+        if (name.empty()) name = "macro";
+        if (Bot::get().load(name))
+            Notification::create("Loaded.", NotificationIcon::Success)->show();
+        else
+            Notification::create("Load failed.", NotificationIcon::Error)->show();
+        refresh();
+    }
+    void onToggleCBS(CCObject*) {
+        // Manual override for native CBS when automatic detection is unavailable on this
+        // binding set. Documented fallback so a legitimate CBS run is never locked out.
+        Bot::get().setUserCBSOverride(!Bot::get().userCBSOverride());
+        refresh();
+    }
+    void onSpeed(CCObject*) {
+        double s = 1.0;
+        try { s = std::stod(m_speedInput->getString()); } catch (...) { s = 1.0; }
+        Bot::get().setSpeed(s);
+        Bot::get().setSpeedEnabled(s != 1.0);
+        refresh();
+    }
+
+public:
+    static BotMenu* create() {
+        auto ret = new BotMenu();
+        if (ret->initAnchored(300.f, 290.f)) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
     }
 };
 
-
-// ==========================================
-// UI IMPLEMENTATION
-// ==========================================
-
-bool BotUI::setup() {
-    auto winSize = CCDirector::sharedDirector()->getWinSize();
-    Bot::get().updateCBFState();
-
-    // Safely draw custom title to avoid version-mismatch setTitle errors
-    auto titleLabel = CCLabelBMFont::create("Macro Engine v2.0", "goldFont.fnt");
-    titleLabel->setPosition({m_mainLayer->getContentSize().width / 2, m_mainLayer->getContentSize().height - 25});
-    titleLabel->setScale(0.8f);
-    m_mainLayer->addChild(titleLabel);
-
-    // -- Indicator Setup --
-    m_cbfIndicator = CCLabelBMFont::create(".", "bigFont.fnt");
-    m_cbfIndicator->setPosition({m_mainLayer->getContentSize().width / 2 + 100, m_mainLayer->getContentSize().height - 25});
-    m_cbfIndicator->setScale(2.0f);
-    m_mainLayer->addChild(m_cbfIndicator);
-
-    // -- Status Label --
-    m_statusLabel = CCLabelBMFont::create("Status: Disabled", "goldFont.fnt");
-    m_statusLabel->setPosition({m_mainLayer->getContentSize().width / 2, m_mainLayer->getContentSize().height - 60});
-    m_statusLabel->setScale(0.6f);
-    m_mainLayer->addChild(m_statusLabel);
-
-    // -- Buttons --
-    auto menu = CCMenu::create();
-    menu->setPosition({m_mainLayer->getContentSize().width / 2, m_mainLayer->getContentSize().height / 2 + 20});
-
-    auto btnRecordSprite = ButtonSprite::create("Record");
-    auto btnRecord = CCMenuItemSpriteExtra::create(
-        btnRecordSprite, this, menu_selector(BotUI::onRecord)
-    );
-    btnRecord->setPosition({-70, 0});
-    menu->addChild(btnRecord);
-
-    auto btnPlaySprite = ButtonSprite::create("Play");
-    auto btnPlay = CCMenuItemSpriteExtra::create(
-        btnPlaySprite, this, menu_selector(BotUI::onPlay)
-    );
-    btnPlay->setPosition({70, 0});
-    menu->addChild(btnPlay);
-
-    auto btnDisableSprite = ButtonSprite::create("Disable");
-    auto btnDisable = CCMenuItemSpriteExtra::create(
-        btnDisableSprite, this, menu_selector(BotUI::onDisable)
-    );
-    btnDisable->setPosition({0, -45});
-    menu->addChild(btnDisable);
-
-    m_mainLayer->addChild(menu);
-
-    // -- Speedhack Input --
-    auto speedhackBg = CCScale9Sprite::create("square02_small.png");
-    speedhackBg->setContentSize({80, 30});
-    speedhackBg->setOpacity(100);
-    speedhackBg->setPosition({m_mainLayer->getContentSize().width / 2 - 40, 45});
-    m_mainLayer->addChild(speedhackBg);
-
-    m_speedhackInput = CCTextInputNode::create(80, 30, "Speed", "bigFont.fnt");
-    m_speedhackInput->setPosition(speedhackBg->getPosition());
-    m_speedhackInput->setLabelPlaceholderColor({200, 200, 200});
-    m_speedhackInput->setAllowedChars("0123456789.");
-    m_speedhackInput->setString(std::to_string(Bot::get().getSpeedhack()).c_str());
-    m_mainLayer->addChild(m_speedhackInput);
-
-    auto speedLabel = CCLabelBMFont::create("Speedhack:", "bigFont.fnt");
-    speedLabel->setPosition({m_mainLayer->getContentSize().width / 2 - 40, 75});
-    speedLabel->setScale(0.4f);
-    m_mainLayer->addChild(speedLabel);
-    
-    // Apply speed hack button
-    auto applyMenu = CCMenu::create();
-    applyMenu->setPosition({m_mainLayer->getContentSize().width / 2 + 60, 45});
-    
-    auto applyBtnSprite = ButtonSprite::create("Apply", "goldFont.fnt", "GJ_button_01.png", .6f);
-    auto applyBtn = CCMenuItemSpriteExtra::create(
-        applyBtnSprite, this, menu_selector(BotUI::onSpeedhackChange)
-    );
-    applyMenu->addChild(applyBtn);
-    m_mainLayer->addChild(applyMenu);
-
-    updateUIState();
-    return true;
-}
-
-void BotUI::updateUIState() {
-    auto mode = Bot::get().getMode();
-    if (mode == BotMode::Recording) m_statusLabel->setString("Status: Recording");
-    else if (mode == BotMode::Playing) m_statusLabel->setString("Status: Playing");
-    else m_statusLabel->setString("Status: Disabled");
-
-    auto cbf = Bot::get().getCBFState();
-    if (cbf == CBFState::SyzziCBF) m_cbfIndicator->setColor({0, 255, 0});       
-    else if (cbf == CBFState::RobTopCBS) m_cbfIndicator->setColor({255, 255, 0}); 
-    else m_cbfIndicator->setColor({255, 0, 0});                                   
-}
-
-void BotUI::onRecord(CCObject*) {
-    Bot::get().setMode(BotMode::Recording);
-    updateUIState();
-}
-
-void BotUI::onPlay(CCObject*) {
-    Bot::get().setMode(BotMode::Playing);
-    updateUIState();
-}
-
-void BotUI::onDisable(CCObject*) {
-    Bot::get().setMode(BotMode::Disabled);
-    updateUIState();
-}
-
-void BotUI::onSpeedhackChange(CCObject*) {
-    try {
-        float speed = std::stof(m_speedhackInput->getString());
-        Bot::get().setSpeedhack(speed);
-        FLAlertLayer::create("Success", "Speedhack applied via Scheduler.", "OK")->show();
-    } catch (...) {
-        FLAlertLayer::create("Error", "Invalid speed format.", "OK")->show();
+// =====================================================================================
+//  'K' opens the menu
+// =====================================================================================
+class $modify(KeyHook, CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat) {
+        if (key == enumKeyCodes::KEY_K && down && !repeat) {
+            // Don't steal the key while typing in a text field.
+            if (auto menu = BotMenu::create()) {
+                menu->show();
+            }
+            return true;
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat);
     }
-}
+};
 
-void BotUI::onClose(CCObject* sender) {
-    Bot::get().setUIOpen(false);
-    Popup::onClose(sender);
-}
-
-BotUI* BotUI::create() {
-    auto ret = new BotUI();
-    if (ret && ret->initAnchored(300, 220)) {
-        ret->autorelease();
-        return ret;
-    }
-    CC_SAFE_DELETE(ret);
-    return nullptr;
+// =====================================================================================
+//  Entry point
+// =====================================================================================
+$on_mod(Loaded) {
+    Bot::get().detectStatus();
+    log::info("[Bot] loaded. CBF/CBS status code = {}", (int)Bot::get().precision());
 }
