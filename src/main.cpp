@@ -935,14 +935,14 @@ class $modify(PlayLayerHook, PlayLayer) {
         }
 
         if (!consumed) {
-            PlayLayer::keyDown(key);
+            PlayLayer::keyDown(key, 0.0);
         }
     }
 
     void keyUp(cocos2d::enumKeyCodes key) {
         // Only pass through if it's not one of our keybinds
         if (key != cocos2d::KEY_K && key != cocos2d::KEY_R && key != cocos2d::KEY_P) {
-            PlayLayer::keyUp(key);
+            PlayLayer::keyUp(key, 0.0);
         }
     }
 };
