@@ -1,65 +1,49 @@
 // ============================================================
-// MacroBot — Geode mod for Geometry Dash 2.2081
-// Geode SDK v5.7.1
+// MacroBot — main.cpp
+// Geode v5.7.1 / GD 2.2081
 //
-// Features:
-//  - Time-based macro recording/playback with CBF precision
-//  - Supports syzzi.click_between_frames (unlimited precision)
-//  - Supports RobTop's built-in Click Between Steps (480 TPS)
-//  - Bot is DISABLED if no CBF is active
-//  - Dead-input discard (deaths in practice mode)
-//  - Pause-menu restart reverts later inputs correctly
-//  - Own practice bug-fix (full PlayerState checkpoints)
-//  - Own speedhack (textbox, decoupled from frame rate)
-//  - GUI via K key (CBF status dot, record/play, save/load)
+// - Time-keyed macro recording + playback (CBF-precise)
+// - Supports syzzi.click_between_frames + RobTop CBS
+// - Locked (red dot) if no CBF present
+// - Dead-input discard, restart-revert
+// - Full-state practice checkpoints (velocity, gamemode, etc.)
+// - Speedhack via CCScheduler::setTimeScale (textbox)
+// - GUI opens on K key inside a level
 // ============================================================
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 
-// Geode UI
-#include <Geode/ui/GeodeUI.hpp>
+// ---- Geode UI ----
+// In Geode v5, geode::Popup<> lives in:
 #include <Geode/ui/Popup.hpp>
 
-// cocos2d input
-#include <Geode/cocos/base_nodes/CCNode.h>
-#include <Geode/cocos/cocoa/CCGeometry.h>
+// ---- Cocos2d extensions (CCScale9Sprite, CCTextInputNode) ----
+#include <Geode/cocos/extensions/GUI/CCControlExtension/CCControl.h>
+#include <Geode/cocos/extensions/GUI/CCScrollView/CCScrollView.h>
 
 #include "Bot.hpp"
 
 using namespace geode::prelude;
 
 // ============================================================
-// Persistent checkpoint data — stored per checkpoint index
+// Checkpoint extra data — parallel vector to m_checkpointArray
 // ============================================================
-struct CheckpointExtra {
-    PlayerState p1State;
-    PlayerState p2State;
-    double      levelTime = 0.0;
-};
-
-static std::vector<CheckpointExtra> s_checkpointExtras;
+static std::vector<CheckpointExtra> s_extras;
 
 // ============================================================
-// Speedhack — we intercept CCScheduler::update so that the
-// physics step receives our custom time scale without touching
-// the visual frame rate counter.
+// Helper: alert shorthand
 // ============================================================
-class $modify(CCScheduler) {
-    void update(float dt) {
-        // We already set the CCScheduler time scale through applySpeedhack(),
-        // so we just pass through. This hook exists to ensure future
-        // compatibility and lets us guard against extreme dt spikes.
-        float clampedDt = std::min(dt, 0.5f); // never more than 0.5s
-        CCScheduler::update(clampedDt);
-    }
-};
+static void showAlert(const char* title, const char* msg) {
+    FLAlertLayer::create(title, msg, "OK")->show();
+}
 
 // ============================================================
-// GJBaseGameLayer — intercept handleButton for recording
+// GJBaseGameLayer hook — capture inputs for recording
+// Every input path (CBF sub-frame, RobTop CBS, normal) calls
+// handleButton, so one hook covers everything.
 // ============================================================
 class $modify(GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -67,395 +51,342 @@ class $modify(GJBaseGameLayer) {
 
         Bot& bot = Bot::get();
         if (bot.mode != BotMode::Recording) return;
-        if (!bot.canOperate()) return;
+        if (!bot.canRun()) return;
 
-        // Translate GD button index → BotButton
         BotButton btn;
         switch (button) {
             case 0:  btn = BotButton::Jump;  break;
             case 1:  btn = BotButton::Left;  break;
             case 2:  btn = BotButton::Right; break;
-            default: return; // ignore unknown
+            default: return;
         }
 
-        int playerIdx = isPlayer1 ? 0 : 1;
-
-        // Use the authoritative level time from PlayLayer
-        double levelTime = bot.currentLevelTime;
-
-        bot.recordInput(levelTime, playerIdx, btn, down);
+        bot.recordInput(bot.currentTime, isPlayer1 ? 0 : 1, btn, down);
     }
 };
 
 // ============================================================
-// PlayLayer — main hook for timing, checkpoints, death, etc.
+// PlayLayer hooks
 // ============================================================
 class $modify(MyPlayLayer, PlayLayer) {
 
-    // ----------------------------------------------------------
-    // init — refresh CBF status whenever a level is entered
-    // ----------------------------------------------------------
+    // init — refresh CBF, reset bot state
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         Bot::get().refreshCBF();
-        Bot::get().reset();
-        s_checkpointExtras.clear();
+        Bot::get().fullReset();
+        s_extras.clear();
         return true;
     }
 
-    // ----------------------------------------------------------
-    // update — track current level time, drive playback
-    // ----------------------------------------------------------
+    // update — track time, drive playback
     void update(float dt) {
         PlayLayer::update(dt);
-
         Bot& bot = Bot::get();
-        // m_currentTime is the authoritative level time in PlayLayer
-        bot.currentLevelTime = static_cast<double>(m_currentTime);
-
+        bot.currentTime = static_cast<double>(m_currentTime);
         if (bot.mode == BotMode::Playing) {
-            bot.processPlayback(this, bot.currentLevelTime);
+            bot.tickPlayback(this, bot.currentTime);
         }
     }
 
-    // ----------------------------------------------------------
-    // resetLevel — handles both "restart from start" and
-    //              "restore from checkpoint" paths.
-    // We need to revert bot input state accordingly.
-    // ----------------------------------------------------------
+    // resetLevel — handles checkpoint restore AND full restart
     void resetLevel() {
         PlayLayer::resetLevel();
-
-        Bot& bot = Bot::get();
-        double resetTime = static_cast<double>(m_currentTime);
-
-        if (bot.mode == BotMode::Recording) {
-            bot.onRestart(resetTime);
-        } else if (bot.mode == BotMode::Playing) {
-            bot.rewindPlaybackTo(resetTime);
-        }
+        Bot::get().onRevert(static_cast<double>(m_currentTime));
     }
 
-    // ----------------------------------------------------------
-    // destroyPlayer — mark player as dead in recording mode
-    // ----------------------------------------------------------
-    void destroyPlayer(PlayerObject* player, GameObject* object) {
+    // destroyPlayer — mark dead in recording mode
+    void destroyPlayer(PlayerObject* player, GameObject* obj) {
         Bot& bot = Bot::get();
         if (bot.mode == BotMode::Recording) {
-            bool isP1 = (player == m_player1);
-            double deathTime = bot.currentLevelTime;
-            bot.onDeath(isP1 ? 0 : 1, deathTime);
+            int pidx = (player == m_player1) ? 0 : 1;
+            bot.onDeath(pidx, bot.currentTime);
         }
-        PlayLayer::destroyPlayer(player, object);
+        PlayLayer::destroyPlayer(player, obj);
     }
 
-    // ----------------------------------------------------------
-    // Practice-mode checkpoint creation — store full player states
-    // ----------------------------------------------------------
+    // createCheckpoint — save full player state alongside GD's checkpoint
     CheckpointObject* createCheckpoint() {
         CheckpointObject* cp = PlayLayer::createCheckpoint();
         if (!cp || !m_isPracticeMode) return cp;
 
-        CheckpointExtra extra;
-        extra.levelTime = Bot::get().currentLevelTime;
-        if (m_player1) extra.p1State = capturePlayerState(m_player1);
-        if (m_player2) extra.p2State = capturePlayerState(m_player2);
-
-        // Index = current array count (checkpoint just created is at the end)
-        s_checkpointExtras.push_back(extra);
+        CheckpointExtra ex;
+        ex.levelTime = Bot::get().currentTime;
+        if (m_player1) ex.p1 = capturePlayer(m_player1);
+        if (m_player2) ex.p2 = capturePlayer(m_player2);
+        s_extras.push_back(ex);
         return cp;
     }
 
-    // ----------------------------------------------------------
-    // Practice-mode checkpoint restore — apply full player states
-    // ----------------------------------------------------------
+    // loadFromCheckpoint — restore full player state
     void loadFromCheckpoint(CheckpointObject* cp) {
         PlayLayer::loadFromCheckpoint(cp);
+        if (!m_isPracticeMode || s_extras.empty()) return;
 
-        if (!m_isPracticeMode) return;
-        if (s_checkpointExtras.empty()) return;
-
-        // Find the matching extra by index using the checkpoint array
-        // The checkpoint array size after removal tells us the index.
+        // After loadFromCheckpoint, m_checkpointArray has already had the
+        // "future" checkpoints removed. Its current count maps to our index.
         int idx = static_cast<int>(m_checkpointArray->count()) - 1;
-        if (idx < 0 || idx >= static_cast<int>(s_checkpointExtras.size())) return;
+        if (idx < 0 || idx >= static_cast<int>(s_extras.size())) return;
 
-        const CheckpointExtra& extra = s_checkpointExtras[idx];
+        const CheckpointExtra& ex = s_extras[idx];
+        if (m_player1) applyPlayer(m_player1, ex.p1);
+        if (m_player2) applyPlayer(m_player2, ex.p2);
 
-        if (m_player1) applyPlayerState(m_player1, extra.p1State);
-        if (m_player2) applyPlayerState(m_player2, extra.p2State);
+        // Trim s_extras so it stays in sync
+        s_extras.resize(static_cast<size_t>(idx + 1));
 
-        // Revert bot state to checkpoint time
-        Bot& bot = Bot::get();
-        if (bot.mode == BotMode::Recording) {
-            bot.onRestart(extra.levelTime);
-        } else if (bot.mode == BotMode::Playing) {
-            bot.rewindPlaybackTo(extra.levelTime);
-        }
+        Bot::get().onRevert(ex.levelTime);
     }
 
-    // ----------------------------------------------------------
-    // removeAllCheckpoints — clear our extras too
-    // ----------------------------------------------------------
+    // removeAllCheckpoints — keep extras in sync
     void removeAllCheckpoints() {
         PlayLayer::removeAllCheckpoints();
-        s_checkpointExtras.clear();
+        s_extras.clear();
     }
 
-    // ----------------------------------------------------------
-    // levelComplete — stop recording/playing on completion
-    // ----------------------------------------------------------
+    // levelComplete — stop bot
     void levelComplete() {
         Bot& bot = Bot::get();
-        if (bot.mode == BotMode::Recording) {
-            bot.stopRecording();
-        } else if (bot.mode == BotMode::Playing) {
-            bot.stopPlayback();
-        }
+        if (bot.mode == BotMode::Recording) bot.stopRecording();
+        else if (bot.mode == BotMode::Playing) bot.stopPlayback();
         PlayLayer::levelComplete();
     }
 
-    // ----------------------------------------------------------
     // onQuit — clean up
-    // ----------------------------------------------------------
     void onQuit() {
-        Bot::get().reset();
+        Bot::get().fullReset();
         PlayLayer::onQuit();
     }
+
+    // K key → open GUI
+    void keyDown(cocos2d::enumKeyCodes key) {
+        PlayLayer::keyDown(key);
+        if (key == cocos2d::enumKeyCodes::KEY_K) {
+            // Forward declaration; defined below
+            openBotGUI();
+        }
+    }
+
+    // Forward declaration (defined after BotGUI)
+    void openBotGUI();
 };
 
 // ============================================================
-// PauseLayer — intercept "Restart" button to revert inputs
+// PauseLayer — Restart buttons revert bot
 // ============================================================
 class $modify(PauseLayer) {
     void onRestart(CCObject* sender) {
-        // Full restart → revert bot to time 0
-        Bot& bot = Bot::get();
-        if (bot.mode == BotMode::Recording) {
-            bot.onRestart(0.0);
-        } else if (bot.mode == BotMode::Playing) {
-            bot.rewindPlaybackTo(0.0);
-        }
+        Bot::get().onRevert(0.0);
         PauseLayer::onRestart(sender);
     }
-
     void onRestartFull(CCObject* sender) {
-        Bot& bot = Bot::get();
-        if (bot.mode == BotMode::Recording) {
-            bot.onRestart(0.0);
-        } else if (bot.mode == BotMode::Playing) {
-            bot.rewindPlaybackTo(0.0);
-        }
+        Bot::get().onRevert(0.0);
         PauseLayer::onRestartFull(sender);
     }
 };
 
 // ============================================================
-// GUI Popup (opens with K key in-level)
+// BotGUI — subclasses geode::Popup<> correctly
+//
+// Geode v5 Popup<Args...> API:
+//   - Inherit from geode::Popup<>
+//   - bool setup() override — return true on success
+//   - m_mainLayer is the content CCLayer (defined in Popup base)
+//   - Use static create() calling initAnchored(w, h)
+//   - Callbacks: this must be cast to CCObject* via
+//     static_cast<CCObject*>(this) for CCMenuItemSpriteExtra
 // ============================================================
-class BotGUI : public Popup<> {
-protected:
-    CCLabelBMFont* m_cbfLabel       = nullptr;
-    CCSprite*      m_cbfDot         = nullptr;
-    CCLabelBMFont* m_statusLabel    = nullptr;
-    CCTextInputNode* m_speedInput   = nullptr;
-    CCTextInputNode* m_saveInput    = nullptr;
 
+class BotGUI : public geode::Popup<> {
+public:
+    // ---- Member widgets ----
+    CCLabelBMFont*   m_cbfLabel    = nullptr;
+    CCSprite*        m_cbfDot      = nullptr;
+    CCLabelBMFont*   m_statusLbl   = nullptr;
+    CCTextInputNode* m_fileInput   = nullptr;
+    CCTextInputNode* m_speedInput  = nullptr;
+
+    // ---- Popup<> virtual ----
     bool setup() override {
-        setTitle("MacroBot");
+        // Title
+        this->setTitle("MacroBot v1.0");
 
         Bot& bot = Bot::get();
         bot.refreshCBF();
 
-        auto* winSize = CCDirector::get()->getWinSize();
-        auto  center  = CCPoint{m_mainLayer->getContentWidth() / 2.f,
-                                m_mainLayer->getContentHeight() / 2.f};
+        const float W = m_mainLayer->getContentWidth();
+        const float H = m_mainLayer->getContentHeight();
+        const float cx = W * 0.5f;
+        float y = H - 52.f;
+        const float rowH = 34.f;
 
-        float y = m_mainLayer->getContentHeight() - 55.f;
-        const float lineH = 32.f;
-
-        // ---- CBF Status dot + label ----
+        // =============================================
+        // CBF status row (dot + label)
+        // =============================================
         {
-            auto color  = CBFStatus::dotColor(bot.cbfMode);
-            auto label  = CBFStatus::dotLabel(bot.cbfMode);
+            // Coloured circle dot using CCLayerColor (always available)
+            auto* dot = CCLayerColor::create(
+                ccc4(0, 0, 0, 255),   // colour set below
+                12.f, 12.f
+            );
+            ccColor3B c = CBFStatus::dotColor(bot.cbfMode);
+            dot->setColor(c);
+            dot->setPosition({18.f, y - 5.f});
+            m_mainLayer->addChild(dot, 1);
+            // Store as sprite (we'll just re-create the dot on refresh via label)
 
-            // Dot (using a small CCSprite from GJ_button_01.png tinted)
-            auto* dot = CCSprite::create("GJ_circle_01.png");
-            if (!dot) dot = CCSprite::create("GJ_circle_01.png");
-            if (dot) {
-                dot->setScale(0.35f);
-                dot->setColor(color);
-                dot->setPosition({30.f, y});
-                m_mainLayer->addChild(dot);
-                m_cbfDot = dot;
-            }
-
-            auto* lbl = CCLabelBMFont::create(label, "bigFont.fnt");
-            lbl->setScale(0.38f);
+            auto* lbl = CCLabelBMFont::create(
+                CBFStatus::dotLabel(bot.cbfMode), "bigFont.fnt"
+            );
+            lbl->setScale(0.32f);
             lbl->setAnchorPoint({0.f, 0.5f});
-            lbl->setPosition({50.f, y});
-            m_mainLayer->addChild(lbl);
+            lbl->setColor(c);
+            lbl->setPosition({34.f, y});
+            m_mainLayer->addChild(lbl, 1);
             m_cbfLabel = lbl;
-            y -= lineH;
+            y -= rowH;
         }
 
-        // Separator
-        y -= 4.f;
-
-        // ---- Status ----
+        // =============================================
+        // Status label
+        // =============================================
         {
-            const char* statusStr = "Idle";
-            if (bot.mode == BotMode::Recording) statusStr = "Recording...";
-            if (bot.mode == BotMode::Playing)   statusStr = "Playing Back";
-            m_statusLabel = CCLabelBMFont::create(statusStr, "bigFont.fnt");
-            m_statusLabel->setScale(0.5f);
-            m_statusLabel->setPosition({center.x, y});
-            m_mainLayer->addChild(m_statusLabel);
-            y -= lineH;
+            m_statusLbl = CCLabelBMFont::create(modeStr(), "bigFont.fnt");
+            m_statusLbl->setScale(0.45f);
+            m_statusLbl->setPosition({cx, y});
+            m_mainLayer->addChild(m_statusLbl, 1);
+            y -= rowH;
         }
 
-        // ---- Record button ----
+        // =============================================
+        // Record / Stop / Play buttons — using a single CCMenu
+        // =============================================
         {
-            auto* btn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Record", "bigFont.fnt", "GJ_button_02.png"),
-                this, menu_selector(BotGUI::onRecord));
+            auto* recSprite  = ButtonSprite::create("Record",  "bigFont.fnt", "GJ_button_02.png");
+            auto* stopSprite = ButtonSprite::create("Stop",    "bigFont.fnt", "GJ_button_06.png");
+            auto* playSprite = ButtonSprite::create("Play",    "bigFont.fnt", "GJ_button_01.png");
+
+            // CCMenuItemSpriteExtra::create needs target as CCObject*
+            auto* self = static_cast<CCObject*>(this);
+
+            auto* recBtn  = CCMenuItemSpriteExtra::create(recSprite,  self, menu_selector(BotGUI::onRecord));
+            auto* stopBtn = CCMenuItemSpriteExtra::create(stopSprite, self, menu_selector(BotGUI::onStop));
+            auto* playBtn = CCMenuItemSpriteExtra::create(playSprite, self, menu_selector(BotGUI::onPlay));
+
             auto* menu = CCMenu::create();
-            menu->setPosition({center.x - 60.f, y});
-            menu->addChild(btn);
-            m_mainLayer->addChild(menu);
-        }
-        // ---- Play button ----
-        {
-            auto* btn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Play", "bigFont.fnt", "GJ_button_01.png"),
-                this, menu_selector(BotGUI::onPlay));
-            auto* menu = CCMenu::create();
-            menu->setPosition({center.x + 60.f, y});
-            menu->addChild(btn);
-            m_mainLayer->addChild(menu);
-        }
-        // ---- Stop button ----
-        {
-            auto* btn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Stop", "bigFont.fnt", "GJ_button_06.png"),
-                this, menu_selector(BotGUI::onStop));
-            auto* menu = CCMenu::create();
-            menu->setPosition({center.x, y});
-            menu->addChild(btn);
-            m_mainLayer->addChild(menu);
-        }
-        y -= lineH + 4.f;
-
-        // ---- Save / Load ----
-        {
-            // Filename input
-            auto* bgSave = cocos2d::extension::CCScale9Sprite::create(
-                "square02_small.png", {0,0,40,40});
-            bgSave->setContentSize({160.f, 26.f});
-            bgSave->setPosition({center.x, y});
-            m_mainLayer->addChild(bgSave);
-
-            auto* inp = CCTextInputNode::create(150.f, 26.f, "macro.bmac", "bigFont.fnt");
-            inp->setPosition({center.x, y});
-            inp->setScale(0.5f);
-            m_saveInput = inp;
-            m_mainLayer->addChild(inp);
-            y -= lineH;
-
-            auto* saveBtn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Save", "bigFont.fnt", "GJ_button_05.png"),
-                this, menu_selector(BotGUI::onSave));
-            auto* loadBtn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Load", "bigFont.fnt", "GJ_button_05.png"),
-                this, menu_selector(BotGUI::onLoad));
-            auto* menu = CCMenu::create();
-            menu->setPosition({center.x, y});
-            menu->addChild(saveBtn);
-            menu->addChild(loadBtn);
-            menu->alignItemsHorizontally();
-            m_mainLayer->addChild(menu);
-            y -= lineH;
+            menu->setPosition({cx, y});
+            menu->addChild(recBtn);
+            menu->addChild(stopBtn);
+            menu->addChild(playBtn);
+            menu->alignItemsHorizontallyWithPadding(6.f);
+            m_mainLayer->addChild(menu, 1);
+            y -= rowH + 4.f;
         }
 
-        // ---- Speedhack ----
+        // =============================================
+        // File name input + Save / Load
+        // =============================================
         {
-            auto* lbl = CCLabelBMFont::create("Speedhack:", "bigFont.fnt");
-            lbl->setScale(0.4f);
-            lbl->setPosition({center.x - 55.f, y});
-            m_mainLayer->addChild(lbl);
+            // Background box for text input
+            auto* bg = cocos2d::extension::CCScale9Sprite::create(
+                "square02_small.png", {0, 0, 40, 40}
+            );
+            bg->setContentSize({170.f, 28.f});
+            bg->setPosition({cx, y});
+            m_mainLayer->addChild(bg, 1);
+
+            // Text input (Geode wraps CCTextInputNode)
+            m_fileInput = CCTextInputNode::create(160.f, 28.f, "macro.bmac", "bigFont.fnt");
+            m_fileInput->setPosition({cx, y});
+            m_fileInput->setScale(0.48f);
+            m_mainLayer->addChild(m_fileInput, 2);
+            y -= 30.f;
+
+            auto* self = static_cast<CCObject*>(this);
+            auto* saveSpr = ButtonSprite::create("Save", "bigFont.fnt", "GJ_button_05.png");
+            auto* loadSpr = ButtonSprite::create("Load", "bigFont.fnt", "GJ_button_05.png");
+
+            auto* saveBtn = CCMenuItemSpriteExtra::create(saveSpr, self, menu_selector(BotGUI::onSave));
+            auto* loadBtn = CCMenuItemSpriteExtra::create(loadSpr, self, menu_selector(BotGUI::onLoad));
+
+            auto* ioMenu = CCMenu::create();
+            ioMenu->setPosition({cx, y});
+            ioMenu->addChild(saveBtn);
+            ioMenu->addChild(loadBtn);
+            ioMenu->alignItemsHorizontallyWithPadding(6.f);
+            m_mainLayer->addChild(ioMenu, 1);
+            y -= rowH;
+        }
+
+        // =============================================
+        // Speedhack row
+        // =============================================
+        {
+            auto* lbl = CCLabelBMFont::create("Speed:", "bigFont.fnt");
+            lbl->setScale(0.38f);
+            lbl->setAnchorPoint({1.f, 0.5f});
+            lbl->setPosition({cx - 10.f, y});
+            m_mainLayer->addChild(lbl, 1);
 
             auto* bg = cocos2d::extension::CCScale9Sprite::create(
-                "square02_small.png", {0,0,40,40});
-            bg->setContentSize({80.f, 26.f});
-            bg->setPosition({center.x + 35.f, y});
-            m_mainLayer->addChild(bg);
+                "square02_small.png", {0, 0, 40, 40}
+            );
+            bg->setContentSize({70.f, 26.f});
+            bg->setPosition({cx + 30.f, y});
+            m_mainLayer->addChild(bg, 1);
 
-            auto* inp = CCTextInputNode::create(70.f, 26.f, "1.0", "bigFont.fnt");
-            inp->setPosition({center.x + 35.f, y});
-            inp->setScale(0.5f);
-            m_speedInput = inp;
-            // Show current speed
-            auto str = std::to_string(Bot::get().speedhack);
-            // Trim trailing zeros
-            str.erase(str.find_last_not_of('0') + 1);
-            if (str.back() == '.') str += "0";
-            inp->setString(str.c_str());
-            m_mainLayer->addChild(inp);
+            m_speedInput = CCTextInputNode::create(62.f, 26.f, "1.0", "bigFont.fnt");
+            m_speedInput->setPosition({cx + 30.f, y});
+            m_speedInput->setScale(0.48f);
+            // Fill with current speed value
+            {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%.2f", bot.speedhack);
+                m_speedInput->setString(buf);
+            }
+            m_mainLayer->addChild(m_speedInput, 2);
 
-            auto* applyBtn = CCMenuItemSpriteExtra::create(
-                ButtonSprite::create("Apply", "bigFont.fnt", "GJ_button_04.png"),
-                this, menu_selector(BotGUI::onApplySpeed));
-            auto* menu = CCMenu::create();
-            menu->setPosition({center.x + 80.f, y});
-            menu->addChild(applyBtn);
-            m_mainLayer->addChild(menu);
-            y -= lineH;
+            auto* self    = static_cast<CCObject*>(this);
+            auto* applSpr = ButtonSprite::create("Set", "bigFont.fnt", "GJ_button_04.png");
+            auto* applBtn = CCMenuItemSpriteExtra::create(applSpr, self, menu_selector(BotGUI::onApplySpeed));
+
+            auto* spMenu = CCMenu::create();
+            spMenu->setPosition({cx + 85.f, y});
+            spMenu->addChild(applBtn);
+            m_mainLayer->addChild(spMenu, 1);
+            y -= rowH;
         }
 
-        // ---- Input count info ----
+        // =============================================
+        // Input count
+        // =============================================
         {
-            std::string info = "Inputs: " + std::to_string(Bot::get().macro.inputs.size());
-            auto* lbl = CCLabelBMFont::create(info.c_str(), "bigFont.fnt");
-            lbl->setScale(0.38f);
-            lbl->setPosition({center.x, y});
-            m_mainLayer->addChild(lbl);
+            std::string info = "Inputs stored: " + std::to_string(bot.macro.inputs.size());
+            auto* cntLbl = CCLabelBMFont::create(info.c_str(), "bigFont.fnt");
+            cntLbl->setScale(0.34f);
+            cntLbl->setColor({180, 180, 180});
+            cntLbl->setPosition({cx, y});
+            m_mainLayer->addChild(cntLbl, 1);
         }
 
         return true;
     }
 
+    // ---- Callbacks ----
+
     void onRecord(CCObject*) {
         Bot& bot = Bot::get();
-        if (!bot.canOperate()) {
-            FLAlertLayer::create("Bot Disabled",
-                "No CBF detected. Install <cy>syzzi.click_between_frames</c> from the Geode index.",
-                "OK")->show();
+        if (!bot.canRun()) {
+            showAlert("Bot Locked",
+                "No CBF active.\nInstall <cy>syzzi.click_between_frames</c> "
+                "from the Geode index, or enable RobTop's Click Between Steps in settings.");
             return;
         }
         if (bot.mode == BotMode::Recording) return;
-        auto* pl = PlayLayer::get();
-        if (!pl) {
-            FLAlertLayer::create("Error","Enter a level first.","OK")->show();
-            return;
+        if (!PlayLayer::get()) {
+            showAlert("Error", "You must be inside a level to record."); return;
         }
-        bot.startRecording(bot.currentLevelTime);
-        refreshStatus();
-    }
-
-    void onPlay(CCObject*) {
-        Bot& bot = Bot::get();
-        if (!bot.canOperate()) return;
-        if (bot.mode == BotMode::Playing) return;
-        if (bot.macro.inputs.empty()) {
-            FLAlertLayer::create("Empty Macro","No inputs recorded or loaded.","OK")->show();
-            return;
-        }
-        auto* pl = PlayLayer::get();
-        if (!pl) {
-            FLAlertLayer::create("Error","Enter a level first.","OK")->show();
-            return;
-        }
-        bot.startPlayback();
+        bot.startRecording(bot.currentTime);
         refreshStatus();
     }
 
@@ -466,90 +397,118 @@ protected:
         refreshStatus();
     }
 
+    void onPlay(CCObject*) {
+        Bot& bot = Bot::get();
+        if (!bot.canRun()) {
+            showAlert("Bot Locked", "No CBF active."); return;
+        }
+        if (bot.mode == BotMode::Playing) return;
+        if (bot.macro.inputs.empty()) {
+            showAlert("Empty Macro", "No inputs recorded or loaded."); return;
+        }
+        if (!PlayLayer::get()) {
+            showAlert("Error", "You must be inside a level to play back."); return;
+        }
+        bot.startPlayback();
+        refreshStatus();
+    }
+
     void onSave(CCObject*) {
-        const char* name = m_saveInput ? m_saveInput->getString() : "macro.bmac";
-        auto path = Mod::get()->getSaveDir() / name;
+        const char* fname = m_fileInput ? m_fileInput->getString() : "macro.bmac";
+        if (!fname || fname[0] == '\0') fname = "macro.bmac";
+        auto path = Mod::get()->getSaveDir() / fname;
         if (Bot::get().macro.save(path.string())) {
-            FLAlertLayer::create("Saved", ("Macro saved to:\n" + path.string()).c_str(), "OK")->show();
+            std::string msg = "Saved to:\n" + path.string();
+            showAlert("Saved", msg.c_str());
         } else {
-            FLAlertLayer::create("Error","Failed to save macro.","OK")->show();
+            showAlert("Save Failed", "Could not write file. Check the path/permissions.");
         }
     }
 
     void onLoad(CCObject*) {
-        const char* name = m_saveInput ? m_saveInput->getString() : "macro.bmac";
-        auto path = Mod::get()->getSaveDir() / name;
+        const char* fname = m_fileInput ? m_fileInput->getString() : "macro.bmac";
+        if (!fname || fname[0] == '\0') fname = "macro.bmac";
+        auto path = Mod::get()->getSaveDir() / fname;
         if (Bot::get().macro.load(path.string())) {
+            std::string msg = "Loaded " +
+                std::to_string(Bot::get().macro.inputs.size()) + " inputs.";
+            showAlert("Loaded", msg.c_str());
             refreshStatus();
-            std::string msg = "Loaded " + std::to_string(Bot::get().macro.inputs.size()) + " inputs.";
-            FLAlertLayer::create("Loaded", msg.c_str(), "OK")->show();
         } else {
-            FLAlertLayer::create("Error","Failed to load macro. Check filename.","OK")->show();
+            showAlert("Load Failed",
+                "Could not read file. Check filename and ensure it's a valid .bmac file.");
         }
     }
 
     void onApplySpeed(CCObject*) {
         if (!m_speedInput) return;
         const char* s = m_speedInput->getString();
-        try {
-            float v = std::stof(std::string(s));
-            v = std::clamp(v, 0.01f, 100.f);
-            applySpeedhack(v);
-        } catch (...) {
-            FLAlertLayer::create("Error","Invalid speed value.","OK")->show();
+        if (!s || s[0] == '\0') return;
+        float v = 1.0f;
+        try { v = std::stof(std::string(s)); }
+        catch (...) { showAlert("Error", "Invalid speed value. Enter a number like 1.5"); return; }
+        applySpeedhack(v);
+        // Update display to show clamped value
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", Bot::get().speedhack);
+        m_speedInput->setString(buf);
+    }
+
+    // ---- Helpers ----
+
+    const char* modeStr() {
+        switch (Bot::get().mode) {
+            case BotMode::Recording: return "Status: Recording";
+            case BotMode::Playing:   return "Status: Playing";
+            default:                 return "Status: Idle";
         }
     }
 
     void refreshStatus() {
-        if (!m_statusLabel) return;
-        Bot& bot = Bot::get();
-        const char* statusStr = "Idle";
-        if (bot.mode == BotMode::Recording) statusStr = "Recording...";
-        if (bot.mode == BotMode::Playing)   statusStr = "Playing Back";
-        m_statusLabel->setString(statusStr);
-
-        // Refresh CBF dot
-        bot.refreshCBF();
-        if (m_cbfDot)   m_cbfDot->setColor(CBFStatus::dotColor(bot.cbfMode));
-        if (m_cbfLabel) m_cbfLabel->setString(CBFStatus::dotLabel(bot.cbfMode));
+        if (m_statusLbl) m_statusLbl->setString(modeStr());
+        if (m_cbfLabel) {
+            Bot::get().refreshCBF();
+            m_cbfLabel->setString(CBFStatus::dotLabel(Bot::get().cbfMode));
+            m_cbfLabel->setColor(CBFStatus::dotColor(Bot::get().cbfMode));
+        }
     }
 
-public:
+    // ---- Static factory ----
     static BotGUI* create() {
         auto* ret = new BotGUI();
-        if (ret->initAnchored(360.f, 400.f)) {
+        // initAnchored(width, height) — sets up the Popup frame and calls setup()
+        if (ret->initAnchored(370.f, 420.f)) {
             ret->autorelease();
             return ret;
         }
-        delete ret;
+        CC_SAFE_DELETE(ret);
         return nullptr;
     }
 };
 
 // ============================================================
-// Key handler — open GUI on K press while in a level
+// Definition of openBotGUI (forward-declared in MyPlayLayer)
+// Must come after BotGUI is fully defined.
 // ============================================================
-class $modify(MyPlayLayerKey, PlayLayer) {
-    void keyDown(cocos2d::enumKeyCodes key) {
-        if (key == cocos2d::enumKeyCodes::KEY_K) {
-            if (!Bot::get().guiOpen) {
-                Bot::get().guiOpen = true;
-                auto* popup = BotGUI::create();
-                if (popup) popup->show();
-                // Reset guiOpen when popup closes — handled via destructor
-                // We can't easily hook that, so we just let it be reset on
-                // next open attempt via the flag check above. For a proper
-                // solution, subclass BotGUI and override onClose():
-            }
-        }
-        PlayLayer::keyDown(key);
+void MyPlayLayer::openBotGUI() {
+    // Only open one instance at a time
+    if (auto* existing = CCDirector::sharedDirector()
+                             ->getRunningScene()
+                             ->getChildByID("bot-gui-popup")) {
+        return;
     }
-};
+    auto* gui = BotGUI::create();
+    if (gui) {
+        gui->setID("bot-gui-popup");
+        gui->show();
+    }
+}
 
 // ============================================================
-// Geode mod entry point
+// Mod entry point
 // ============================================================
 $on_mod(Loaded) {
-    log::info("MacroBot loaded — Geode v5.7.1 / GD 2.2081");
-    log::info("CBF Status at startup: {}", (int)CBFStatus::detect());
+    log::info("[MacroBot] Loaded — GD 2.2081, Geode v5.7.1");
+    log::info("[MacroBot] CBF at startup: {}",
+              static_cast<int>(CBFStatus::detect()));
 }
