@@ -239,7 +239,7 @@ namespace bot {
     static constexpr uint32_t MACRO_VERSION = 3;
 
     // Default toggle key for the GUI.
-    static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_K;
+    static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_O;
 
     // When we serialise a timestamp to *text* we round to this many decimals.
     // (Binary saves keep the full double, which is the most compact + accurate
