@@ -1485,10 +1485,8 @@ public:
     bool init() override {
         if (!CCLayer::init()) return false;
 
-        // setKeyboardEnabled has no Windows address in GD 2.2081's cocos2d
-        // bindings, so instead we explicitly add ourselves to the dispatcher
-        // in onEnter() / remove in onExit(). Still call it for Mac/iOS compat.
-        this->setKeyboardEnabled(true);
+        // Touch only — keyboard is handled by hooking UILayer::keyDown and
+        // MenuLayer::keyDown in main.cpp (those have verified Windows addresses).
         this->setTouchEnabled(true);
         this->setTouchMode(cocos2d::kCCTouchesOneByOne);
         this->setZOrder((std::numeric_limits<int>::max)());
@@ -1499,52 +1497,6 @@ public:
         BotManager::get().ui = this;
         this->scheduleUpdate();
         return true;
-    }
-
-    // Explicitly register with the keyboard dispatcher on every enter.
-    // This is the reliable Windows path — setKeyboardEnabled alone may not be
-    // enough because CCLayer::setKeyboardEnabled has no Windows address in the
-    // 2.2081 Cocos2d bindings, meaning the registration inside CCLayer::onEnter()
-    // might not fire on Windows.
-    void onEnter() override {
-        CCLayer::onEnter();
-        CCDirector::sharedDirector()->getKeyboardDispatcher()->addDelegate(this);
-        // Restart the scheduler in case cleanup stopped it when we were removed
-        // from a previous scene.
-        this->scheduleUpdate();
-    }
-
-    void onExit() override {
-        CCDirector::sharedDirector()->getKeyboardDispatcher()->removeDelegate(this);
-        CCLayer::onExit();
-    }
-
-    // --- keyboard: toggle the panel on K ----------------------------------
-    void keyDown(cocos2d::enumKeyCodes key, double timing) override {
-        auto& bot = BotManager::get();
-        // K toggles the menu in ANY scene. The record/play/stop hotkeys only make
-        // sense inside a level, so they are gated on PlayLayer to avoid clashing
-        // with menu/editor shortcuts.
-        if (key == bot::TOGGLE_KEY) { togglePanel(); return; }
-        if (PlayLayer::get()) {
-            switch (key) {
-                case cocos2d::enumKeyCodes::KEY_V:      // V -> arm/stop recording
-                    bot.toggleRecording(GJBaseGameLayer::get());
-                    refreshAll();
-                    return;
-                case cocos2d::enumKeyCodes::KEY_B:      // B -> start/stop playback
-                    bot.togglePlayback(GJBaseGameLayer::get());
-                    refreshAll();
-                    return;
-                case cocos2d::enumKeyCodes::KEY_N:      // N -> hard stop
-                    bot.stop();
-                    refreshAll();
-                    return;
-                default:
-                    break;
-            }
-        }
-        CCLayer::keyDown(key, timing);
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }

@@ -39,14 +39,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/LevelEditorLayer.hpp>
-#include <Geode/modify/CreatorLayer.hpp>
-#include <Geode/modify/LevelBrowserLayer.hpp>
-#include <Geode/modify/LevelSelectLayer.hpp>
-#include <Geode/modify/LevelInfoLayer.hpp>
-#include <Geode/modify/LevelSearchLayer.hpp>
-#include <Geode/modify/GJGarageLayer.hpp>
-#include <Geode/modify/EditLevelLayer.hpp>
+#include <Geode/modify/UILayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
 
@@ -61,6 +54,38 @@ using namespace geode::prelude;
 // real one, so every hook funnels through this guard.
 static inline bool isPlay(GJBaseGameLayer* self) {
     return typeinfo_cast<PlayLayer*>(self) != nullptr;
+}
+
+// Shared key handler called from every keyDown hook. Ensures the UI is
+// attached, then dispatches K / V / B / N.
+static bool handleBotKey(cocos2d::enumKeyCodes key) {
+    auto& bot = BotManager::get();
+    // Make sure the UI exists and is in the active scene.
+    bot.attachUIToCurrentScene();
+
+    if (key == bot::TOGGLE_KEY) {
+        if (bot.ui) bot.ui->togglePanel();
+        return true;
+    }
+    // V / B / N only in a level.
+    if (PlayLayer::get()) {
+        switch (key) {
+            case cocos2d::enumKeyCodes::KEY_V:
+                bot.toggleRecording(GJBaseGameLayer::get());
+                bot.refreshUI();
+                return true;
+            case cocos2d::enumKeyCodes::KEY_B:
+                bot.togglePlayback(GJBaseGameLayer::get());
+                bot.refreshUI();
+                return true;
+            case cocos2d::enumKeyCodes::KEY_N:
+                bot.stop();
+                bot.refreshUI();
+                return true;
+            default: break;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
@@ -157,16 +182,10 @@ class $modify(BotPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
-        BotManager::get().onLevelReset(this);
-        return true;
-    }
-
-    // ---- just added to scene: attach the global menu + start unfrozen ------
-    void onEnter() override {
-        PlayLayer::onEnter();
         auto& bot = BotManager::get();
-        bot.attachUIToCurrentScene();
-        bot.closeUI();
+        bot.onLevelReset(this);
+        bot.closeUI(); // never enter a level with the menu frozen
+        return true;
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -233,12 +252,6 @@ class $modify(BotPlayLayer, PlayLayer) {
 //
 class $modify(BotPauseLayer, PauseLayer) {
 
-    // Keep the menu reachable on top of the pause screen.
-    void onEnter() override {
-        PauseLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-
     void onRestart(CCObject* sender) {
         BotManager::get().onRestart(PlayLayer::get(), /*fromStart=*/true);
         PauseLayer::onRestart(sender);
@@ -251,73 +264,31 @@ class $modify(BotPauseLayer, PauseLayer) {
 };
 
 // ============================================================================
-//  Universal scene hooks -- so the bot menu is reachable in EVERY scene, not
-//  just in a level. Each just re-attaches the single persistent UI once its
-//  scene is live. (CCScene::create has no Windows address, so we cannot hook the
-//  one universal point; instead we cover all the scene-root layers GD navigates
-//  through.)
+//  Keyboard hooks
 // ============================================================================
+//
+//  UILayer::keyDown (win 0x4cde50) and MenuLayer::keyDown (win 0x336360) are
+//  the ONLY CCLayer keyboard handlers with verified Windows addresses in the
+//  2.2081 bindings. By hooking them via $modify we intercept K reliably without
+//  needing our own keyboard delegate (CCKeyboardDispatcher::addDelegate has no
+//  Windows address and is a no-op).
+//
+//  UILayer covers gameplay + pause menu. MenuLayer covers the main menu. The
+//  handleBotKey() helper (defined above) does the actual dispatch and ensures
+//  the UI is created / attached to the current scene on demand.
+//
 
-class $modify(BotMenuLayer, MenuLayer) {
-    void onEnter() override {
-        MenuLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
+class $modify(BotUILayerHook, UILayer) {
+    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
+        if (handleBotKey(key)) return;
+        UILayer::keyDown(key, timestamp);
     }
 };
 
-class $modify(BotEditorLayer, LevelEditorLayer) {
-    void onEnter() override {
-        LevelEditorLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotCreatorLayer, CreatorLayer) {
-    void onEnter() override {
-        CreatorLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotLevelBrowserLayer, LevelBrowserLayer) {
-    void onEnter() override {
-        LevelBrowserLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotLevelSelectLayer, LevelSelectLayer) {
-    void onEnter() override {
-        LevelSelectLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotLevelInfoLayer, LevelInfoLayer) {
-    void onEnter() override {
-        LevelInfoLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotLevelSearchLayer, LevelSearchLayer) {
-    void onEnter() override {
-        LevelSearchLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotGarageLayer, GJGarageLayer) {
-    void onEnter() override {
-        GJGarageLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
-    }
-};
-
-class $modify(BotEditLevelLayer, EditLevelLayer) {
-    void onEnter() override {
-        EditLevelLayer::onEnter();
-        BotManager::get().attachUIToCurrentScene();
+class $modify(BotMenuLayerHook, MenuLayer) {
+    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
+        if (handleBotKey(key)) return;
+        MenuLayer::keyDown(key, timestamp);
     }
 };
 
@@ -354,11 +325,6 @@ $on_mod(Loaded) {
     }
 
     log::info("[Bot] Geode Time Macro loaded. Press K anywhere to open the menu.");
-
-    // If a scene is already running (e.g., the mod was hot-loaded or the game
-    // was already past the loading screen), create and attach the UI immediately.
-    // For cold-start, the onEnter() hooks on MenuLayer/PlayLayer handle it.
-    BotManager::get().attachUIToCurrentScene();
 }
 
 // Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
