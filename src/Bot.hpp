@@ -678,6 +678,7 @@ void setGuiOpen(bool open) {
         log::info("[Bot] Playback started {}", description());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
+        applyAudioSpeed();
     }
 
     void stop() {
@@ -706,7 +707,18 @@ void setGuiOpen(bool open) {
             ++playbackIndex;
         }
     }
+// speedhack audio
 
+void applyAudioSpeed() {
+    auto engine = FMODAudioEngine::sharedEngine();
+    if (!engine) return;
+
+    auto ch = engine->m_musicChannel;
+    if (!ch) return;
+
+    float s = static_cast<float>(speedMultiplier());
+    ch->setPitch(s);
+}
     // Stamp the current level's identity into the macro so we can later detect a
     // macro being played on the wrong level.
     void captureLevelInfo() {
@@ -784,8 +796,23 @@ void setGuiOpen(bool open) {
         if (injecting) return; // never record our own injected playback
         if (button < 1 || button > 3) return; // only jump/left/right
 
-        bool player2 = !isPlayer1;
-        int  pi = player2 ? 1 : 0;
+bool actualPlayer1 = isPlayer1;
+
+auto* pl = PlayLayer::get();
+auto* gm = GameManager::sharedState();
+
+if (
+    pl &&
+    pl->m_levelSettings &&
+    pl->m_levelSettings->m_twoPlayerMode &&
+    gm &&
+    gm->getGameVariable("0010")
+) {
+    actualPlayer1 = !actualPlayer1;
+}
+
+bool player2 = !actualPlayer1;
+int  pi = player2 ? 1 : 0;
 
         // Collapse no-op transitions in O(1): ignore a press if that button is
         // already held, or a release if it is already up.
@@ -963,6 +990,7 @@ void setGuiOpen(bool open) {
         if (mode == bot::Mode::Playing) {
             seekPlaybackTo(frame->levelTime);
         }
+        applyAudioSpeed();
     }
 
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
@@ -981,6 +1009,7 @@ void setGuiOpen(bool open) {
             seekPlaybackTo(0.0);
             releaseAll();
         }
+        applyAudioSpeed();
     }
 
     void onPlayerDeath(PlayLayer* pl) {
@@ -1013,18 +1042,21 @@ void setGuiOpen(bool open) {
         m->setSavedValue<std::string>("macro-name", macroName);
     }
 
-    void setSpeedFromString(std::string const& s) {
-        try {
-            double v = std::stod(s);
-            if (std::isfinite(v) && v > 0.0) {
-                speed = v;
-                log::info("[Bot] Speed set to {}", speed);
-                persist();
-            }
-        } catch (...) {
-            // ignore malformed input; keep the previous value
+void setSpeedFromString(std::string const& s) {
+    try {
+        double v = std::stod(s);
+        if (std::isfinite(v) && v > 0.0) {
+            speed = v;
+            log::info("[Bot] Speed set to {}", speed);
+
+            applyAudioSpeed();   // added audio speed
+
+            persist();
         }
+    } catch (...) {
+        // ignore malformed input
     }
+}
 
     // One-line status summary, handy for the log.
     std::string description() const {
@@ -1775,14 +1807,26 @@ m_statusLabel->setPosition({ W - 32.f, H - 18.f });
     }
 
     // ----- button callbacks -----------------------------------------------
-    void onRecord(CCObject*) {
-        BotManager::get().toggleRecording(GJBaseGameLayer::get());
-        refreshAll();
-    }
-    void onPlay(CCObject*) {
-        BotManager::get().togglePlayback(GJBaseGameLayer::get());
-        refreshAll();
-    }
+   void onRecord(CCObject*) {
+    auto& bot = BotManager::get();
+
+    if (bot.mode == bot::Mode::Recording)
+        bot.mode = bot::Mode::Disabled;
+    else
+        bot.mode = bot::Mode::Recording;
+
+    refreshAll();
+}
+void onPlay(CCObject*) {
+    auto& bot = BotManager::get();
+
+    if (bot.mode == bot::Mode::Playing)
+        bot.mode = bot::Mode::Disabled;
+    else
+        bot.mode = bot::Mode::Playing;
+
+    refreshAll();
+}
     // Each option callback flips its OWN source-of-truth bool, then forces that
     // one toggler's visual to match (toggle(bool) does not fire the selector).
     // This is deterministic regardless of how CCMenuItemToggler::activate orders
@@ -1793,24 +1837,28 @@ void onSpeedToggle(CCObject*) {
     auto& bot = BotManager::get();
     bot.speedhackEnabled = !bot.speedhackEnabled;
     BotManager::get().persist();
+     refreshAll();
 }
 
 void onPracticeFix(CCObject*) {
     auto& bot = BotManager::get();
     bot.practiceFixEnabled = !bot.practiceFixEnabled;
     BotManager::get().persist();
+     refreshAll();
 }
 
 void onDeadInputs(CCObject*) {
     auto& bot = BotManager::get();
     bot.discardDeadInputs = !bot.discardDeadInputs;
     BotManager::get().persist();
+     refreshAll();
 }
 
 void onAutoSave(CCObject*) {
     auto& bot = BotManager::get();
     bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
     BotManager::get().persist();
+     refreshAll();
 }
     void onSave(CCObject*) {
         BotManager::get().saveMacro(BotManager::get().macroName);

@@ -40,6 +40,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
+#include <Geode/modify/CCScene.hpp>
 
 using namespace geode::prelude;
 
@@ -64,7 +65,34 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  jump / left / right, whether it came from a real key press, a touch, RobTop's
 //  CBS, or Syzzi's CBF queue. That makes it the perfect place to both record and
 //  inject, which is exactly why the whole bot is built around it.
-//
+
+class $modify(BotScene, CCScene) {
+    void onEnter() {
+        CCScene::onEnter();
+
+        auto& bot = BotManager::get();
+
+        if (!bot.ui) {
+            auto ui = BotUILayer::create();
+
+            if (ui) {
+                bot.ui = ui;
+                this->addChild(ui, 999999);
+            }
+        }
+        else if (bot.ui->getParent() != this) {
+            bot.ui->retain();
+
+            if (bot.ui->getParent())
+                bot.ui->removeFromParentAndCleanup(false);
+
+            this->addChild(bot.ui, 999999);
+
+            bot.ui->release();
+        }
+    }
+};
+
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
     // ---- input capture (recording) ---------------------------------------
@@ -108,6 +136,7 @@ void update(float dt) {
             // appending them.
             BotManager::get().syncRecordingToTime(this);
             BotManager::get().fireDueInputs(this);
+            BotManager::get().applyAudioSpeed();
         }
     }
 
@@ -157,7 +186,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         // it floats above every gameplay layer. It owns its own keyboard
         // delegate, so K toggles it regardless of what else has focus.
         if (!m_fields->uiSpawned) {
-            spawnUI();
             m_fields->uiSpawned = true;
         }
 
