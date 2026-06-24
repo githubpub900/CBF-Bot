@@ -161,12 +161,12 @@ class $modify(BotPlayLayer, PlayLayer) {
         return true;
     }
 
-    // ---- scene is now live: attach the global menu + start unfrozen ------
-    void onEnterTransitionDidFinish() {
-        PlayLayer::onEnterTransitionDidFinish();
+    // ---- just added to scene: attach the global menu + start unfrozen ------
+    void onEnter() override {
+        PlayLayer::onEnter();
         auto& bot = BotManager::get();
-        bot.attachUIToCurrentScene(); // follow the player into this scene
-        bot.closeUI();                // never start a level with the menu frozen
+        bot.attachUIToCurrentScene();
+        bot.closeUI();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -234,8 +234,8 @@ class $modify(BotPlayLayer, PlayLayer) {
 class $modify(BotPauseLayer, PauseLayer) {
 
     // Keep the menu reachable on top of the pause screen.
-    void onEnterTransitionDidFinish() {
-        PauseLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        PauseLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 
@@ -259,64 +259,64 @@ class $modify(BotPauseLayer, PauseLayer) {
 // ============================================================================
 
 class $modify(BotMenuLayer, MenuLayer) {
-    void onEnterTransitionDidFinish() {
-        MenuLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        MenuLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotEditorLayer, LevelEditorLayer) {
-    void onEnterTransitionDidFinish() {
-        LevelEditorLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        LevelEditorLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotCreatorLayer, CreatorLayer) {
-    void onEnterTransitionDidFinish() {
-        CreatorLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        CreatorLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotLevelBrowserLayer, LevelBrowserLayer) {
-    void onEnterTransitionDidFinish() {
-        LevelBrowserLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        LevelBrowserLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotLevelSelectLayer, LevelSelectLayer) {
-    void onEnterTransitionDidFinish() {
-        LevelSelectLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        LevelSelectLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotLevelInfoLayer, LevelInfoLayer) {
-    void onEnterTransitionDidFinish() {
-        LevelInfoLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        LevelInfoLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotLevelSearchLayer, LevelSearchLayer) {
-    void onEnterTransitionDidFinish() {
-        LevelSearchLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        LevelSearchLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotGarageLayer, GJGarageLayer) {
-    void onEnterTransitionDidFinish() {
-        GJGarageLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        GJGarageLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };
 
 class $modify(BotEditLevelLayer, EditLevelLayer) {
-    void onEnterTransitionDidFinish() {
-        EditLevelLayer::onEnterTransitionDidFinish();
+    void onEnter() override {
+        EditLevelLayer::onEnter();
         BotManager::get().attachUIToCurrentScene();
     }
 };

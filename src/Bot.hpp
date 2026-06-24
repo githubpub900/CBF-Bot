@@ -239,11 +239,7 @@ namespace bot {
     static constexpr uint32_t MACRO_VERSION = 3;
 
     // Default toggle key for the GUI.
-<<<<<<< HEAD
-    static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_L;
-=======
-    static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_O;
->>>>>>> 9ae63f2527f57c6edd9e6322405abc7274631187
+    static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_K;
 
     // When we serialise a timestamp to *text* we round to this many decimals.
     // (Binary saves keep the full double, which is the most compact + accurate
@@ -1533,10 +1529,7 @@ public:
         CCLayer::keyDown(key, timing);
     }
 
-        void togglePanel() {
-        BotManager::get().attachUIToCurrentScene();
-        setPanelVisible(!m_visible);
-    }
+    void togglePanel() { setPanelVisible(!m_visible); }
 
     void setPanelVisible(bool v) {
         m_visible = v;
@@ -1546,7 +1539,6 @@ public:
         BotManager::get().setGuiOpen(v);
 
         if (v) {
-            BotManager::get().attachUIToCurrentScene();
             bringToFront(); // sit above every other layer / GUI
             refreshAll();
         }
@@ -1567,6 +1559,7 @@ public:
         // Priority -500: lower (later) than the inner CCMenu (-1000) so the
         // buttons still get first dibs, but earlier than gameplay so a click on
         // the panel background is swallowed instead of jumping the player.
+        CCLayer::registerWithTouchDispatcher();
         CCDirector::sharedDirector()->getTouchDispatcher()
             ->addTargetedDelegate(this, -500, true);
     }
@@ -1960,10 +1953,7 @@ inline void BotManager::refreshUIProgress() {
 // lives at the top of the currently-active scene. Called from the major layers'
 // onEnterTransitionDidFinish, so the menu follows you into every scene.
 inline void BotManager::attachUIToCurrentScene() {
-    auto director = CCDirector::sharedDirector();
-    if (!director) return;
-
-    auto scene = director->getRunningScene();
+    auto scene = CCDirector::sharedDirector()->getRunningScene();
     if (!scene) return;
 
     if (!ui) {
@@ -1973,15 +1963,11 @@ inline void BotManager::attachUIToCurrentScene() {
     }
 
     if (ui->getParent() != scene) {
-        if (ui->getParent()) {
-            ui->removeFromParentAndCleanup(false); // detach from the old (dying) scene
-        }
+        ui->removeFromParentAndCleanup(false); // detach from the old (dying) scene
         scene->addChild(ui, (std::numeric_limits<int>::max)());
     } else {
         scene->reorderChild(ui, (std::numeric_limits<int>::max)());
     }
-
-    ui->setVisible(true);
 }
 
 // Force the menu closed (used when entering a level so it never starts frozen).
