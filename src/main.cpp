@@ -38,8 +38,6 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
-#include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/UILayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
 
@@ -54,38 +52,6 @@ using namespace geode::prelude;
 // real one, so every hook funnels through this guard.
 static inline bool isPlay(GJBaseGameLayer* self) {
     return typeinfo_cast<PlayLayer*>(self) != nullptr;
-}
-
-// Shared key handler called from every keyDown hook. Ensures the UI is
-// attached, then dispatches K / V / B / N.
-static bool handleBotKey(cocos2d::enumKeyCodes key) {
-    auto& bot = BotManager::get();
-    // Make sure the UI exists and is in the active scene.
-    bot.attachUIToCurrentScene();
-
-    if (key == bot::TOGGLE_KEY) {
-        if (bot.ui) bot.ui->togglePanel();
-        return true;
-    }
-    // V / B / N only in a level.
-    if (PlayLayer::get()) {
-        switch (key) {
-            case cocos2d::enumKeyCodes::KEY_V:
-                bot.toggleRecording(GJBaseGameLayer::get());
-                bot.refreshUI();
-                return true;
-            case cocos2d::enumKeyCodes::KEY_B:
-                bot.togglePlayback(GJBaseGameLayer::get());
-                bot.refreshUI();
-                return true;
-            case cocos2d::enumKeyCodes::KEY_N:
-                bot.stop();
-                bot.refreshUI();
-                return true;
-            default: break;
-        }
-    }
-    return false;
 }
 
 // ============================================================================
@@ -177,15 +143,38 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
 class $modify(BotPlayLayer, PlayLayer) {
 
-    // ---- level init: reset transient bot state ---------------------------
+    // Per-instance bookkeeping kept on the layer itself.
+    struct Fields {
+        bool uiSpawned = false;
+    };
+
+    // ---- level init: reset state and spawn the floating UI ---------------
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
+
         auto& bot = BotManager::get();
         bot.onLevelReset(this);
-        bot.closeUI(); // never enter a level with the menu frozen
+
+        // Build the always-on-top GUI once and parent it high in the z-order so
+        // it floats above every gameplay layer. It owns its own keyboard
+        // delegate, so K toggles it regardless of what else has focus.
+        if (!m_fields->uiSpawned) {
+            spawnUI();
+            m_fields->uiSpawned = true;
+        }
+
         return true;
+    }
+
+    void spawnUI() {
+        auto ui = BotUILayer::create();
+        if (!ui) return;
+        // INT_MAX z-order -> above the gameplay, objects, and HUD.
+        this->addChild(ui, (std::numeric_limits<int>::max)());
+        BotManager::get().ui = ui;
+        ui->refreshAll();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -264,35 +253,6 @@ class $modify(BotPauseLayer, PauseLayer) {
 };
 
 // ============================================================================
-//  Keyboard hooks
-// ============================================================================
-//
-//  UILayer::keyDown (win 0x4cde50) and MenuLayer::keyDown (win 0x336360) are
-//  the ONLY CCLayer keyboard handlers with verified Windows addresses in the
-//  2.2081 bindings. By hooking them via $modify we intercept K reliably without
-//  needing our own keyboard delegate (CCKeyboardDispatcher::addDelegate has no
-//  Windows address and is a no-op).
-//
-//  UILayer covers gameplay + pause menu. MenuLayer covers the main menu. The
-//  handleBotKey() helper (defined above) does the actual dispatch and ensures
-//  the UI is created / attached to the current scene on demand.
-//
-
-class $modify(BotUILayerHook, UILayer) {
-    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
-        if (handleBotKey(key)) return;
-        UILayer::keyDown(key, timestamp);
-    }
-};
-
-class $modify(BotMenuLayerHook, MenuLayer) {
-    void keyDown(cocos2d::enumKeyCodes key, double timestamp) {
-        if (handleBotKey(key)) return;
-        MenuLayer::keyDown(key, timestamp);
-    }
-};
-
-// ============================================================================
 //  Mod entry point
 // ============================================================================
 
@@ -324,7 +284,7 @@ $on_mod(Loaded) {
             break;
     }
 
-    log::info("[Bot] Geode Time Macro loaded. Press K anywhere to open the menu.");
+    log::info("[Bot] Geode Time Macro loaded. Press K in a level to open the menu.");
 }
 
 // Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
