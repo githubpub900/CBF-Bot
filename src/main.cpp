@@ -107,6 +107,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
+            // Detect restarts / respawns (level clock jumping backwards) so a
+            // re-recorded attempt overwrites the superseded inputs instead of
+            // appending them.
+            BotManager::get().syncRecordingToTime(this);
             BotManager::get().fireDueInputs(this);
         }
     }
@@ -260,7 +264,6 @@ $on_mod(Loaded) {
     bot.speedhackEnabled     = Mod::get()->getSavedValue<bool>("speedhack", false);
     bot.practiceFixEnabled   = Mod::get()->getSavedValue<bool>("practice-fix", true);
     bot.discardDeadInputs    = Mod::get()->getSavedValue<bool>("discard-dead", true);
-    bot.quantizeForRobTopCBS = Mod::get()->getSavedValue<bool>("quantize-robtop", true);
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", false);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
 

@@ -144,14 +144,14 @@ using namespace geode::prelude;
 //       red    -> neither             (the bot refuses to record or play)
 //
 //
-//   4. THE RECORDING-START-OFFSET PROBLEM
-//   -------------------------------------
+//   4. THE RECORDING-START-OFFSET PROBLEM (handled automatically)
+//   -------------------------------------------------------------
 //   Recording does not have to begin at level time 0. If you arm a recording 0.2s
-//   into a level, every captured event carries its true absolute level time, so
+//   into a level, every captured event carries its true ABSOLUTE level time, so
 //   replaying from the start lines up perfectly -- the first input simply fires at
-//   t=0.2 as recorded. No desync. If instead you *want* the macro to begin at the
-//   moment you armed it (shift everything back to 0), "Normalize" does exactly
-//   that, and offsetMacro() lets you slide the whole timeline by any delta.
+//   t=0.2 as recorded, the bot waiting out that 0.2s delay on its own. There is no
+//   manual offset control on purpose: the start delay is baked into the data, so
+//   nothing the user could set can desync it.
 //
 //
 //   5. ACCURATE PRACTICE-BUG FIX
@@ -528,14 +528,16 @@ public:
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
     bool      normalizeRecording = false; // shift events so the first one is t=0
 
-    // When only RobTop's CBS is available (yellow), quantize timestamps onto the
-    // ~480 FPS grid that RobTop's limited window can actually represent. With
-    // Syzzi's CBF (green) we leave timestamps at full double precision.
-    bool      quantizeForRobTopCBS = true;
-
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
     bool      autoSaveOnComplete = false;
+
+    // The level time seen on the previous recording tick. If the clock jumps
+    // backwards (a restart / respawn / checkpoint load) we know the run was
+    // re-attempted and discard the now-superseded inputs after that point. This
+    // is what makes re-recording from the start overwrite the whole macro instead
+    // of appending to it.
+    double    m_lastRecordTime = 0.0;
 
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -651,6 +653,7 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         resetHeldState();
+        m_lastRecordTime = macro.recordStartTime;
         log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
@@ -793,10 +796,10 @@ public:
 
         double t = levelTime(gl);
 
-        // RobTop's CBS can only land inputs on its limited grid; snapping the
-        // timestamp there keeps a yellow-state recording honest about what the
-        // engine can actually reproduce. Syzzi's CBF (green) keeps full precision.
-        if (cbfState() == bot::CBFState::RobTop && quantizeForRobTopCBS) {
+        // RobTop's CBS can only land inputs on its ~480 FPS grid, so snap the
+        // timestamp -- but ONLY when RobTop's CBS is the active engine. Syzzi's
+        // CBF (green) is effectively continuous, so it keeps full double precision.
+        if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
         }
 
@@ -808,6 +811,36 @@ public:
     static double quantizeRobTop(double t) {
         double step = 1.0 / bot::ROBTOP_CBS_FPS;
         return std::round(t / step) * step;
+    }
+
+    // Called every frame while recording. If the level clock has gone backwards
+    // since last frame, the player restarted / respawned / loaded a checkpoint, so
+    // every input recorded *after* the new current time belongs to a dead attempt
+    // and is discarded. Restarting from the very start therefore overwrites the
+    // whole macro rather than appending a second attempt's clicks to it.
+    void syncRecordingToTime(GJBaseGameLayer* gl) {
+        if (mode != bot::Mode::Recording) return;
+        double t = levelTime(gl);
+        if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
+            truncateAfter(t);
+            // The game holds no buttons immediately after a reset, so our held
+            // tracker must match (otherwise the next real press looks redundant).
+            resetHeldState();
+        }
+        m_lastRecordTime = t;
+    }
+
+    // Drop every recorded event whose timestamp is strictly after `t`.
+    void truncateAfter(double t) {
+        size_t n = macro.events.size();
+        while (n > 0 && macro.events[n - 1].time > t) --n;
+        if (n < macro.events.size()) {
+            size_t dropped = macro.events.size() - n;
+            macro.events.resize(n);
+            refreshUIProgress();
+            log::info("[Bot] Re-record: discarded {} superseded input(s) after t={:.3f}",
+                      dropped, t);
+        }
     }
 
     void resetHeldState() {
@@ -906,9 +939,10 @@ public:
         if (!checkpoints.empty()) checkpoints.pop_back();
     }
 
-    // Called after the game has loaded a checkpoint. We:
-    //   1. discard "dead inputs" recorded after that checkpoint, and
-    //   2. apply our accurate physics snapshot to fix the practice bug.
+    // Called after the game has loaded a checkpoint. The actual discarding of
+    // "dead inputs" is handled automatically by syncRecordingToTime (the level
+    // clock jumps backwards on a checkpoint load); here we just apply our accurate
+    // physics snapshot to fix the practice bug, and re-align playback.
     void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
@@ -920,18 +954,6 @@ public:
         }
         if (!frame && !checkpoints.empty()) frame = &checkpoints.back();
         if (!frame) return;
-
-        // ---- dead input discard -------------------------------------------
-        if (discardDeadInputs && mode == bot::Mode::Recording) {
-            if (frame->eventCount < static_cast<int>(macro.events.size())) {
-                size_t discarded = macro.events.size() - frame->eventCount;
-                macro.events.resize(frame->eventCount);
-                recomputeHeldState();
-                log::info("[Bot] Discarded {} dead input(s) on checkpoint reload",
-                          discarded);
-                refreshUIProgress();
-            }
-        }
 
         // ---- accurate practice fix ----------------------------------------
         if (practiceFixEnabled) {
@@ -945,27 +967,11 @@ public:
         }
     }
 
-    // Pause-menu restart: rewind the input timeline. A full restart goes back to
-    // the level start, so every event recorded after the (post-restart) level
-    // time is reverted.
+    // Pause-menu restart. The level clock resets, so syncRecordingToTime will
+    // overwrite the superseded inputs on the next frame; we just clear the
+    // checkpoint stack and rewind the playback cursor here.
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
-        if (mode == bot::Mode::Recording && discardDeadInputs) {
-            if (fromStart) {
-                // Back to the very beginning: drop everything past the start.
-                double startT = macro.recordStartTime;
-                size_t before = macro.events.size();
-                macro.events.erase(
-                    std::remove_if(macro.events.begin(), macro.events.end(),
-                        [startT](InputEvent const& e){ return e.time >= startT; }),
-                    macro.events.end());
-                if (before != macro.events.size()) {
-                    recomputeHeldState();
-                    log::info("[Bot] Restart reverted {} input(s)",
-                              before - macro.events.size());
-                }
-            }
-        }
         if (mode == bot::Mode::Playing) playbackIndex = 0;
         refreshUIProgress();
     }
@@ -1005,7 +1011,6 @@ public:
         m->setSavedValue<bool>("speedhack", speedhackEnabled);
         m->setSavedValue<bool>("practice-fix", practiceFixEnabled);
         m->setSavedValue<bool>("discard-dead", discardDeadInputs);
-        m->setSavedValue<bool>("quantize-robtop", quantizeForRobTopCBS);
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
     }
@@ -1173,32 +1178,14 @@ public:
         return true;
     }
 
-    // ----- macro post-processing ------------------------------------------
-
-    // Shift every event so the first one sits at level time 0. This is the
-    // "offset all the inputs to where the recording was started" option, useful
-    // when a recording was armed partway into a level.
-    void normalizeToStart() {
-        if (macro.events.empty()) return;
-        double off = macro.events.front().time;
-        for (auto& e : macro.events) e.time = std::max(0.0, e.time - off);
-        macro.recordStartTime = 0.0;
-        macro.normalized = true;
-        refreshUIProgress();
-    }
-
-    // ----- offsetting ------------------------------------------------------
-
-    // Shift every timestamp by `delta` seconds (clamped at 0). This is the
-    // "offset all the inputs to where the recording was started" knob: if a
-    // recording was armed late, a negative delta of recordStartTime lines it up
-    // with level time 0; a positive delta delays the whole macro.
-    void offsetMacro(double delta) {
-        for (auto& e : macro.events) e.time = std::max(0.0, e.time + delta);
-        macro.sort();
-        recomputeHeldState();
-        refreshUIProgress();
-    }
+    // ----- timing model ----------------------------------------------------
+    //
+    //  There is intentionally NO manual offset control. Every input is stored at
+    //  its ABSOLUTE level time, so the start delay is handled automatically: if a
+    //  recording was armed 0.2s into the level, the first input simply carries a
+    //  timestamp of ~0.2, and on playback from the start the bot waits until the
+    //  level clock reaches 0.2 before firing it. The recording start time is thus
+    //  baked into the data -- no user-set offset can desync it.
 
     // ----- human-readable text export / import ----------------------------
     //
@@ -1376,20 +1363,13 @@ protected:
     cocos2d::CCLabelBMFont* m_statsLabel  = nullptr; // presses / releases / dual
     geode::TextInput*     m_speedInput   = nullptr;
     geode::TextInput*     m_nameInput    = nullptr; // macro file name
-    geode::TextInput*     m_offsetInput  = nullptr; // timeline offset (seconds)
     CCMenuItemToggler*    m_recordToggle = nullptr;
     CCMenuItemToggler*    m_playToggle   = nullptr;
     CCMenuItemToggler*    m_speedToggle  = nullptr;
     CCMenuItemToggler*    m_practiceToggle = nullptr;
     CCMenuItemToggler*    m_deadToggle   = nullptr;
-    CCMenuItemToggler*    m_quantToggle  = nullptr; // RobTop CBS quantization
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
-
-    // Always-visible corner badge (shown when the panel is closed).
-    cocos2d::CCNode*        m_badge       = nullptr;
-    cocos2d::CCLabelBMFont* m_badgePeriod = nullptr;
-    cocos2d::CCLabelBMFont* m_badgeMode   = nullptr;
 
     // Drag state for the panel title bar.
     bool             m_dragging   = false;
@@ -1423,7 +1403,6 @@ public:
         this->setZOrder((std::numeric_limits<int>::max)());
 
         buildPanel();
-        buildBadge();
         setPanelVisible(false);
 
         BotManager::get().ui = this;
@@ -1461,7 +1440,6 @@ public:
     void setPanelVisible(bool v) {
         m_visible = v;
         if (m_panel) m_panel->setVisible(v);
-        if (m_badge) m_badge->setVisible(!v); // badge shows only when panel hidden
 
         // Pause the level + show the cursor + pause music while open.
         BotManager::get().setGuiOpen(v);
@@ -1469,8 +1447,6 @@ public:
         if (v) {
             bringToFront(); // sit above every other layer / GUI
             refreshAll();
-        } else {
-            refreshBadge();
         }
     }
 
@@ -1532,7 +1508,6 @@ public:
     void update(float dt) override {
         CCLayer::update(dt);
         if (m_visible) { refreshStatus(); refreshMode(); }
-        else refreshBadge();
     }
 
     // --- live refresh entry points (called by the manager) -----------------
@@ -1540,7 +1515,6 @@ public:
         refreshStatus();
         refreshMode();
         refreshProgress();
-        refreshBadge();
         syncToggles();
         if (m_nameInput) m_nameInput->setString(BotManager::get().macroName);
         if (m_speedInput) {
@@ -1601,6 +1575,9 @@ public:
         }
     }
 
+    // Push every toggler's visual state from the source-of-truth bools. Used on
+    // open / refresh only (never from a toggle's own callback), so a click never
+    // cascades into the other checkmarks. toggle(bool) does not fire selectors.
     void syncToggles() {
         auto& bot = BotManager::get();
         if (m_recordToggle) m_recordToggle->toggle(bot.mode == bot::Mode::Recording);
@@ -1608,15 +1585,13 @@ public:
         if (m_speedToggle)  m_speedToggle->toggle(bot.speedhackEnabled);
         if (m_practiceToggle) m_practiceToggle->toggle(bot.practiceFixEnabled);
         if (m_deadToggle)   m_deadToggle->toggle(bot.discardDeadInputs);
-        if (m_quantToggle)  m_quantToggle->toggle(bot.quantizeForRobTopCBS);
         if (m_autoSaveToggle) m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
-        bot.persist(); // options changed -> save eagerly
     }
 
 private:
     // ----- panel construction ---------------------------------------------
     void buildPanel() {
-        constexpr float W = 320.f, H = 452.f;
+        constexpr float W = 320.f, H = 396.f;
         auto winSize = CCDirector::sharedDirector()->getWinSize();
 
         // Container node, centred on screen. Scaled down so the panel is compact
@@ -1683,20 +1658,24 @@ private:
         menu->setTouchPriority(-1000);
         m_panel->addChild(menu);
 
+        auto& bot = BotManager::get();
+
         float yRec = H - 130.f;
-        // Record / Play togglers.
+        // Record / Play togglers (driven by mode, not a saved bool).
         m_recordToggle = makeToggle(menu, { 40.f, yRec },
-            menu_selector(BotUILayer::onRecord), "Record (V)");
+            menu_selector(BotUILayer::onRecord), "Record (V)",
+            bot.mode == bot::Mode::Recording);
         m_playToggle = makeToggle(menu, { 180.f, yRec },
-            menu_selector(BotUILayer::onPlay), "Play (B)");
+            menu_selector(BotUILayer::onPlay), "Play (B)",
+            bot.mode == bot::Mode::Playing);
 
         // Speedhack toggle + textbox.
         float ySpeed = yRec - 36.f;
         m_speedToggle = makeToggle(menu, { 40.f, ySpeed },
-            menu_selector(BotUILayer::onSpeedToggle), "Speed");
+            menu_selector(BotUILayer::onSpeedToggle), "Speed", bot.speedhackEnabled);
         m_speedInput = geode::TextInput::create(120.f, "speed", "chatFont.fnt");
         m_speedInput->setCommonFilter(geode::CommonFilter::Float);
-        m_speedInput->setString(fmt::format("{:g}", BotManager::get().speed));
+        m_speedInput->setString(fmt::format("{:g}", bot.speed));
         m_speedInput->setPosition({ 222.f, ySpeed });
         m_speedInput->setScale(0.9f);
         m_speedInput->setCallback([](std::string const& s) {
@@ -1712,7 +1691,7 @@ private:
         nameLbl->setScale(0.55f);
         m_panel->addChild(nameLbl);
         m_nameInput = geode::TextInput::create(170.f, "macro", "chatFont.fnt");
-        m_nameInput->setString(BotManager::get().macroName);
+        m_nameInput->setString(bot.macroName);
         m_nameInput->setPosition({ 222.f, yName });
         m_nameInput->setScale(0.9f);
         m_nameInput->setCallback([](std::string const& s) {
@@ -1720,46 +1699,33 @@ private:
         });
         m_panel->addChild(m_nameInput);
 
-        // Timeline offset textbox + Apply button.
-        float yOff = yName - 34.f;
-        auto offLbl = CCLabelBMFont::create("Offset", "chatFont.fnt");
-        offLbl->setAnchorPoint({ 0.f, 0.5f });
-        offLbl->setPosition({ 18.f, yOff });
-        offLbl->setScale(0.55f);
-        m_panel->addChild(offLbl);
-        m_offsetInput = geode::TextInput::create(110.f, "+/- sec", "chatFont.fnt");
-        m_offsetInput->setCommonFilter(geode::CommonFilter::Float);
-        m_offsetInput->setString("0");
-        m_offsetInput->setPosition({ 178.f, yOff });
-        m_offsetInput->setScale(0.9f);
-        m_panel->addChild(m_offsetInput);
-        makeButton(menu, { 272.f, yOff }, "Apply", menu_selector(BotUILayer::onOffset));
-
-        // Practice-fix / Discard-dead / Quantize / Auto-save togglers.
-        float yOpt = yOff - 32.f;
+        // Option togglers. Initial visual state is set from the saved bools so the
+        // checkmarks always start in sync (no manual offset / no 480fps snap -- the
+        // snap is automatic and only applies under RobTop's CBS).
+        float yOpt = yName - 36.f;
         m_practiceToggle = makeToggle(menu, { 40.f, yOpt },
-            menu_selector(BotUILayer::onPracticeFix), "Practice fix");
+            menu_selector(BotUILayer::onPracticeFix), "Practice fix",
+            bot.practiceFixEnabled);
         m_deadToggle = makeToggle(menu, { 180.f, yOpt },
-            menu_selector(BotUILayer::onDeadInputs), "Discard dead");
-        float yOpt2 = yOpt - 26.f;
-        m_quantToggle = makeToggle(menu, { 40.f, yOpt2 },
-            menu_selector(BotUILayer::onQuantize), "480fps snap");
-        m_autoSaveToggle = makeToggle(menu, { 180.f, yOpt2 },
-            menu_selector(BotUILayer::onAutoSave), "Auto-save");
+            menu_selector(BotUILayer::onDeadInputs), "Discard dead",
+            bot.discardDeadInputs);
+        float yOpt2 = yOpt - 28.f;
+        m_autoSaveToggle = makeToggle(menu, { 40.f, yOpt2 },
+            menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
+            bot.autoSaveOnComplete);
 
-        // File row 1: binary save / load.
+        // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
         makeButton(menu, { 50.f, yFile1 },  "Save",   menu_selector(BotUILayer::onSave));
         makeButton(menu, { 120.f, yFile1 }, "Load",   menu_selector(BotUILayer::onLoad));
         makeButton(menu, { 200.f, yFile1 }, "Export", menu_selector(BotUILayer::onExport));
         makeButton(menu, { 272.f, yFile1 }, "Import", menu_selector(BotUILayer::onImport));
 
-        // File row 2: clear / normalize / list / close.
+        // File row 2: clear / list / close.
         float yFile2 = yFile1 - 32.f;
-        makeButton(menu, { 42.f, yFile2 },  "Clear",     menu_selector(BotUILayer::onClear));
-        makeButton(menu, { 116.f, yFile2 }, "Normalize", menu_selector(BotUILayer::onNormalize));
-        makeButton(menu, { 200.f, yFile2 }, "List",      menu_selector(BotUILayer::onList));
-        makeButton(menu, { 268.f, yFile2 }, "Close",     menu_selector(BotUILayer::onClose));
+        makeButton(menu, { 60.f, yFile2 },  "Clear", menu_selector(BotUILayer::onClear));
+        makeButton(menu, { 160.f, yFile2 }, "List",  menu_selector(BotUILayer::onList));
+        makeButton(menu, { 255.f, yFile2 }, "Close", menu_selector(BotUILayer::onClose));
 
         // Hint at the bottom.
         auto hint = CCLabelBMFont::create("K: menu   V: record   B: play   N: stop",
@@ -1770,60 +1736,15 @@ private:
         m_panel->addChild(hint);
     }
 
-    // ----- always-visible corner badge ------------------------------------
-    //
-    //  Even with the panel closed the spec wants the coloured CBF "." to be
-    //  glanceable, so we keep a tiny badge in the top-left corner showing the
-    //  status colour and a one-letter mode (R = recording, P = playing).
-    //
-    void buildBadge() {
-        m_badge = CCNode::create();
-        m_badge->setPosition({ 14.f, CCDirector::sharedDirector()->getWinSize().height - 14.f });
-        m_badge->setAnchorPoint({ 0.f, 1.f });
-        this->addChild(m_badge);
-
-        m_badgePeriod = CCLabelBMFont::create(".", "bigFont.fnt");
-        m_badgePeriod->setScale(1.1f);
-        m_badgePeriod->setAnchorPoint({ 0.f, 1.f });
-        m_badgePeriod->setPosition({ 0.f, 0.f });
-        m_badge->addChild(m_badgePeriod);
-
-        m_badgeMode = CCLabelBMFont::create("", "bigFont.fnt");
-        m_badgeMode->setScale(0.4f);
-        m_badgeMode->setAnchorPoint({ 0.f, 1.f });
-        m_badgeMode->setPosition({ 14.f, -2.f });
-        m_badge->addChild(m_badgeMode);
-    }
-
-    void refreshBadge() {
-        if (!m_badgePeriod) return;
-        auto& bot = BotManager::get();
-        switch (bot.cbfState()) {
-            case bot::CBFState::Syzzi:  m_badgePeriod->setColor({0, 255, 0}); break;
-            case bot::CBFState::RobTop: m_badgePeriod->setColor({255, 235, 0}); break;
-            case bot::CBFState::None:   m_badgePeriod->setColor({255, 40, 40}); break;
-        }
-        if (m_badgeMode) {
-            switch (bot.mode) {
-                case bot::Mode::Recording:
-                    m_badgeMode->setString("R");
-                    m_badgeMode->setColor({255, 80, 80});
-                    break;
-                case bot::Mode::Playing:
-                    m_badgeMode->setString("P");
-                    m_badgeMode->setColor({80, 255, 120});
-                    break;
-                default:
-                    m_badgeMode->setString("");
-                    break;
-            }
-        }
-    }
-
     CCMenuItemToggler* makeToggle(CCMenu* menu, CCPoint pos,
-                                  cocos2d::SEL_MenuHandler sel, const char* label) {
+                                  cocos2d::SEL_MenuHandler sel, const char* label,
+                                  bool initialState) {
         auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
         toggle->setPosition(pos);
+        // Set the initial checkmark state to match the saved option so the
+        // checkmarks never start out of sync (toggle(bool) just sets state and
+        // does NOT fire the selector, so this is safe).
+        toggle->toggle(initialState);
         menu->addChild(toggle);
 
         auto lbl = CCLabelBMFont::create(label, "chatFont.fnt");
@@ -1853,43 +1774,35 @@ private:
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
         refreshAll();
     }
-    void onSpeedToggle(CCObject*) {
+    // Each option callback flips its OWN source-of-truth bool, then forces that
+    // one toggler's visual to match (toggle(bool) does not fire the selector).
+    // This is deterministic regardless of how CCMenuItemToggler::activate orders
+    // its own flip vs. the callback, it never touches the other toggles, and it
+    // always persists -- so checkmarks no longer desync, uncheck siblings, or fail
+    // to save.
+    static void syncOne(CCObject* sender, bool state) {
+        static_cast<CCMenuItemToggler*>(sender)->toggle(state);
+        BotManager::get().persist();
+    }
+    void onSpeedToggle(CCObject* sender) {
         auto& bot = BotManager::get();
         bot.speedhackEnabled = !bot.speedhackEnabled;
-        syncToggles();
+        syncOne(sender, bot.speedhackEnabled);
     }
-    void onPracticeFix(CCObject*) {
+    void onPracticeFix(CCObject* sender) {
         auto& bot = BotManager::get();
         bot.practiceFixEnabled = !bot.practiceFixEnabled;
-        syncToggles();
+        syncOne(sender, bot.practiceFixEnabled);
     }
-    void onDeadInputs(CCObject*) {
+    void onDeadInputs(CCObject* sender) {
         auto& bot = BotManager::get();
         bot.discardDeadInputs = !bot.discardDeadInputs;
-        syncToggles();
+        syncOne(sender, bot.discardDeadInputs);
     }
-    void onQuantize(CCObject*) {
-        auto& bot = BotManager::get();
-        bot.quantizeForRobTopCBS = !bot.quantizeForRobTopCBS;
-        syncToggles();
-    }
-    void onAutoSave(CCObject*) {
+    void onAutoSave(CCObject* sender) {
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
-        syncToggles();
-    }
-    void onOffset(CCObject*) {
-        if (!m_offsetInput) return;
-        try {
-            double delta = std::stod(m_offsetInput->getString());
-            BotManager::get().offsetMacro(delta);
-            Notification::create(
-                fmt::format("Offset macro by {:+.4f}s", delta),
-                NotificationIcon::Success)->show();
-        } catch (...) {
-            Notification::create("Invalid offset", NotificationIcon::Error)->show();
-        }
-        refreshProgress();
+        syncOne(sender, bot.autoSaveOnComplete);
     }
     void onSave(CCObject*) {
         BotManager::get().saveMacro(BotManager::get().macroName);
@@ -1928,10 +1841,6 @@ private:
         Notification::create(
             fmt::format("{} macro(s) -- see console", names.size()),
             NotificationIcon::Info)->show();
-    }
-    void onNormalize(CCObject*) {
-        BotManager::get().normalizeToStart();
-        refreshProgress();
     }
     void onClose(CCObject*) {
         setPanelVisible(false);
