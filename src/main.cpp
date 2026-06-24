@@ -1,37 +1,34 @@
 /**
  * ============================================================================
- * main.cpp  --  Geode hook wiring for the "Geode Time Macro" bot.
+ *  main.cpp  --  Geode hook wiring for the "Geode Time Macro" bot.
  * ============================================================================
  *
- * Target : Geometry Dash 2.2081
- * Loader : Geode v5.7.1
+ *  Target : Geometry Dash 2.2081
+ *  Loader : Geode v5.7.1
  *
- * This translation unit contains nothing but the thin glue between Geometry
- * Dash's runtime and the brain that lives in Bot.hpp. Every hook here is a
- * small, well-commented shim that forwards into BotManager so the actual logic
- * stays in one testable place.
+ *  This translation unit contains nothing but the thin glue between Geometry
+ *  Dash's runtime and the brain that lives in Bot.hpp. Every hook here is a
+ *  small, well-commented shim that forwards into BotManager so the actual logic
+ *  stays in one testable place.
  *
- * The hooks, at a glance:
+ *  The hooks, at a glance:
  *
- * GJBaseGameLayer::handleButton    -> capture inputs at the lowest level
- * (this is where CBF feeds clicks in)
- * GJBaseGameLayer::processCommands -> per-physics-step playback firing
- * GJBaseGameLayer::update          -> per-frame backstop for playback
- * GJBaseGameLayer::getModifiedDelta-> frame-rate independent speedhack
+ *    GJBaseGameLayer::handleButton    -> capture inputs at the lowest level
+ *                                        (this is where CBF feeds clicks in)
+ *    GJBaseGameLayer::processCommands -> per-physics-step playback firing
+ *    GJBaseGameLayer::update          -> per-frame backstop for playback
+ *    GJBaseGameLayer::getModifiedDelta-> frame-rate independent speedhack
  *
- * CCScene::onEnter                 -> ensure the floating UI is spawned globally
- * and moved to the active scene
+ *    PlayLayer::init                  -> spawn the floating UI, reset state
+ *    PlayLayer::resetLevel            -> rewind playback cursor
+ *    PlayLayer::resetLevelFromStart   -> full restart -> revert later inputs
+ *    PlayLayer::destroyPlayer         -> death handling
+ *    PlayLayer::storeCheckpoint       -> snapshot velocity + player state
+ *    PlayLayer::loadFromCheckpoint    -> restore snapshot + discard dead inputs
+ *    PlayLayer::removeCheckpoint      -> keep our checkpoint stack in sync
  *
- * PlayLayer::init                  -> reset macro state on level enter
- * PlayLayer::resetLevel            -> rewind playback cursor
- * PlayLayer::resetLevelFromStart   -> full restart -> revert later inputs
- * PlayLayer::destroyPlayer         -> death handling
- * PlayLayer::storeCheckpoint       -> snapshot velocity + player state
- * PlayLayer::loadFromCheckpoint    -> restore snapshot + discard dead inputs
- * PlayLayer::removeCheckpoint      -> keep our checkpoint stack in sync
- *
- * PauseLayer::onRestart            -> revert inputs on a pause-menu restart
- * PauseLayer::onRestartFull        -> ditto
+ *    PauseLayer::onRestart            -> revert inputs on a pause-menu restart
+ *    PauseLayer::onRestartFull        -> ditto
  * ============================================================================
  */
 
@@ -41,7 +38,6 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
-#include <Geode/modify/CCScene.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
 
@@ -57,37 +53,6 @@ using namespace geode::prelude;
 static inline bool isPlay(GJBaseGameLayer* self) {
     return typeinfo_cast<PlayLayer*>(self) != nullptr;
 }
-
-// ============================================================================
-//  Global UI Hook
-// ============================================================================
-//
-//  Hooking CCScene::onEnter guarantees our Bot UI stays globally active regardless
-//  of whether the user is in a level, the main menu, or anywhere else. Every time
-//  the game changes scenes, we gently re-parent our persistent UI node to the top
-//  of the new scene so it follows the user everywhere.
-//
-class $modify(GlobalBotUIHook, CCScene) {
-    void onEnter() {
-        CCScene::onEnter();
-        
-        auto& bot = BotManager::get();
-        if (!bot.ui) {
-            bot.ui = BotUILayer::create();
-            if (bot.ui) {
-                bot.ui->retain(); // Keep alive across scene transitions
-            }
-        }
-        
-        // Ensure it's gracefully sitting on the very top of the newly active scene
-        if (bot.ui && bot.ui->getParent() != this) {
-            if (bot.ui->getParent()) {
-                bot.ui->removeFromParentAndCleanup(false);
-            }
-            this->addChild(bot.ui, (std::numeric_limits<int>::max)());
-        }
-    }
-};
 
 // ============================================================================
 //  GJBaseGameLayer hooks
@@ -135,12 +100,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // In the rare case a CBF build does not route through processCommands every
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
-    void update(float dt) {
-        // Freeze gameplay while the GUI is open (our own pause -- no menu).
-        if (isPlay(this) && BotManager::get().guiPaused) {
-            return;
-        }
-        GJBaseGameLayer::update(dt);
+void update(float dt) {
+    GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
             // Detect restarts / respawns (level clock jumping backwards) so a
             // re-recorded attempt overwrites the superseded inputs instead of
@@ -178,14 +139,38 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
 class $modify(BotPlayLayer, PlayLayer) {
 
-    // ---- level init: reset transient tracking state ----------------------
+    // Per-instance bookkeeping kept on the layer itself.
+    struct Fields {
+        bool uiSpawned = false;
+    };
+
+    // ---- level init: reset state and spawn the floating UI ---------------
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
 
-        BotManager::get().onLevelReset(this);
+        auto& bot = BotManager::get();
+        bot.onLevelReset(this);
+
+        // Build the always-on-top GUI once and parent it high in the z-order so
+        // it floats above every gameplay layer. It owns its own keyboard
+        // delegate, so K toggles it regardless of what else has focus.
+        if (!m_fields->uiSpawned) {
+            spawnUI();
+            m_fields->uiSpawned = true;
+        }
+
         return true;
+    }
+
+    void spawnUI() {
+        auto ui = BotUILayer::create();
+        if (!ui) return;
+        // INT_MAX z-order -> above the gameplay, objects, and HUD.
+        this->addChild(ui, (std::numeric_limits<int>::max)());
+        BotManager::get().ui = ui;
+        ui->refreshAll();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -295,8 +280,68 @@ $on_mod(Loaded) {
             break;
     }
 
-    log::info("[Bot] Geode Time Macro loaded. Press K to open the menu.");
+    log::info("[Bot] Geode Time Macro loaded. Press K in a level to open the menu.");
 }
 
 // Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
 // BotManager::persist() whenever they change (see Bot.hpp).
+
+// ============================================================================
+//  BUILD, INSTALL & TROUBLESHOOTING NOTES
+// ============================================================================
+//
+//  Since the CMake is already set up, the only things to get right outside this
+//  file are the Geode metadata and the runtime expectations:
+//
+//  -- mod.json -------------------------------------------------------------
+//  Target Geometry Dash 2.2081 and Geode v5.7.1, and declare Syzzi's Click
+//  Between Frames as a RECOMMENDED (not required) dependency so the loader can
+//  surface it but the mod still loads without it (we degrade to the red state):
+//
+//      {
+//          "geode": "5.7.1",
+//          "gd": { "win": "2.2081" },
+//          "id": "you.time-macro-bot",
+//          "name": "Time Macro Bot",
+//          "version": "1.0.0",
+//          "developer": "you",
+//          "dependencies": [
+//              {
+//                  "id": "syzzi.click_between_frames",
+//                  "version": ">=1.0.0",
+//                  "importance": "recommended"
+//              }
+//          ]
+//      }
+//
+//  We intentionally do NOT mark CBF "required": the mod should still load so the
+//  GUI can show the red "." and explain that CBF is needed, rather than refusing
+//  to load at all.
+//
+//  -- Why the bot is gated on CBF -----------------------------------------
+//  Without CBF the engine only samples input once per rendered frame, so a macro
+//  recorded with sub-frame timing cannot be reproduced faithfully (and a macro
+//  recorded without it would itself be frame-locked). BotManager::cbfAvailable()
+//  therefore blocks record/playback in the red state. Syzzi (green) is preferred
+//  because its input window is effectively unbounded; RobTop's CBS (yellow) works
+//  but is capped at ~480 FPS, which is why we snap timestamps to that grid.
+//
+//  -- Hook ordering with CBF ----------------------------------------------
+//  CBF also hooks getModifiedDelta / the stepping path. Geode resolves hook order
+//  by priority and runs every mod's hook, so our speedhack multiply and our
+//  per-step playback both compose correctly with CBF's own work. We deliberately
+//  read m_gameState.m_levelTime (which CBF keeps correct per sub-step) rather than
+//  trying to reimplement CBF's timing, so we stay compatible by construction.
+//
+//  -- If K does nothing ----------------------------------------------------
+//  The GUI catches K via a CCLayer keyboard delegate (setKeyboardEnabled), which
+//  is reliable across platforms -- unlike hooking CCKeyboardDispatcher, which has
+//  no Windows address in the current bindings snapshot. If another mod consumes
+//  the key first, change bot::TOGGLE_KEY in Bot.hpp.
+//
+//  -- If checkpoints feel off ---------------------------------------------
+//  The accurate practice fix re-applies our snapshot AFTER the engine's own
+//  loadFromCheckpoint. If a future GD update reorders that, snapshots may need to
+//  be applied on the next frame instead; see BotManager::onCheckpointLoaded.
+//
+// ============================================================================

@@ -1,48 +1,48 @@
 /**
  * ============================================================================
- * Bot.hpp  --  Core of the "Geode Time Macro" bot for Geometry Dash 2.2081
+ *  Bot.hpp  --  Core of the "Geode Time Macro" bot for Geometry Dash 2.2081
  * ============================================================================
  *
- * A practice-mode -> normal-mode macro bot built for the Geode mod loader
- * (v5.7.1) and designed from the ground up around Click Between Frames.
+ *  A practice-mode -> normal-mode macro bot built for the Geode mod loader
+ *  (v5.7.1) and designed from the ground up around Click Between Frames.
  *
- * Design goals (see the request that spawned this file):
+ *  Design goals (see the request that spawned this file):
  *
- * * Record a run in Practice Mode, play it back in Normal Mode.
- * * Work with Syzzi's Click Between Frames (mod id: syzzi.click_between_frames)
- * which lets you click on *practically infinite* sub-frames, and also keep
- * working with RobTop's built in "Click Between Steps" (limited to a
- * ~480 FPS input window).
- * * Be tiny on disk. We do NOT store one record per physics frame. Instead we
- * store *state-change events only* (a press or a release), each tagged with
- * the exact level time it happened at. A 2 minute extreme demon with a few
- * hundred clicks is only a few kilobytes.
- * * Time-based, not frame/x-position based. Each input remembers the level
- * time (m_gameState.m_levelTime, a double) at which it fired. Because that
- * clock is advanced by the physics delta and not the render frame-rate, the
- * macro is identical whether you run at 60, 240 or 9999 FPS, and whether or
- * not CBF is subdividing the frame.
- * * Recording does not have to start at level time 0. We remember the time the
- * recording was armed and (optionally) normalise every event back to it, so
- * starting a recording 0.2s into a level does not desync playback.
- * * Accurate practice-bug fix: our own checkpoint snapshot stores velocity and
- * the full player state for every gamemode, so loading a checkpoint resumes
- * physics *exactly*.
- * * "Dead input" discard: if you click, die, and retry from a checkpoint, the
- * inputs you made between the checkpoint and the death are thrown away. The
- * pause-menu restart button rewinds the input timeline too.
- * * A frame-rate independent speedhack (a textbox, any multiplier) -- because
- * the bot is driven by level time and not the frame-rate, cranking the speed
- * does not desync the macro.
- * * A GUI (toggle with K) that floats above every layer, captures its own
- * clicks at a high touch priority, and shows a coloured "." status:
- * green  -> Syzzi CBF present          (best, infinite sub-frames)
- * yellow -> RobTop Click Between Steps  (limited, ~480fps window)
- * red    -> no CBF at all               (bot disabled)
+ *    * Record a run in Practice Mode, play it back in Normal Mode.
+ *    * Work with Syzzi's Click Between Frames (mod id: syzzi.click_between_frames)
+ *      which lets you click on *practically infinite* sub-frames, and also keep
+ *      working with RobTop's built in "Click Between Steps" (limited to a
+ *      ~480 FPS input window).
+ *    * Be tiny on disk. We do NOT store one record per physics frame. Instead we
+ *      store *state-change events only* (a press or a release), each tagged with
+ *      the exact level time it happened at. A 2 minute extreme demon with a few
+ *      hundred clicks is only a few kilobytes.
+ *    * Time-based, not frame/x-position based. Each input remembers the level
+ *      time (m_gameState.m_levelTime, a double) at which it fired. Because that
+ *      clock is advanced by the physics delta and not the render frame-rate, the
+ *      macro is identical whether you run at 60, 240 or 9999 FPS, and whether or
+ *      not CBF is subdividing the frame.
+ *    * Recording does not have to start at level time 0. We remember the time the
+ *      recording was armed and (optionally) normalise every event back to it, so
+ *      starting a recording 0.2s into a level does not desync playback.
+ *    * Accurate practice-bug fix: our own checkpoint snapshot stores velocity and
+ *      the full player state for every gamemode, so loading a checkpoint resumes
+ *      physics *exactly*.
+ *    * "Dead input" discard: if you click, die, and retry from a checkpoint, the
+ *      inputs you made between the checkpoint and the death are thrown away. The
+ *      pause-menu restart button rewinds the input timeline too.
+ *    * A frame-rate independent speedhack (a textbox, any multiplier) -- because
+ *      the bot is driven by level time and not the frame-rate, cranking the speed
+ *      does not desync the macro.
+ *    * A GUI (toggle with K) that floats above every layer, captures its own
+ *      clicks at a high touch priority, and shows a coloured "." status:
+ *          green  -> Syzzi CBF present          (best, infinite sub-frames)
+ *          yellow -> RobTop Click Between Steps  (limited, ~480fps window)
+ *          red    -> no CBF at all               (bot disabled)
  *
- * This header holds the data model, the singleton BotManager (all of the logic,
- * storage and file IO) and the floating BotUILayer. main.cpp wires the Geode
- * hooks into it.
+ *  This header holds the data model, the singleton BotManager (all of the logic,
+ *  storage and file IO) and the floating BotUILayer. main.cpp wires the Geode
+ *  hooks into it.
  * ============================================================================
  */
 
@@ -211,7 +211,6 @@ using namespace geode::prelude;
 //       PlayLayer::storeCheckpoint / loadFromCheckpoint / removeCheckpoint
 //       PlayLayer::levelComplete
 //       PauseLayer::onRestart / onRestartFull
-//       CCScene::onEnter                   global UI spawning / parenting
 //
 // ============================================================================
 // ============================================================================
@@ -449,7 +448,7 @@ struct CheckpointFrame {
     double         levelTime  = 0.0;   // level time when set
     PlayerSnapshot p1;
     PlayerSnapshot p2;
-    void* checkpointPtr = nullptr; // identity of the CheckpointObject
+    void*          checkpointPtr = nullptr; // identity of the CheckpointObject
 };
 
 // ============================================================================
@@ -608,19 +607,17 @@ public:
     // Open/close the GUI: freeze the level, reveal the OS cursor, and pause the
     // song. Closing reverses all three. The actual physics freeze is enforced by
     // the GJBaseGameLayer hooks reading `guiPaused`.
-    void setGuiOpen(bool open) {
-        guiPaused = open;
-        if (open) {
-            PlatformToolbox::showCursor();
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->pauseAllMusic(true);
-        } else {
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
-            // GD hides the cursor during gameplay; only re-hide it if we are
-            // actually in a level (so we don't hide it back on a menu).
-            if (PlayLayer::get()) PlatformToolbox::hideCursor();
+void setGuiOpen(bool open) {
+    guiPaused = false; // never pause gameplay
+
+    if (open) {
+        PlatformToolbox::showCursor();
+    } else {
+        if (PlayLayer::get()) {
+            PlatformToolbox::hideCursor();
         }
     }
-
+}
     // ----- time helpers ----------------------------------------------------
 
     // Read the authoritative, frame-rate independent level clock.
@@ -1356,20 +1353,20 @@ private:
 //
 class BotUILayer : public cocos2d::CCLayer {
 protected:
-    cocos2d::CCNode* m_panel        = nullptr;
+    cocos2d::CCNode*      m_panel        = nullptr;
     cocos2d::CCLabelBMFont* m_periodLabel = nullptr; // the coloured "."
     cocos2d::CCLabelBMFont* m_statusLabel = nullptr; // CBF: Syzzi / RobTop / None
     cocos2d::CCLabelBMFont* m_modeLabel   = nullptr; // Idle / Recording / Playing
     cocos2d::CCLabelBMFont* m_progressLabel = nullptr; // input count + duration
     cocos2d::CCLabelBMFont* m_statsLabel  = nullptr; // presses / releases / dual
-    geode::TextInput* m_speedInput   = nullptr;
-    geode::TextInput* m_nameInput    = nullptr; // macro file name
-    CCMenuItemToggler* m_recordToggle = nullptr;
-    CCMenuItemToggler* m_playToggle   = nullptr;
-    CCMenuItemToggler* m_speedToggle  = nullptr;
-    CCMenuItemToggler* m_practiceToggle = nullptr;
-    CCMenuItemToggler* m_deadToggle   = nullptr;
-    CCMenuItemToggler* m_autoSaveToggle = nullptr;
+    geode::TextInput*     m_speedInput   = nullptr;
+    geode::TextInput*     m_nameInput    = nullptr; // macro file name
+    CCMenuItemToggler*    m_recordToggle = nullptr;
+    CCMenuItemToggler*    m_playToggle   = nullptr;
+    CCMenuItemToggler*    m_speedToggle  = nullptr;
+    CCMenuItemToggler*    m_practiceToggle = nullptr;
+    CCMenuItemToggler*    m_deadToggle   = nullptr;
+    CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
 
     // Drag state for the panel title bar.
@@ -1581,12 +1578,23 @@ public:
     // cascades into the other checkmarks. toggle(bool) does not fire selectors.
     void syncToggles() {
         auto& bot = BotManager::get();
-        if (m_recordToggle) m_recordToggle->toggle(bot.mode == bot::Mode::Recording);
-        if (m_playToggle)   m_playToggle->toggle(bot.mode == bot::Mode::Playing);
-        if (m_speedToggle)  m_speedToggle->toggle(bot.speedhackEnabled);
-        if (m_practiceToggle) m_practiceToggle->toggle(bot.practiceFixEnabled);
-        if (m_deadToggle)   m_deadToggle->toggle(bot.discardDeadInputs);
-        if (m_autoSaveToggle) m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
+if (m_recordToggle)
+    m_recordToggle->toggle(bot.mode == bot::Mode::Recording);
+
+if (m_playToggle)
+    m_playToggle->toggle(bot.mode == bot::Mode::Playing);
+
+if (m_speedToggle)
+    m_speedToggle->toggle(bot.speedhackEnabled);
+
+if (m_practiceToggle)
+    m_practiceToggle->toggle(bot.practiceFixEnabled);
+
+if (m_deadToggle)
+    m_deadToggle->toggle(bot.discardDeadInputs);
+
+if (m_autoSaveToggle)
+    m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
     }
 
 private:
@@ -1611,42 +1619,42 @@ private:
         bg->setOpacity(238);
         m_panel->addChild(bg);
 
-        // Title on the top left
+        // Title.
         auto title = CCLabelBMFont::create("Time Macro Bot", "goldFont.fnt");
-        title->setPosition({ 16.f, H - 18.f });
-        title->setAnchorPoint({ 0.f, 0.5f });
+        title->setPosition({ W * 0.5f, H - 18.f });
         title->setScale(0.72f);
         m_panel->addChild(title);
 
-        // CBF Indicator and coloured period moved completely to the Top Right corner
+        // The coloured period + status line. The period is the green/yellow/red
+        // CBF indicator the spec asked for.
         m_periodLabel = CCLabelBMFont::create(".", "bigFont.fnt");
-        m_periodLabel->setPosition({ W - 12.f, H - 14.f });
+       m_periodLabel->setPosition({ W - 18.f, H - 18.f });
         m_periodLabel->setScale(1.25f);
-        m_periodLabel->setAnchorPoint({ 1.0f, 0.7f });
+        m_periodLabel->setAnchorPoint({ 0.5f, 0.7f });
         m_panel->addChild(m_periodLabel);
 
         m_statusLabel = CCLabelBMFont::create("CBF: ...", "chatFont.fnt");
-        m_statusLabel->setAnchorPoint({ 1.0f, 0.5f });
-        m_statusLabel->setPosition({ W - 28.f, H - 14.f });
-        m_statusLabel->setScale(0.55f);
+m_statusLabel->setAnchorPoint({ 1.f, 0.5f });
+m_statusLabel->setPosition({ W - 32.f, H - 18.f });
+        m_statusLabel->setScale(0.62f);
         m_panel->addChild(m_statusLabel);
 
         // Mode + progress + stats lines.
         m_modeLabel = CCLabelBMFont::create("Mode: idle", "chatFont.fnt");
         m_modeLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_modeLabel->setPosition({ 16.f, H - 50.f });
+        m_modeLabel->setPosition({ 18.f, H - 66.f });
         m_modeLabel->setScale(0.6f);
         m_panel->addChild(m_modeLabel);
 
         m_progressLabel = CCLabelBMFont::create("0 inputs  |  0.00s", "chatFont.fnt");
         m_progressLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_progressLabel->setPosition({ 16.f, H - 70.f });
+        m_progressLabel->setPosition({ 18.f, H - 84.f });
         m_progressLabel->setScale(0.55f);
         m_panel->addChild(m_progressLabel);
 
         m_statsLabel = CCLabelBMFont::create("press 0  rel 0  p1 0  p2 0", "chatFont.fnt");
         m_statsLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_statsLabel->setPosition({ 16.f, H - 90.f });
+        m_statsLabel->setPosition({ 18.f, H - 100.f });
         m_statsLabel->setScale(0.48f);
         m_statsLabel->setOpacity(190);
         m_panel->addChild(m_statsLabel);
@@ -1661,10 +1669,7 @@ private:
 
         auto& bot = BotManager::get();
 
-        // Increased vertical spacing uniformly to ~38px so bounding boxes of the 
-        // checkbox sprites NEVER overlap, completely eliminating misclicks.
-        float yRec = H - 126.f;   
-        
+        float yRec = H - 130.f;
         // Record / Play togglers (driven by mode, not a saved bool).
         m_recordToggle = makeToggle(menu, { 40.f, yRec },
             menu_selector(BotUILayer::onRecord), "Record (V)",
@@ -1674,7 +1679,7 @@ private:
             bot.mode == bot::Mode::Playing);
 
         // Speedhack toggle + textbox.
-        float ySpeed = yRec - 38.f;
+        float ySpeed = yRec - 36.f;
         m_speedToggle = makeToggle(menu, { 40.f, ySpeed },
             menu_selector(BotUILayer::onSpeedToggle), "Speed", bot.speedhackEnabled);
         m_speedInput = geode::TextInput::create(120.f, "speed", "chatFont.fnt");
@@ -1688,10 +1693,10 @@ private:
         m_panel->addChild(m_speedInput);
 
         // Macro name textbox.
-        float yName = ySpeed - 38.f;
+        float yName = ySpeed - 34.f;
         auto nameLbl = CCLabelBMFont::create("Name", "chatFont.fnt");
         nameLbl->setAnchorPoint({ 0.f, 0.5f });
-        nameLbl->setPosition({ 16.f, yName });
+        nameLbl->setPosition({ 18.f, yName });
         nameLbl->setScale(0.55f);
         m_panel->addChild(nameLbl);
         m_nameInput = geode::TextInput::create(170.f, "macro", "chatFont.fnt");
@@ -1703,22 +1708,23 @@ private:
         });
         m_panel->addChild(m_nameInput);
 
-        // Option togglers. Initial visual state is set from the saved bools.
-        float yOpt = yName - 38.f;
+        // Option togglers. Initial visual state is set from the saved bools so the
+        // checkmarks always start in sync (no manual offset / no 480fps snap -- the
+        // snap is automatic and only applies under RobTop's CBS).
+        float yOpt = yName - 36.f;
         m_practiceToggle = makeToggle(menu, { 40.f, yOpt },
             menu_selector(BotUILayer::onPracticeFix), "Practice fix",
             bot.practiceFixEnabled);
         m_deadToggle = makeToggle(menu, { 180.f, yOpt },
             menu_selector(BotUILayer::onDeadInputs), "Discard dead",
             bot.discardDeadInputs);
-            
-        float yOpt2 = yOpt - 38.f; // Previous 28px was too small and overlapping!
+        float yOpt2 = yOpt - 28.f;
         m_autoSaveToggle = makeToggle(menu, { 40.f, yOpt2 },
             menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
 
         // File row 1: binary save / load + text export / import.
-        float yFile1 = yOpt2 - 38.f;
+        float yFile1 = yOpt2 - 34.f;
         makeButton(menu, { 50.f, yFile1 },  "Save",   menu_selector(BotUILayer::onSave));
         makeButton(menu, { 120.f, yFile1 }, "Load",   menu_selector(BotUILayer::onLoad));
         makeButton(menu, { 200.f, yFile1 }, "Export", menu_selector(BotUILayer::onExport));
@@ -1733,7 +1739,7 @@ private:
         // Hint at the bottom.
         auto hint = CCLabelBMFont::create("K: menu   V: record   B: play   N: stop",
                                           "chatFont.fnt");
-        hint->setPosition({ W * 0.5f, 16.f });
+        hint->setPosition({ W * 0.5f, 14.f });
         hint->setScale(0.46f);
         hint->setOpacity(160);
         m_panel->addChild(hint);
@@ -1744,6 +1750,9 @@ private:
                                   bool initialState) {
         auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
         toggle->setPosition(pos);
+        // Set the initial checkmark state to match the saved option so the
+        // checkmarks never start out of sync (toggle(bool) just sets state and
+        // does NOT fire the selector, so this is safe).
         toggle->toggle(initialState);
         menu->addChild(toggle);
 
@@ -1774,35 +1783,35 @@ private:
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
         refreshAll();
     }
-    
-    // Callbacks now strictly flip the source of truth, force the visual toggler
-    // to match deterministically, and save. Because the togglers no longer visually 
-    // overlap, this will never be triggered accidentally by a neighbouring click.
-    void onSpeedToggle(CCObject* sender) {
-        auto& bot = BotManager::get();
-        bot.speedhackEnabled = !bot.speedhackEnabled;
-        static_cast<CCMenuItemToggler*>(sender)->toggle(bot.speedhackEnabled);
-        bot.persist();
-    }
-    void onPracticeFix(CCObject* sender) {
-        auto& bot = BotManager::get();
-        bot.practiceFixEnabled = !bot.practiceFixEnabled;
-        static_cast<CCMenuItemToggler*>(sender)->toggle(bot.practiceFixEnabled);
-        bot.persist();
-    }
-    void onDeadInputs(CCObject* sender) {
-        auto& bot = BotManager::get();
-        bot.discardDeadInputs = !bot.discardDeadInputs;
-        static_cast<CCMenuItemToggler*>(sender)->toggle(bot.discardDeadInputs);
-        bot.persist();
-    }
-    void onAutoSave(CCObject* sender) {
-        auto& bot = BotManager::get();
-        bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
-        static_cast<CCMenuItemToggler*>(sender)->toggle(bot.autoSaveOnComplete);
-        bot.persist();
-    }
+    // Each option callback flips its OWN source-of-truth bool, then forces that
+    // one toggler's visual to match (toggle(bool) does not fire the selector).
+    // This is deterministic regardless of how CCMenuItemToggler::activate orders
+    // its own flip vs. the callback, it never touches the other toggles, and it
+    // always persists -- so checkmarks no longer desync, uncheck siblings, or fail
+    // to save.
+void onSpeedToggle(CCObject*) {
+    auto& bot = BotManager::get();
+    bot.speedhackEnabled = !bot.speedhackEnabled;
+    BotManager::get().persist();
+}
 
+void onPracticeFix(CCObject*) {
+    auto& bot = BotManager::get();
+    bot.practiceFixEnabled = !bot.practiceFixEnabled;
+    BotManager::get().persist();
+}
+
+void onDeadInputs(CCObject*) {
+    auto& bot = BotManager::get();
+    bot.discardDeadInputs = !bot.discardDeadInputs;
+    BotManager::get().persist();
+}
+
+void onAutoSave(CCObject*) {
+    auto& bot = BotManager::get();
+    bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
+    BotManager::get().persist();
+}
     void onSave(CCObject*) {
         BotManager::get().saveMacro(BotManager::get().macroName);
     }
