@@ -608,7 +608,7 @@ public:
     // song. Closing reverses all three. The actual physics freeze is enforced by
     // the GJBaseGameLayer hooks reading `guiPaused`.
 void setGuiOpen(bool open) {
-    guiPaused = false; // never pause gameplay
+    guiPaused = open;   // ← actually respect the parameter
 
     if (open) {
         PlatformToolbox::showCursor();
@@ -1476,19 +1476,17 @@ public:
 
     void togglePanel() { setPanelVisible(!m_visible); }
 
-    void setPanelVisible(bool v) {
-        m_visible = v;
-        if (m_panel) m_panel->setVisible(v);
+  void setPanelVisible(bool v) {
+    m_visible = v;
+    if (m_panel) m_panel->setVisible(v);
 
-        // Pause the level + show the cursor + pause music while open.
-        BotManager::get().setGuiOpen(v);
+    BotManager::get().setGuiOpen(v);   // ← pass the value
 
-        if (v) {
-            bringToFront(); // sit above every other layer / GUI
-            refreshAll();
-        }
+    if (v) {
+        bringToFront();
+        refreshAll();
     }
-
+}
     // Re-parent ourselves to the very top of the current running scene so the
     // panel renders above the pause menu, other mods' overlays, everything.
     void bringToFront() {

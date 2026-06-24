@@ -72,17 +72,21 @@ class $modify(BotScene, CCScene) {
 
         auto& bot = BotManager::get();
 
-        if (bot.ui) {
-            bot.ui->removeFromParentAndCleanup(true);
-            bot.ui = nullptr;
+        // Don't destroy and recreate every time — reuse if possible
+        if (!bot.ui) {
+            auto ui = BotUILayer::create();
+            if (ui) {
+                bot.ui = ui;
+                this->addChild(ui, 999999);
+            }
+        } else if (bot.ui->getParent() != this) {
+            bot.ui->removeFromParentAndCleanup(false);
+            this->addChild(bot.ui, 999999);
         }
 
-        auto ui = BotUILayer::create();
-
-        if (ui) {
-            bot.ui = ui;
-            this->addChild(ui, 999999);
-            ui->refreshAll();
+        if (bot.ui) {
+            bot.ui->bringToFront();  // ensure it's on top
+            bot.ui->refreshAll();
         }
     }
 };
