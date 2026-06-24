@@ -715,8 +715,11 @@ void applyAudioSpeed() {
 
     float s = static_cast<float>(speedMultiplier());
 
-    // This is the direct binding to change music speed/warp in GD 2.2+
-    engine->setBackgroundMusicTimeWarp(s);
+    // Safely check if the underlying FMOD music channel group exists
+    if (engine->m_musicChannelGroup) {
+        // FMOD's native function handles changing the playback rate/speed
+        engine->m_musicChannelGroup->setPitch(s);
+    }
 }
     // Stamp the current level's identity into the macro so we can later detect a
     // macro being played on the wrong level.
