@@ -299,139 +299,205 @@ struct InputEvent {
 };
 
 // ============================================================================
-//  PlayerSnapshot  --  full physics state of one PlayerObject.
+//  PlayerSnapshot  --  the COMPLETE physics state of one PlayerObject.
 // ============================================================================
 //
-//  This is the heart of the accurate practice-bug fix. RobTop's own checkpoints
-//  do not faithfully restore velocity and a handful of per-gamemode flags, which
-//  is why vanilla practice can feel "off" after a respawn. We snapshot every
-//  field that matters for every gamemode so a reload is bit-for-bit consistent.
+//  This is the heart of the accurate practice-bug fix. Vanilla checkpoints do
+//  not faithfully restore velocity, slope/collision state, the gamemode state
+//  machine, or a pile of timing fields, which is why practice can feel "off"
+//  after a respawn and why a botted run can drift. So instead of guessing which
+//  fields the game gets wrong, we snapshot EVERY physics-relevant field of the
+//  PlayerObject and write them all back on top of the game's own restore. The
+//  result is a bit-for-bit identical player state at checkpoint time, in every
+//  gamemode.
 //
+//  The field list is maintained as an X-macro so capture() and apply() can never
+//  drift out of sync. Member names mirror the engine field names 1:1. Only
+//  visual-only fields (sprites, particles, colours, trails) are intentionally
+//  omitted -- they do not affect physics.
+//
+#define BOT_SNAPSHOT_FIELDS(X)                       \
+    /* --- velocities --- */                          \
+    X(double, m_yVelocity)                            \
+    X(double, m_fallSpeed)                            \
+    X(double, m_platformerXVelocity)                  \
+    X(double, m_currentSlopeYVelocity)                \
+    X(float,  m_slopeVelocity)                        \
+    X(float,  m_xVelocityRelated)                     \
+    X(float,  m_xVelocityRelated2)                    \
+    X(float,  m_yVelocityRelated3)                    \
+    X(float,  m_platformerVelocityRelated)            \
+    X(double, m_maybeReverseSpeed)                    \
+    X(double, m_maybeReverseAcceleration)             \
+    /* --- gravity / speed --- */                     \
+    X(double, m_gravity)                              \
+    X(float,  m_gravityMod)                           \
+    X(double, m_speedMultiplier)                      \
+    X(float,  m_playerSpeed)                          \
+    X(float,  m_playerSpeedAC)                        \
+    X(float,  m_somethingPlayerSpeedTime)             \
+    X(double, m_yStart)                               \
+    X(double, m_accelerationOrSpeed)                  \
+    /* --- transform field (node handled separately) --- */ \
+    X(cocos2d::CCPoint, m_position)                   \
+    X(cocos2d::CCPoint, m_shipRotation)               \
+    /* --- gamemode --- */                            \
+    X(bool, m_isShip)                                 \
+    X(bool, m_isBird)                                 \
+    X(bool, m_isBall)                                 \
+    X(bool, m_isDart)                                 \
+    X(bool, m_isRobot)                                \
+    X(bool, m_isSpider)                               \
+    X(bool, m_isSwing)                                \
+    X(bool, m_isUpsideDown)                           \
+    X(bool, m_isSideways)                             \
+    X(bool, m_isGoingLeft)                            \
+    X(bool, m_isDead)                                 \
+    X(bool, m_isPlatformer)                           \
+    /* --- ground / contact --- */                    \
+    X(bool, m_isOnGround)                             \
+    X(bool, m_isOnGround2)                            \
+    X(bool, m_isOnGround3)                            \
+    X(bool, m_isOnGround4)                            \
+    X(int,  m_stateOnGround)                          \
+    X(int,  m_groundObjectMaterial)                   \
+    X(cocos2d::CCPoint, m_lastGroundedPos)            \
+    /* --- slope --- */                               \
+    X(bool,   m_isOnSlope)                            \
+    X(bool,   m_wasOnSlope)                           \
+    X(double, m_slopeRotation)                        \
+    X(bool,   m_isCurrentSlopeTop)                    \
+    X(bool,   m_maybeUpsideDownSlope)                 \
+    X(bool,   m_maybeGoingCorrectSlopeDirection)      \
+    X(double, m_maybeSlopeForce)                      \
+    X(double, m_slopeEndTime)                         \
+    X(bool,   m_isOnIce)                              \
+    /* --- collision bounds --- */                    \
+    X(double, m_collidedTopMinY)                      \
+    X(double, m_collidedBottomMaxY)                   \
+    X(double, m_collidedLeftMaxX)                     \
+    X(double, m_collidedRightMinX)                    \
+    X(bool,   m_maybeIsColliding)                     \
+    /* --- dash / lock / movement --- */              \
+    X(bool, m_isDashing)                              \
+    X(int,  m_dashFireFrame)                          \
+    X(bool, m_isLocked)                               \
+    X(bool, m_controlsDisabled)                       \
+    X(bool, m_isSliding)                              \
+    X(bool, m_isSlidingRight)                         \
+    X(bool, m_decreaseBoostSlide)                     \
+    X(bool, m_isMoving)                               \
+    X(bool, m_isAccelerating)                         \
+    X(bool, m_isOutOfBounds)                          \
+    X(bool, m_maybeIsBoosted)                         \
+    X(bool, m_maybeHasStopped)                        \
+    X(bool, m_maybeIsFalling)                         \
+    X(int,  m_maybeSlidingTime)                       \
+    /* --- jump buffer / rings / pads --- */          \
+    X(bool, m_jumpBuffered)                           \
+    X(bool, m_wasJumpBuffered)                        \
+    X(unsigned char, m_stateJumpBuffered)            \
+    X(bool, m_stateRingJump)                          \
+    X(bool, m_stateRingJump2)                         \
+    X(bool, m_wasRobotJump)                           \
+    X(bool, m_touchedRing)                            \
+    X(bool, m_touchedCustomRing)                      \
+    X(bool, m_touchedGravityPortal)                   \
+    X(bool, m_touchedPad)                             \
+    X(bool, m_maybeTouchedBreakableBlock)             \
+    X(bool, m_ringJumpRelated)                        \
+    X(bool, m_hasEverJumped)                          \
+    X(bool, m_hasEverHitRing)                         \
+    /* --- force / state machine --- */               \
+    X(int, m_reverseRelated)                          \
+    X(int, m_stateBoostX)                             \
+    X(int, m_stateBoostY)                             \
+    X(int, m_maybeStateForce2)                        \
+    X(int, m_stateScale)                              \
+    X(unsigned char, m_stateUnk)                      \
+    X(unsigned char, m_stateUnk2)                     \
+    X(unsigned char, m_stateNoStickX)                 \
+    X(unsigned char, m_stateNoStickY)                 \
+    X(int, m_stateNoAutoJump)                         \
+    X(int, m_stateDartSlide)                          \
+    X(int, m_stateHitHead)                            \
+    X(int, m_stateFlipGravity)                        \
+    X(int, m_stateForce)                              \
+    X(cocos2d::CCPoint, m_stateForceVector)           \
+    X(bool, m_affectedByForces)                       \
+    /* --- platformer movement intent --- */          \
+    X(bool, m_platformerMovingLeft)                   \
+    X(bool, m_platformerMovingRight)                  \
+    X(bool, m_holdingLeft)                            \
+    X(bool, m_holdingRight)                           \
+    X(bool, m_leftPressedFirst)                       \
+    X(double, m_maybeChangedDirectionAngle)           \
+    /* --- timing --- */                              \
+    X(double, m_totalTime)                            \
+    X(double, m_lastJumpTime)                         \
+    X(double, m_lastFlipTime)                         \
+    X(double, m_lastSpiderFlipTime)                   \
+    X(double, m_lastLandTime)                         \
+    X(double, m_lastCheckpointTime)                   \
+    X(double, m_gameModeChangedTime)                  \
+    X(double, m_changedDirectionsTime)                \
+    X(double, m_maybeSlidingStartTime)                \
+    X(double, m_physDeltaRelated)                     \
+    X(double, m_scaleXRelated)                        \
+    X(double, m_scaleXRelatedTime)                    \
+    X(double, m_blackOrbRelated)                      \
+    /* --- misc --- */                                \
+    X(float,  m_vehicleSize)                          \
+    X(float,  m_fallStartY)                           \
+    X(float,  m_audioScale)                           \
+    X(cocos2d::CCPoint, m_lastPortalPos)              \
+    X(double, m_snapDistance)                         \
+    X(int,    m_followRelated)
+
 struct PlayerSnapshot {
     bool   valid = false;
 
-    // Transform.
-    cocos2d::CCPoint position{0.f, 0.f};
+    // Node transform (kept alongside the m_position field so both the visual
+    // node and the physics field are restored consistently).
+    cocos2d::CCPoint nodePosition{0.f, 0.f};
     float  rotation = 0.f;
     float  scaleX = 1.f;
     float  scaleY = 1.f;
 
-    // Velocity / gravity (the bits RobTop's checkpoint is sloppy about).
-    double yVelocity = 0.0;
-    double platformerXVelocity = 0.0;
-    double gravity = 0.0;
-    double speedMultiplier = 0.0;
-    float  playerSpeed = 0.f;
-    float  gravityMod = 1.f;
-    double yStart = 0.0;
+    // Generated members, one per engine field.
+    #define X(type, name) type name{};
+    BOT_SNAPSHOT_FIELDS(X)
+    #undef X
 
-    // Gamemode booleans -- "all gamemodes".
-    bool isShip = false;
-    bool isBird = false;     // UFO
-    bool isBall = false;
-    bool isDart = false;     // wave
-    bool isRobot = false;
-    bool isSpider = false;
-    bool isSwing = false;
-
-    // Orientation / contact state.
-    bool isUpsideDown = false;
-    bool isSideways = false;
-    bool isGoingLeft = false;
-    bool isOnGround = false;
-    bool isOnGround2 = false;
-    bool isDashing = false;
-    bool isLocked = false;
-    bool isDead = false;
-    bool isHolding = false;
-
-    // Platformer movement intent.
-    bool platformerMovingLeft = false;
-    bool platformerMovingRight = false;
-
-    cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
-
-    // Capture every field above out of a live PlayerObject.
     void capture(PlayerObject* p) {
         if (!p) { valid = false; return; }
         valid = true;
 
-        position = p->getPosition();
-        rotation = p->getRotation();
-        scaleX   = p->getScaleX();
-        scaleY   = p->getScaleY();
+        nodePosition = p->getPosition();
+        rotation     = p->getRotation();
+        scaleX       = p->getScaleX();
+        scaleY       = p->getScaleY();
 
-        yVelocity           = p->m_yVelocity;
-        platformerXVelocity = p->m_platformerXVelocity;
-        gravity             = p->m_gravity;
-        speedMultiplier     = p->m_speedMultiplier;
-        playerSpeed         = p->m_playerSpeed;
-        gravityMod          = p->m_gravityMod;
-        yStart              = p->m_yStart;
-
-        isShip   = p->m_isShip;
-        isBird   = p->m_isBird;
-        isBall   = p->m_isBall;
-        isDart   = p->m_isDart;
-        isRobot  = p->m_isRobot;
-        isSpider = p->m_isSpider;
-        isSwing  = p->m_isSwing;
-
-        isUpsideDown = p->m_isUpsideDown;
-        isSideways   = p->m_isSideways;
-        isGoingLeft  = p->m_isGoingLeft;
-        isOnGround   = p->m_isOnGround;
-        isOnGround2  = p->m_isOnGround2;
-        isDashing    = p->m_isDashing;
-        isLocked     = p->m_isLocked;
-        isDead       = p->m_isDead;
-
-        platformerMovingLeft  = p->m_platformerMovingLeft;
-        platformerMovingRight = p->m_platformerMovingRight;
-
-        lastGroundedPos = p->m_lastGroundedPos;
+        #define X(type, name) name = p->name;
+        BOT_SNAPSHOT_FIELDS(X)
+        #undef X
     }
 
-    // Push every captured field back into a live PlayerObject. Called *after*
-    // RobTop's own loadFromCheckpoint has run, so we only correct what it got
-    // wrong rather than fighting it.
+    // Write the full snapshot back. Called AFTER the game's own
+    // loadFromCheckpoint, so it overrides whatever the game restored with the
+    // exact checkpoint-time state.
     void apply(PlayerObject* p) const {
         if (!p || !valid) return;
 
-        p->setPosition(position);
+        #define X(type, name) p->name = name;
+        BOT_SNAPSHOT_FIELDS(X)
+        #undef X
+
+        // Restore the visual node transform last so it matches m_position.
+        p->setPosition(nodePosition);
         p->setRotation(rotation);
         p->setScaleX(scaleX);
         p->setScaleY(scaleY);
-
-        p->m_yVelocity           = yVelocity;
-        p->m_platformerXVelocity = platformerXVelocity;
-        p->m_gravity             = gravity;
-        p->m_speedMultiplier     = speedMultiplier;
-        p->m_playerSpeed         = playerSpeed;
-        p->m_gravityMod          = gravityMod;
-        p->m_yStart              = yStart;
-
-        p->m_isShip   = isShip;
-        p->m_isBird   = isBird;
-        p->m_isBall   = isBall;
-        p->m_isDart   = isDart;
-        p->m_isRobot  = isRobot;
-        p->m_isSpider = isSpider;
-        p->m_isSwing  = isSwing;
-
-        p->m_isUpsideDown = isUpsideDown;
-        p->m_isSideways   = isSideways;
-        p->m_isGoingLeft  = isGoingLeft;
-        p->m_isOnGround   = isOnGround;
-        p->m_isOnGround2  = isOnGround2;
-        p->m_isDashing    = isDashing;
-        p->m_isLocked     = isLocked;
-        p->m_isDead       = isDead;
-
-        p->m_platformerMovingLeft  = platformerMovingLeft;
-        p->m_platformerMovingRight = platformerMovingRight;
-
-        p->m_lastGroundedPos = lastGroundedPos;
     }
 };
 
@@ -547,7 +613,8 @@ public:
     // Our parallel checkpoint stack, kept in lock-step with m_checkpointArray.
     std::vector<CheckpointFrame> checkpoints;
 
-    // Weak handle to the floating UI (owned by the scene).
+    // The single persistent UI. Created once and retained for the app lifetime,
+    // then re-parented into whichever scene is active.
     BotUILayer* ui = nullptr;
 
     // Currently-loaded macro file name (without extension).
@@ -602,23 +669,47 @@ public:
         }
     }
 
+    // ----- global UI lifecycle --------------------------------------------
+    //
+    //  The menu is a single, retained, persistent layer that is re-parented to
+    //  whatever scene is currently active (done from each major layer's
+    //  onEnterTransitionDidFinish, see main.cpp). That makes it openable in any
+    //  scene -- main menu, level, pause menu, editor -- and immune to the old
+    //  "doesn't open after a pause/retry" bug, because it is never tied to a
+    //  PlayLayer that might get torn down.
+
+    // Defined out-of-line (needs the full BotUILayer definition).
+    void attachUIToCurrentScene();
+    void closeUI();
+
     // ----- gui pause / cursor / music -------------------------------------
 
     // Open/close the GUI: freeze the level, reveal the OS cursor, and pause the
-    // song. Closing reverses all three. The actual physics freeze is enforced by
-    // the GJBaseGameLayer hooks reading `guiPaused`.
+    // song. Closing reverses all three. The freeze + music only apply in a level;
+    // in a menu the GUI just shows. The physics freeze is enforced by the
+    // GJBaseGameLayer hooks reading `guiPaused`.
     void setGuiOpen(bool open) {
         guiPaused = open;
+        bool inLevel = PlayLayer::get() != nullptr;
         if (open) {
             PlatformToolbox::showCursor();
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->pauseAllMusic(true);
+            if (inLevel) {
+                if (auto fae = FMODAudioEngine::sharedEngine()) {
+                    fae->pauseAllMusic(true);
+                    m_pausedMusic = true;
+                }
+            }
         } else {
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
-            // GD hides the cursor during gameplay; only re-hide it if we are
-            // actually in a level (so we don't hide it back on a menu).
-            if (PlayLayer::get()) PlatformToolbox::hideCursor();
+            // Only resume music if WE were the ones who paused it.
+            if (m_pausedMusic) {
+                if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
+                m_pausedMusic = false;
+            }
+            // GD hides the cursor during gameplay; only re-hide it in a level.
+            if (inLevel) PlatformToolbox::hideCursor();
         }
     }
+    bool m_pausedMusic = false;
 
     // ----- time helpers ----------------------------------------------------
 
@@ -1413,24 +1504,27 @@ public:
     // --- keyboard: toggle the panel on K ----------------------------------
     void keyDown(cocos2d::enumKeyCodes key, double timing) override {
         auto& bot = BotManager::get();
-        switch (key) {
-            case bot::TOGGLE_KEY:                       // K -> toggle the menu
-                togglePanel();
-                return;
-            case cocos2d::enumKeyCodes::KEY_V:          // V -> arm/stop recording
-                bot.toggleRecording(GJBaseGameLayer::get());
-                refreshAll();
-                return;
-            case cocos2d::enumKeyCodes::KEY_B:          // B -> start/stop playback
-                bot.togglePlayback(GJBaseGameLayer::get());
-                refreshAll();
-                return;
-            case cocos2d::enumKeyCodes::KEY_N:          // N -> hard stop
-                bot.stop();
-                refreshAll();
-                return;
-            default:
-                break;
+        // K toggles the menu in ANY scene. The record/play/stop hotkeys only make
+        // sense inside a level, so they are gated on PlayLayer to avoid clashing
+        // with menu/editor shortcuts.
+        if (key == bot::TOGGLE_KEY) { togglePanel(); return; }
+        if (PlayLayer::get()) {
+            switch (key) {
+                case cocos2d::enumKeyCodes::KEY_V:      // V -> arm/stop recording
+                    bot.toggleRecording(GJBaseGameLayer::get());
+                    refreshAll();
+                    return;
+                case cocos2d::enumKeyCodes::KEY_B:      // B -> start/stop playback
+                    bot.togglePlayback(GJBaseGameLayer::get());
+                    refreshAll();
+                    return;
+                case cocos2d::enumKeyCodes::KEY_N:      // N -> hard stop
+                    bot.stop();
+                    refreshAll();
+                    return;
+                default:
+                    break;
+            }
         }
         CCLayer::keyDown(key, timing);
     }
@@ -1450,18 +1544,13 @@ public:
         }
     }
 
-    // Re-parent ourselves to the very top of the current running scene so the
-    // panel renders above the pause menu, other mods' overlays, everything.
+    // Bring the panel to the very top of whatever scene we are currently parented
+    // to, so it renders above the pause menu, other mods' overlays, everything.
+    // Actual (re-)parenting into the active scene is handled centrally by
+    // BotManager::attachUIToCurrentScene().
     void bringToFront() {
-        auto scene = CCDirector::sharedDirector()->getRunningScene();
-        if (!scene) return;
-        if (this->getParent() != scene) {
-            this->retain();
-            this->removeFromParentAndCleanup(false); // keep us (and our state) alive
-            scene->addChild(this, (std::numeric_limits<int>::max)());
-            this->release();
-        } else {
-            scene->reorderChild(this, (std::numeric_limits<int>::max)());
+        if (auto parent = this->getParent()) {
+            parent->reorderChild(this, (std::numeric_limits<int>::max)());
         }
     }
 
@@ -1857,4 +1946,30 @@ inline void BotManager::refreshUI() {
 
 inline void BotManager::refreshUIProgress() {
     if (ui) ui->refreshProgress();
+}
+
+// Create the persistent UI once (retained for the app lifetime) and make sure it
+// lives at the top of the currently-active scene. Called from the major layers'
+// onEnterTransitionDidFinish, so the menu follows you into every scene.
+inline void BotManager::attachUIToCurrentScene() {
+    auto scene = CCScene::get();
+    if (!scene) return;
+
+    if (!ui) {
+        ui = BotUILayer::create();
+        if (!ui) return;
+        ui->retain(); // we own it across scenes; never released
+    }
+
+    if (ui->getParent() != scene) {
+        ui->removeFromParentAndCleanup(false); // detach from the old (dying) scene
+        scene->addChild(ui, (std::numeric_limits<int>::max)());
+    } else {
+        scene->reorderChild(ui, (std::numeric_limits<int>::max)());
+    }
+}
+
+// Force the menu closed (used when entering a level so it never starts frozen).
+inline void BotManager::closeUI() {
+    if (ui) ui->setPanelVisible(false);
 }

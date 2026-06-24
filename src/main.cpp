@@ -38,6 +38,15 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/LevelEditorLayer.hpp>
+#include <Geode/modify/CreatorLayer.hpp>
+#include <Geode/modify/LevelBrowserLayer.hpp>
+#include <Geode/modify/LevelSelectLayer.hpp>
+#include <Geode/modify/LevelInfoLayer.hpp>
+#include <Geode/modify/LevelSearchLayer.hpp>
+#include <Geode/modify/GJGarageLayer.hpp>
+#include <Geode/modify/EditLevelLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
 
@@ -143,38 +152,21 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
 class $modify(BotPlayLayer, PlayLayer) {
 
-    // Per-instance bookkeeping kept on the layer itself.
-    struct Fields {
-        bool uiSpawned = false;
-    };
-
-    // ---- level init: reset state and spawn the floating UI ---------------
+    // ---- level init: reset transient bot state ---------------------------
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
-
-        auto& bot = BotManager::get();
-        bot.onLevelReset(this);
-
-        // Build the always-on-top GUI once and parent it high in the z-order so
-        // it floats above every gameplay layer. It owns its own keyboard
-        // delegate, so K toggles it regardless of what else has focus.
-        if (!m_fields->uiSpawned) {
-            spawnUI();
-            m_fields->uiSpawned = true;
-        }
-
+        BotManager::get().onLevelReset(this);
         return true;
     }
 
-    void spawnUI() {
-        auto ui = BotUILayer::create();
-        if (!ui) return;
-        // INT_MAX z-order -> above the gameplay, objects, and HUD.
-        this->addChild(ui, (std::numeric_limits<int>::max)());
-        BotManager::get().ui = ui;
-        ui->refreshAll();
+    // ---- scene is now live: attach the global menu + start unfrozen ------
+    void onEnterTransitionDidFinish() {
+        PlayLayer::onEnterTransitionDidFinish();
+        auto& bot = BotManager::get();
+        bot.attachUIToCurrentScene(); // follow the player into this scene
+        bot.closeUI();                // never start a level with the menu frozen
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -241,6 +233,12 @@ class $modify(BotPlayLayer, PlayLayer) {
 //
 class $modify(BotPauseLayer, PauseLayer) {
 
+    // Keep the menu reachable on top of the pause screen.
+    void onEnterTransitionDidFinish() {
+        PauseLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+
     void onRestart(CCObject* sender) {
         BotManager::get().onRestart(PlayLayer::get(), /*fromStart=*/true);
         PauseLayer::onRestart(sender);
@@ -249,6 +247,77 @@ class $modify(BotPauseLayer, PauseLayer) {
     void onRestartFull(CCObject* sender) {
         BotManager::get().onRestart(PlayLayer::get(), /*fromStart=*/true);
         PauseLayer::onRestartFull(sender);
+    }
+};
+
+// ============================================================================
+//  Universal scene hooks -- so the bot menu is reachable in EVERY scene, not
+//  just in a level. Each just re-attaches the single persistent UI once its
+//  scene is live. (CCScene::create has no Windows address, so we cannot hook the
+//  one universal point; instead we cover all the scene-root layers GD navigates
+//  through.)
+// ============================================================================
+
+class $modify(BotMenuLayer, MenuLayer) {
+    void onEnterTransitionDidFinish() {
+        MenuLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotEditorLayer, LevelEditorLayer) {
+    void onEnterTransitionDidFinish() {
+        LevelEditorLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotCreatorLayer, CreatorLayer) {
+    void onEnterTransitionDidFinish() {
+        CreatorLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotLevelBrowserLayer, LevelBrowserLayer) {
+    void onEnterTransitionDidFinish() {
+        LevelBrowserLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotLevelSelectLayer, LevelSelectLayer) {
+    void onEnterTransitionDidFinish() {
+        LevelSelectLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotLevelInfoLayer, LevelInfoLayer) {
+    void onEnterTransitionDidFinish() {
+        LevelInfoLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotLevelSearchLayer, LevelSearchLayer) {
+    void onEnterTransitionDidFinish() {
+        LevelSearchLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotGarageLayer, GJGarageLayer) {
+    void onEnterTransitionDidFinish() {
+        GJGarageLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
+    }
+};
+
+class $modify(BotEditLevelLayer, EditLevelLayer) {
+    void onEnterTransitionDidFinish() {
+        EditLevelLayer::onEnterTransitionDidFinish();
+        BotManager::get().attachUIToCurrentScene();
     }
 };
 
