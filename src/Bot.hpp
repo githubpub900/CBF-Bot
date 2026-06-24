@@ -1857,4 +1857,3 @@ inline void BotManager::refreshUI() {
 inline void BotManager::refreshUIProgress() {
     if (ui) ui->refreshProgress();
 }
-}
