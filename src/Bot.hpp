@@ -608,7 +608,7 @@ public:
     // song. Closing reverses all three. The actual physics freeze is enforced by
     // the GJBaseGameLayer hooks reading `guiPaused`.
 void setGuiOpen(bool open) {
-    guiPaused = open;   // ← actually respect the parameter
+    guiPaused = false; // never pause gameplay
 
     if (open) {
         PlatformToolbox::showCursor();
@@ -1450,7 +1450,7 @@ public:
     }
 
     // --- keyboard: toggle the panel on K ----------------------------------
-    void keyDown(cocos2d::enumKeyCodes key, double timing) override {
+    void keyDown(cocos2d::enumKeyCodes key) override {
         auto& bot = BotManager::get();
         switch (key) {
             case bot::TOGGLE_KEY:                       // K -> toggle the menu
@@ -1471,22 +1471,24 @@ public:
             default:
                 break;
         }
-        CCLayer::keyDown(key, timing);
+        CCLayer::keyDown(key);
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }
 
-  void setPanelVisible(bool v) {
-    m_visible = v;
-    if (m_panel) m_panel->setVisible(v);
+    void setPanelVisible(bool v) {
+        m_visible = v;
+        if (m_panel) m_panel->setVisible(v);
 
-    BotManager::get().setGuiOpen(v);   // ← pass the value
+        // Pause the level + show the cursor + pause music while open.
+        BotManager::get().setGuiOpen(v);
 
-    if (v) {
-        bringToFront();
-        refreshAll();
+        if (v) {
+            bringToFront(); // sit above every other layer / GUI
+            refreshAll();
+        }
     }
-}
+
     // Re-parent ourselves to the very top of the current running scene so the
     // panel renders above the pause menu, other mods' overlays, everything.
     void bringToFront() {

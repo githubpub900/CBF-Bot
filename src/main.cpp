@@ -72,21 +72,23 @@ class $modify(BotScene, CCScene) {
 
         auto& bot = BotManager::get();
 
-        // Don't destroy and recreate every time — reuse if possible
         if (!bot.ui) {
             auto ui = BotUILayer::create();
+
             if (ui) {
                 bot.ui = ui;
                 this->addChild(ui, 999999);
             }
-        } else if (bot.ui->getParent() != this) {
-            bot.ui->removeFromParentAndCleanup(false);
-            this->addChild(bot.ui, 999999);
         }
+        else if (bot.ui->getParent() != this) {
+            bot.ui->retain();
 
-        if (bot.ui) {
-            bot.ui->bringToFront();  // ensure it's on top
-            bot.ui->refreshAll();
+            if (bot.ui->getParent())
+                bot.ui->removeFromParentAndCleanup(false);
+
+            this->addChild(bot.ui, 999999);
+
+            bot.ui->release();
         }
     }
 };
@@ -188,15 +190,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         }
 
         return true;
-    }
-
-    void spawnUI() {
-        auto ui = BotUILayer::create();
-        if (!ui) return;
-        // INT_MAX z-order -> above the gameplay, objects, and HUD.
-        this->addChild(ui, (std::numeric_limits<int>::max)());
-        BotManager::get().ui = ui;
-        ui->refreshAll();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
