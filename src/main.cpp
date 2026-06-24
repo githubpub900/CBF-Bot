@@ -353,7 +353,12 @@ $on_mod(Loaded) {
             break;
     }
 
-    log::info("[Bot] Geode Time Macro loaded. Press K in a level to open the menu.");
+    log::info("[Bot] Geode Time Macro loaded. Press K anywhere to open the menu.");
+
+    // If a scene is already running (e.g., the mod was hot-loaded or the game
+    // was already past the loading screen), create and attach the UI immediately.
+    // For cold-start, the onEnter() hooks on MenuLayer/PlayLayer handle it.
+    BotManager::get().attachUIToCurrentScene();
 }
 
 // Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
