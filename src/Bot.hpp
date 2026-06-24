@@ -715,10 +715,17 @@ void applyAudioSpeed() {
 
     float s = static_cast<float>(speedMultiplier());
 
-    // Safely check if the underlying FMOD music channel group exists
-    if (engine->m_musicChannelGroup) {
-        // FMOD's native function handles changing the playback rate/speed
-        engine->m_musicChannelGroup->setPitch(s);
+    // 1. Get the raw FMOD system pointer from the engine
+    FMOD::System* fmodSystem = engine->m_system;
+    if (!fmodSystem) return;
+
+    // 2. Fetch the Master Channel Group (which contains the level music)
+    FMOD::ChannelGroup* masterGroup = nullptr;
+    fmodSystem->getMasterChannelGroup(&masterGroup);
+
+    // 3. Set the pitch (speed) globally on that channel group
+    if (masterGroup) {
+        masterGroup->setPitch(s);
     }
 }
     // Stamp the current level's identity into the macro so we can later detect a
