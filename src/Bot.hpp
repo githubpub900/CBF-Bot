@@ -710,12 +710,13 @@ void setGuiOpen(bool open) {
 // speedhack audio
 
 void applyAudioSpeed() {
-    auto gm = GameManager::sharedState();
-    if (!gm) return;
+    auto engine = FMODAudioEngine::sharedEngine();
+    if (!engine) return;
 
     float s = static_cast<float>(speedMultiplier());
 
-    gm->m_timeWarp = s;
+    // This is the direct binding to change music speed/warp in GD 2.2+
+    engine->setBackgroundMusicTimeWarp(s);
 }
     // Stamp the current level's identity into the macro so we can later detect a
     // macro being played on the wrong level.
