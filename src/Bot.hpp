@@ -710,12 +710,12 @@ void setGuiOpen(bool open) {
 // speedhack audio
 
 void applyAudioSpeed() {
-    auto engine = FMODAudioEngine::sharedEngine();
-    if (!engine) return;
+    auto gm = GameManager::sharedState();
+    if (!gm) return;
 
     float s = static_cast<float>(speedMultiplier());
 
-    engine->m_fMusicPitch = s;
+    gm->m_timeWarp = s;
 }
     // Stamp the current level's identity into the macro so we can later detect a
     // macro being played on the wrong level.
