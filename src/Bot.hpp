@@ -1004,21 +1004,33 @@ public:
     }
 
     // ----- speedhack audio ------------------------------------------------
-    // Push the current speedhack multiplier onto the music so the song plays
-    // at the same speed as the physics. GD's own FMODAudioEngine exposes
-    // setSpeedEffect() for exactly this (it's what practice mode uses), and it
-    // works regardless of how the underlying FMOD channel/channel-group is
-    // named in this build's bindings. SFX are left untouched.
+    // Push the current speedhack multiplier onto FMOD's master channel group
+    // so the entire audio mix (music + SFX) plays at the same speed as the
+    // physics. We talk to FMOD directly through FMODAudioEngine::m_system --
+    // which is present in every Geode binding -- rather than relying on any
+    // GD-named convenience method (setSpeedEffect / m_musicChannel / etc),
+    // which shift between SDK checkouts.
+    //
+    // Note: pitching the MASTER group pitches both music AND SFX. That is
+    // intentional here -- it keeps the whole game mix in lockstep with the
+    // speedhack, which is what most users expect when they crank the speed.
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
-        if (!fae) return;
+        if (!fae || !fae->m_system) return;
+
         // Only pitch when speedhack is on AND we are actually inside a level,
-        // so menu music keeps playing at normal speed after we exit.
+        // so menu audio returns to normal the moment we exit.
         bool inLevel = (PlayLayer::get() != nullptr);
         float pitch = (speedhackEnabled && inLevel &&
                        std::isfinite(speed) && speed > 0.0)
-                      ? static_cast<float>(speed) : 1.0f;
-        fae->setSpeedEffect(pitch);
+                      ? static_cast<float>(speedMultiplier())
+                      : 1.0f;
+
+        FMOD::ChannelGroup* masterGroup = nullptr;
+        if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
+            masterGroup) {
+            masterGroup->setPitch(pitch);
+        }
     }
 
     // Write the current options to the mod's saved values. Called whenever an
