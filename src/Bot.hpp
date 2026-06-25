@@ -608,14 +608,12 @@ public:
     // song. Closing reverses all three. The actual physics freeze is enforced by
     // the GJBaseGameLayer hooks reading `guiPaused`.
     void setGuiOpen(bool open) {
-        guiPaused = open;
+        // Gameplay keeps running while the GUI is open -- no freeze, no music
+        // pause. We only toggle the OS cursor so the user can click the panel.
+        guiPaused = false;
         if (open) {
             PlatformToolbox::showCursor();
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->pauseAllMusic(true);
         } else {
-            if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
-            // GD hides the cursor during gameplay; only re-hide it if we are
-            // actually in a level (so we don't hide it back on a menu).
             if (PlayLayer::get()) PlatformToolbox::hideCursor();
         }
     }
@@ -823,9 +821,14 @@ public:
         double t = levelTime(gl);
         if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
             truncateAfter(t);
-            // The game holds no buttons immediately after a reset, so our held
-            // tracker must match (otherwise the next real press looks redundant).
-            resetHeldState();
+            // RECOMPUTE (not reset) held state from the surviving events.
+            // resetHeldState() was wrong: it set everything to false, so if a
+            // button was held at the checkpoint time, the next release would
+            // be dropped as "redundant" (heldState=false == down=false),
+            // leaving an unbalanced press with no matching release.
+            // recomputeHeldState() replays the remaining events and sets
+            // heldState to what it actually was at time t.
+            recomputeHeldState();
         }
         m_lastRecordTime = t;
     }
@@ -1045,7 +1048,7 @@ public:
             masterGroup->setPitch(1.0f);
         }
     }
-    
+
     // Write the current options to the mod's saved values. Called whenever an
     // option changes (there is no on-unload event in Geode, so we persist eagerly).
     void persist() {
@@ -1681,30 +1684,24 @@ public:
         }
     }
 
-    // Push every toggler's visual state from the source-of-truth bools, but
-    // ONLY when it is actually out of sync. CCMenuItemToggler::activate() has
-    // already flipped the visual by the time our callback runs, so blindly
-    // calling toggle(state) on every refresh used to double-flip toggles and
-    // make them desync / visually cross-activate each other.
+    // Push every toggler's visual to match our bools. Only called on panel
+    // open / refreshAll -- never from a toggler's own callback. toggle(bool)
+    // SETS the state (not flips), so this is idempotent.
     void syncToggles() {
         auto& bot = BotManager::get();
         syncModeToggles();
-        if (m_speedToggle     && m_speedToggle->isToggled()     != bot.speedhackEnabled)   m_speedToggle->toggle(bot.speedhackEnabled);
-        if (m_practiceToggle  && m_practiceToggle->isToggled()  != bot.practiceFixEnabled) m_practiceToggle->toggle(bot.practiceFixEnabled);
-        if (m_deadToggle      && m_deadToggle->isToggled()      != bot.discardDeadInputs)  m_deadToggle->toggle(bot.discardDeadInputs);
-        if (m_autoSaveToggle  && m_autoSaveToggle->isToggled()  != bot.autoSaveOnComplete) m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
+        if (m_speedToggle)      m_speedToggle->toggle(bot.speedhackEnabled);
+        if (m_practiceToggle)   m_practiceToggle->toggle(bot.practiceFixEnabled);
+        if (m_deadToggle)       m_deadToggle->toggle(bot.discardDeadInputs);
+        if (m_autoSaveToggle)   m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
     }
 
-    // Record / Play are driven by `mode`, not by a saved bool, so they need to
-    // be re-synced whenever the mode changes (record button, play button, V/B
-    // keys, level reset, etc.). Kept separate from syncToggles so clicking
-    // Record does not poke the option toggles.
     void syncModeToggles() {
         auto& bot = BotManager::get();
         bool const rec  = bot.mode == bot::Mode::Recording;
         bool const play = bot.mode == bot::Mode::Playing;
-        if (m_recordToggle && m_recordToggle->isToggled() != rec)  m_recordToggle->toggle(rec);
-        if (m_playToggle   && m_playToggle->isToggled()   != play) m_playToggle->toggle(play);
+        if (m_recordToggle) m_recordToggle->toggle(rec);
+        if (m_playToggle)   m_playToggle->toggle(play);
     }
 
 private:
@@ -1900,35 +1897,29 @@ private:
         syncModeToggles();
         refreshProgress();
     }
-    // Each option callback flips its OWN source-of-truth bool, then forces that
-    // one toggler's visual to match (toggle(bool) does not fire the selector).
-    // This is deterministic regardless of how CCMenuItemToggler::activate orders
-    // its own flip vs. the callback, it never touches the other toggles, and it
-    // always persists -- so checkmarks no longer desync, uncheck siblings, or fail
-    // to save.
-        // Each option callback: activate() has ALREADY flipped the toggler's
-    // visual, so we just READ the new visual state and copy it into our bool.
-    // We never call toggle() here, so there is no chance of a double-flip and
-    // no chance of cascading into the other toggles. persist() saves it.
+       // Each callback: activate() has ALREADY flipped the visual. We just flip
+    // our bool to match and persist. We do NOT call toggle() here -- doing so
+    // can double-flip on some Geode versions where toggle() doesn't have an
+    // early-return guard. syncToggles() on next panel open will fix any drift.
     void onSpeedToggle(CCObject*) {
         auto& bot = BotManager::get();
-        bot.speedhackEnabled = m_speedToggle->isToggled();
+        bot.speedhackEnabled = !bot.speedhackEnabled;
         bot.persist();
-        bot.applyMusicSpeed(); // keep music pitch in sync with the new state
+        bot.applyMusicSpeed();
     }
     void onPracticeFix(CCObject*) {
         auto& bot = BotManager::get();
-        bot.practiceFixEnabled = m_practiceToggle->isToggled();
+        bot.practiceFixEnabled = !bot.practiceFixEnabled;
         bot.persist();
     }
     void onDeadInputs(CCObject*) {
         auto& bot = BotManager::get();
-        bot.discardDeadInputs = m_deadToggle->isToggled();
+        bot.discardDeadInputs = !bot.discardDeadInputs;
         bot.persist();
     }
     void onAutoSave(CCObject*) {
         auto& bot = BotManager::get();
-        bot.autoSaveOnComplete = m_autoSaveToggle->isToggled();
+        bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
         bot.persist();
     }
     void onSave(CCObject*) {
