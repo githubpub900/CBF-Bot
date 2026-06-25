@@ -79,21 +79,6 @@
 
 using namespace geode::prelude;
 
-// GD's PlayerButtonCommand struct (layout-compatible with CBF's).
-// Used by PlayLayer::m_queuedButtons for Click Between Steps / CBF.
-enum class PlayerButton : int {
-    Jump  = 1,
-    Left  = 2,
-    Right = 3,
-};
-
-struct PlayerButtonCommand {
-    PlayerButton m_button;    // enum: Jump=1, Left=2, Right=3
-    bool m_isPush;
-    bool m_isPlayer2;
-    float m_timestamp;        // ← NOTE: float, not double
-};
-
 // ============================================================================
 // ============================================================================
 //
@@ -322,17 +307,14 @@ struct InputEvent {
     }
 };
 
-// Directly force a CCMenuItemToggler's internal state + visual to match a
-// desired bool. The key insight: CCMenuItemToggler has an internal `m_on`
-// field (Geode uses cocos2d-iphone bindings, so it's `m_on`, not `m_bIsOn`).
-// When the user clicks, activate() runs toggle(!m_on) -- if m_on doesn't
-// match the visible state, the flip goes the wrong way and the toggler
-// desyncs from our bool. We must keep m_on in sync with the visual.
+// Directly force a CCMenuItemToggler's visual + internal state to match a
+// desired bool. We use toggle(bool), which is a SETTER (not a flipper) --
+// it sets m_on and updates button visibility. It's idempotent: calling
+// toggle(true) when already on is a no-op. This is the intended API for
+// syncing toggler state from outside a click callback.
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
-    t->m_on = on;                                    // sync internal state
-    if (t->m_onButton)  t->m_onButton->setVisible(on);
-    if (t->m_offButton) t->m_offButton->setVisible(!on);
+    t->toggle(on);
 }
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
@@ -1012,17 +994,17 @@ public:
 
             // Push to m_queuedButtons. The timestamp format must match what
             // CBF expects: a wall-clock time comparable to its currentFrameTime.
-            PlayerButtonCommand cmd;
-            cmd.m_button = static_cast<PlayerButton>(e.button);
-            cmd.m_isPush = e.down;
-            cmd.m_isPlayer2 = e.player2;
-            cmd.m_timestamp = static_cast<float>(inputWallTime);
-            pl->m_queuedButtons.push_back(cmd);
-
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                static_cast<float>(inputWallTime)
+            });
+            
             ++playbackIndex;
         }
     }
-    
+
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
         auto gl = GJBaseGameLayer::get();
