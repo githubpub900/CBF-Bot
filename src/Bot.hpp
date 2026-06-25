@@ -302,16 +302,17 @@ struct InputEvent {
     }
 };
 
-// Directly force a CCMenuItemToggler's visual + internal state to match a
-// desired bool. Bypasses toggle(bool) entirely, which is unreliable on some
-// Geode v5 builds (can double-flip, fail to update the visual, or fire the
-// selector). We set m_bIsOn + button visibility directly, so there is no
-// ambiguity.
+// Directly force a CCMenuItemToggler's visual state to match a desired bool.
+// We bypass toggle(bool) entirely (unreliable on some Geode v5 builds) and
+// set button visibility directly. We don't touch the internal bool field
+// (its name varies across binding versions: m_bIsOn / m_on / etc.), because
+// activate() already keeps it in sync when the user clicks, and the only
+// thing the user actually SEES is which button is visible.
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
-    t->m_bIsOn = on;
-    if (t->m_offButton) t->m_offButton->setVisible(!on);
+    // m_onButton shows the "checked" state; m_offButton shows the "unchecked".
     if (t->m_onButton)  t->m_onButton->setVisible(on);
+    if (t->m_offButton) t->m_offButton->setVisible(!on);
 }
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
@@ -790,6 +791,12 @@ public:
         }
     }
 
+    // Snap a timestamp onto RobTop's ~480 FPS input grid.
+    static double quantizeRobTop(double t) {
+        double step = 1.0 / bot::ROBTOP_CBS_FPS;
+        return std::round(t / step) * step;
+    }
+
     // ----- recording -------------------------------------------------------
 
     // Called from the handleButton hook. Records a transition tagged with the
@@ -924,10 +931,10 @@ public:
             // compensate for any sub-frame timing drift. This is what gives
             // true CBF-level accuracy -- even if the input fires a fraction
             // of a sub-step late, the position snap corrects it instantly.
-            if (stateAlignEnabled && e.hasState) {
+             if (stateAlignEnabled && e.hasState) {
                 if (auto pl = PlayLayer::get()) {
-                    if (pl->m_player1) pl->m_player1->setPosition(e.p1x, e.p1y);
-                    if (pl->m_player2) pl->m_player2->setPosition(e.p2x, e.p2y);
+                    if (pl->m_player1) pl->m_player1->setPosition({ e.p1x, e.p1y });
+                    if (pl->m_player2) pl->m_player2->setPosition({ e.p2x, e.p2y });
                 }
             }
 
