@@ -185,11 +185,21 @@ class $modify(BotPlayLayer, PlayLayer) {
         // Build the always-on-top GUI once and parent it high in the z-order so
         // it floats above every gameplay layer. It owns its own keyboard
         // delegate, so K toggles it regardless of what else has focus.
-        if (!m_fields->uiSpawned) {
-            m_fields->uiSpawned = true;
-        }
+if (!m_fields->uiSpawned) {
+    m_fields->uiSpawned = true;
+    spawnUI();  // <-- add this line
+}
 
         return true;
+    }
+
+    void spawnUI() {
+        auto ui = BotUILayer::create();
+        if (!ui) return;
+        // INT_MAX z-order -> above the gameplay, objects, and HUD.
+        this->addChild(ui, (std::numeric_limits<int>::max)());
+        BotManager::get().ui = ui;
+        ui->refreshAll();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------

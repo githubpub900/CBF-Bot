@@ -1437,7 +1437,6 @@ public:
         // Touches: we register our own targeted delegate (see
         // registerWithTouchDispatcher) so the panel can swallow background clicks
         // and be dragged without leaking input to the gameplay underneath.
-        cocos2d::CCDirector::sharedDirector()->getKeyboardDispatcher()->addDelegate(this);
         this->setTouchEnabled(true);
         this->setTouchMode(cocos2d::kCCTouchesOneByOne);
         this->setZOrder((std::numeric_limits<int>::max)());
@@ -1451,7 +1450,7 @@ public:
     }
 
     // --- keyboard: toggle the panel on K ----------------------------------
-    void keyDown(cocos2d::enumKeyCodes key, double timing) override {
+  void keyDown(cocos2d::enumKeyCodes key) override {
         auto& bot = BotManager::get();
         switch (key) {
             case bot::TOGGLE_KEY:                       // K -> toggle the menu
@@ -1472,7 +1471,7 @@ public:
             default:
                 break;
         }
-        CCLayer::keyDown(key, timing);
+        CCLayer::keyDown(key);
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }
