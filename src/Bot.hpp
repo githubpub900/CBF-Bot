@@ -1440,7 +1440,7 @@ public:
         this->scheduleUpdate();
         return true;
     }
-    
+
     // --- survive scene transitions ---------------------------------------
     // When the scene the UI is parented to gets destroyed (menu -> level,
     // level -> pause, etc.), cocos2d recursively calls cleanup() on every
@@ -1459,11 +1459,11 @@ public:
     void cleanup() override {
         m_pParent = nullptr;
         // Still recursively clean up our own children so their scheduled
-        // callbacks / delegates don't leak.
+        // callbacks / delegates don't leak. Geode v5 removed CCARRAY_FOREACH
+        // in favor of CCArrayExt, which works as a range-based-for wrapper.
         if (m_pChildren && m_pChildren->count() > 0) {
-            cocos2d::CCObject* child;
-            CCARRAY_FOREACH(m_pChildren, child) {
-                static_cast<cocos2d::CCNode*>(child)->cleanup();
+            for (auto* child : geode::cocos::CCArrayExt<cocos2d::CCNode*>(m_pChildren)) {
+                if (child) child->cleanup();
             }
         }
     }
