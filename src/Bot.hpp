@@ -1033,6 +1033,19 @@ public:
         }
     }
 
+    // Reset the master channel group pitch to 1.0. Called from
+    // PlayLayer::onExit so menu music plays at normal speed after leaving
+    // a level where the speedhack was active.
+    void resetAudioPitch() {
+        auto fae = FMODAudioEngine::sharedEngine();
+        if (!fae || !fae->m_system) return;
+        FMOD::ChannelGroup* masterGroup = nullptr;
+        if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
+            masterGroup) {
+            masterGroup->setPitch(1.0f);
+        }
+    }
+    
     // Write the current options to the mod's saved values. Called whenever an
     // option changes (there is no on-unload event in Geode, so we persist eagerly).
     void persist() {
@@ -1494,6 +1507,23 @@ public:
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }
+
+    // Explicitly parent ourselves to the current running scene. Called from
+    // the CCKeyboardDispatcher hook when K is pressed, so the UI is guaranteed
+    // to be in the scene (and therefore rendered + receiving onEnter) before
+    // we toggle it visible. This replaces the reparenting logic that used to
+    // live in update() -- which was unreliable because scheduleUpdate() on a
+    // parentless node doesn't always fire.
+    void ensureInScene() {
+        auto scene = CCDirector::sharedDirector()->getRunningScene();
+        if (!scene) return;
+        if (this->getParent() != scene) {
+            this->retain();
+            this->removeFromParentAndCleanup(false); // keep children + state
+            scene->addChild(this, (std::numeric_limits<int>::max)());
+            this->release();
+        }
+    }
 
     void setPanelVisible(bool v) {
         m_visible = v;

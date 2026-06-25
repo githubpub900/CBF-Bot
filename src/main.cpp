@@ -40,6 +40,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
 
 using namespace geode::prelude;
 
@@ -100,6 +101,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // In the rare case a CBF build does not route through processCommands every
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
+
     void update(float dt) {
         // Freeze gameplay while the GUI is open (our own pause -- no menu).
         if (isPlay(this) && BotManager::get().guiPaused) {
@@ -107,12 +109,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
-            // Detect restarts / respawns (level clock jumping backwards) so a
-            // re-recorded attempt overwrites the superseded inputs instead of
-            // appending them.
             BotManager::get().syncRecordingToTime(this);
             BotManager::get().fireDueInputs(this);
         }
+        // Drive the speedhack audio pitch from here -- this fires every
+        // gameplay frame, so the master channel group stays in sync with
+        // bot.speed. applyMusicSpeed() internally checks PlayLayer::get()
+        // and bot.speedhackEnabled, so it's a no-op when neither is active.
+        BotManager::get().applyMusicSpeed();
     }
 
     // ---- frame-rate independent speedhack --------------------------------
@@ -197,6 +201,58 @@ class $modify(BotPlayLayer, PlayLayer) {
     void levelComplete() {
         BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
+    }
+
+    // ---- leaving the level: reset audio pitch so menu music is normal ----
+    void onExit() {
+        PlayLayer::onExit();
+        BotManager::get().resetAudioPitch();
+    }
+};
+
+// ============================================================================
+//  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen
+// ============================================================================
+//
+//  The floating BotUILayer relies on scheduleUpdate() + onEnter() to register
+//  its keyboard delegate, which is fragile across scene transitions. Hooking
+//  the dispatcher directly is bulletproof: K opens the menu on the main menu,
+//  in the editor, inside a level, and while paused.
+//
+class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool idk) {
+        if (down) {
+            auto& bot = BotManager::get();
+
+            // K -> toggle the GUI (works on every screen)
+            if (key == bot::TOGGLE_KEY) {
+                if (bot.ui) {
+                    bot.ui->ensureInScene();   // make sure we're parented to the current scene
+                    bot.ui->togglePanel();
+                }
+                return true; // swallow K so it never reaches gameplay
+            }
+
+            // V / B / N only make sense during gameplay
+            if (PlayLayer::get()) {
+                switch (key) {
+                    case cocos2d::enumKeyCodes::KEY_V:
+                        bot.toggleRecording(GJBaseGameLayer::get());
+                        if (bot.ui) bot.ui->refreshAll();
+                        return true;
+                    case cocos2d::enumKeyCodes::KEY_B:
+                        bot.togglePlayback(GJBaseGameLayer::get());
+                        if (bot.ui) bot.ui->refreshAll();
+                        return true;
+                    case cocos2d::enumKeyCodes::KEY_N:
+                        bot.stop();
+                        if (bot.ui) bot.ui->refreshAll();
+                        return true;
+                    default: break;
+                }
+            }
+        }
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, idk);
     }
 };
 
