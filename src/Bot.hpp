@@ -1290,14 +1290,19 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // Use frame-start anchors (captured in CCScheduler::update BEFORE CBF).
-        // This aligns our timestamps with CBF's currentFrameTime/lastFrameTime.
         double currentFrameTime = m_frameStartWall;
         double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameLevel = m_frameStartLevel;
-
-        // This frame advances level time by: m_prevFrameDelta * speed
         double frameLevelAdvance = m_prevFrameDelta * speed;
+
+        // Safety margin: 2% of frame time. This keeps timestamps AWAY from
+        // the frame boundaries (lastFrameTime and currentFrameTime), so CBF
+        // always processes them this frame instead of sometimes deferring.
+        // The randomness was caused by timestamps landing exactly on
+        // currentFrameTime — CBF would sometimes process, sometimes defer.
+        double safetyMargin = m_prevFrameDelta * 0.02;
+        double safeLow  = lastFrameTime + safetyMargin;
+        double safeHigh = currentFrameTime - safetyMargin;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
@@ -1316,13 +1321,12 @@ public:
                 continue;
             }
 
-            // Convert level time to wall-clock within CBF's frame window.
-            // inputWall = lastFrameTime + levelDelta / speed
+            // Convert level time to wall-clock
             double inputWallTime = lastFrameTime + levelDelta / speed;
 
-            // Clamp to CBF's frame window
-            if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
-            if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
+            // Clamp to SAFE interior of CBF's frame window (away from edges)
+            if (inputWallTime < safeLow)  inputWallTime = safeLow;
+            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
 
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
