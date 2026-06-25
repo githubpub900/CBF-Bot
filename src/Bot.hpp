@@ -312,11 +312,10 @@ struct InputEvent {
     }
 };
 
-// Directly force a CCMenuItemToggler's visual + internal state to match a
-// desired bool. We use toggle(bool), which is a SETTER (not a flipper) --
-// it sets m_on and updates button visibility. It's idempotent: calling
-// toggle(true) when already on is a no-op. This is the intended API for
-// syncing toggler state from outside a click callback.
+// Directly force a CCMenuItemToggler's internal state + visual to match a
+// desired bool. The binding (CCMenuItemToggler.cpp) shows the field is
+// `m_toggled`, and toggle(bool) is the public setter that updates it + the
+// button visibility. We use toggle(bool) directly — it's idempotent.
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
     t->toggle(on);
@@ -372,6 +371,70 @@ struct PlayerSnapshot {
     bool platformerMovingLeft = false;
     bool platformerMovingRight = false;
 
+        // Velocity / physics state
+    double m_xVelocity = 0.0;
+    double m_slopeVelocity = 0.0;
+    double m_slopeStartTime = 0.0;
+    float  m_rotateSpeed = 1.0f;
+    float  m_rotationSpeed = 0.f;
+    float  m_vehicleSize = 1.f;
+    float  m_playerSpeed = 0.9f;
+    double m_totalTime = 0.0;
+    double m_gameModeChangedTime = 0.0;
+    double m_lastFlipTime = 0.0;
+    double m_lastSpiderFlipTime = 0.0;
+    double m_lastLandTime = 0.0;
+    double m_yStart = 0.0;
+
+    // State flags
+    bool m_isRotating = false;
+    bool m_isBallRotating = false;
+    bool m_isBallRotating2 = false;
+    bool m_isCurrentSlopeTop = false;
+    bool m_slopeFlipGravityRelated = false;
+    bool m_wasOnSlope = false;
+    bool m_isOnSlope = false;
+    bool m_isOnSlope2 = false;  // may not exist, see note
+    bool m_isOnGround4 = false;
+    bool m_isHidden = false;
+    bool m_isPlatformer = false;
+    bool m_isAccelerating = false;
+    bool m_affectedByForces = false;
+    bool m_jumpBuffered = false;
+    bool m_stateJumpBuffered = false;
+    bool m_stateRingJump = false;
+    bool m_stateRingJump2 = false;
+    bool m_wasTeleported = false;
+    bool m_ringJumpRelated = false;
+    bool m_maybeSpriteRelated = false;
+    bool m_isDontBoostX = false;
+    bool m_isDontBoostY = false;
+    bool m_stateBoostX = false;
+    bool m_stateBoostY = false;
+
+    // Collision state
+    int m_lastCollisionBottom = -1;
+    int m_lastCollisionTop = -1;
+    int m_lastCollisionLeft = -1;
+    int m_lastCollisionRight = -1;
+    int m_stateOnGround = 0;
+    int m_stateHitHead = 0;
+    int m_stateFlipGravity = 0;
+    int m_stateForce = 0;
+    int m_stateDartSlide = 0;
+    int m_stateNoAutoJump = 0;
+    int m_stateScale = 0;
+    cocos2d::CCPoint m_stateForceVector {0.f, 0.f};
+
+    // Gamemode-specific
+    bool m_isShip = false;
+    bool m_isBird = false;
+    bool m_isBall = false;
+    bool m_isDart = false;
+    bool m_isRobot = false;
+    bool m_isSpider = false;
+    bool m_isSwing = false;
+
     cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
 
     // Capture every field above out of a live PlayerObject.
@@ -413,6 +476,69 @@ struct PlayerSnapshot {
         platformerMovingRight = p->m_platformerMovingRight;
 
         lastGroundedPos = p->m_lastGroundedPos;
+
+                // Velocity / physics
+        m_xVelocity = p->m_xVelocity;
+        m_slopeVelocity = p->m_slopeVelocity;
+        m_slopeStartTime = p->m_slopeStartTime;
+        m_rotateSpeed = p->m_rotateSpeed;
+        m_rotationSpeed = p->m_rotationSpeed;
+        m_vehicleSize = p->m_vehicleSize;
+        m_playerSpeed = p->m_playerSpeed;
+        m_totalTime = p->m_totalTime;
+        m_gameModeChangedTime = p->m_gameModeChangedTime;
+        m_lastFlipTime = p->m_lastFlipTime;
+        m_lastSpiderFlipTime = p->m_lastSpiderFlipTime;
+        m_lastLandTime = p->m_lastLandTime;
+        m_yStart = p->m_yStart;
+
+        // State flags
+        m_isRotating = p->m_isRotating;
+        m_isBallRotating = p->m_isBallRotating;
+        m_isBallRotating2 = p->m_isBallRotating2;
+        m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
+        m_slopeFlipGravityRelated = p->m_slopeFlipGravityRelated;
+        m_wasOnSlope = p->m_wasOnSlope;
+        m_isOnSlope = p->m_isOnSlope;
+        // m_isOnSlope2 may not exist — comment out if compile error
+        // m_isOnGround4 = p->m_isOnGround4;
+        m_isHidden = p->m_isHidden;
+        m_isPlatformer = p->m_isPlatformer;
+        m_isAccelerating = p->m_isAccelerating;
+        m_affectedByForces = p->m_affectedByForces;
+        m_jumpBuffered = p->m_jumpBuffered;
+        m_stateJumpBuffered = p->m_stateJumpBuffered;
+        m_stateRingJump = p->m_stateRingJump;
+        m_stateRingJump2 = p->m_stateRingJump2;
+        m_wasTeleported = p->m_wasTeleported;
+        m_ringJumpRelated = p->m_ringJumpRelated;
+        m_maybeSpriteRelated = p->m_maybeSpriteRelated;
+        m_isDontBoostX = p->m_isDontBoostX;
+        m_isDontBoostY = p->m_isDontBoostY;
+
+        // Collision state
+        m_lastCollisionBottom = p->m_lastCollisionBottom;
+        m_lastCollisionTop = p->m_lastCollisionTop;
+        m_lastCollisionLeft = p->m_lastCollisionLeft;
+        m_lastCollisionRight = p->m_lastCollisionRight;
+        m_stateOnGround = p->m_stateOnGround;
+        m_stateHitHead = p->m_stateHitHead;
+        m_stateFlipGravity = p->m_stateFlipGravity;
+        m_stateForce = p->m_stateForce;
+        m_stateDartSlide = p->m_stateDartSlide;
+        m_stateNoAutoJump = p->m_stateNoAutoJump;
+        m_stateScale = p->m_stateScale;
+        m_stateForceVector = p->m_stateForceVector;
+
+        // Gamemode
+        m_isShip = p->m_isShip;
+        m_isBird = p->m_isBird;
+        m_isBall = p->m_isBall;
+        m_isDart = p->m_isDart;
+        m_isRobot = p->m_isRobot;
+        m_isSpider = p->m_isSpider;
+        m_isSwing = p->m_isSwing;
+        
     }
 
     // Push every captured field back into a live PlayerObject. Called *after*
@@ -965,7 +1091,7 @@ public:
     //
     // This is called from our getModifiedDelta hook (which runs BEFORE CBF's
     // hook) so the inputs are in the queue before CBF processes them.
-        void pushDueInputsToCBF() {
+            void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -976,28 +1102,26 @@ public:
         double currentLevelTime = levelTime(pl);
         double speed = speedMultiplier();
 
-        // Look-ahead window: one frame's worth of time. CBF will only process
-        // inputs with timestamps <= currentFrameTime, so any inputs we push
-        // beyond that stay in the queue for the next frame.
-        // Use CCDirector's animation interval as the frame duration.
-        float animInterval = CCDirector::sharedDirector()->getAnimationInterval();
-        double lookAhead = std::max(0.016, static_cast<double>(animInterval) * 2.0);
+        // CBF's frame window is [lastFrameTime, currentFrameTime].
+        // currentFrameTime was set at frame start (very recently, ~now).
+        // lastFrameTime = currentFrameTime - frameDelta (from previous frame).
+        // We approximate lastFrameTime as currentWallTime - actualDelta.
+        float directorDelta = CCDirector::sharedDirector()->getActualDeltaTime();
+        double lastFrameTime = currentWallTime - static_cast<double>(directorDelta);
+
+        // The input fires when m_levelTime reaches e.time.
+        // This frame advances m_levelTime by (directorDelta * speed).
+        // So the input fires at wall-time: lastFrameTime + (e.time - currentLevelTime) / speed
+        // ...but only if e.time is within [currentLevelTime, currentLevelTime + frameLevelAdvance]
+        double frameLevelAdvance = static_cast<double>(directorDelta) * speed;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
 
-            // Convert level time to wall-clock time:
-            // The input fires when level time reaches e.time.
-            // At current speed, that takes (e.time - currentLevelTime) / speed
-            // seconds of wall-clock time from now.
-            double inputWallTime = currentWallTime +
-                (e.time - currentLevelTime) / speed;
+            double levelDelta = e.time - currentLevelTime;
 
-            // If beyond look-ahead, stop — CBF will pick it up next frame.
-            if (inputWallTime > currentWallTime + lookAhead) break;
-
-            // If past due (e.g. after checkpoint load), fire directly as fallback.
-            if (inputWallTime < currentWallTime - 0.001) {
+            // If this input is in the past, fire it directly (rare)
+            if (levelDelta < -0.0001) {
                 injecting = true;
                 pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
                 injecting = false;
@@ -1005,18 +1129,20 @@ public:
                 continue;
             }
 
-            // PlayerButtonCommand layout: { button, isPush, isPlayer2, step, timestamp }
-            // m_step is GD's own CBS step index — irrelevant for CBF, set to 0.
-            // m_timestamp MUST be a double in the same units as CBF's
-            // currentFrameTime (seconds since boot via clock_gettime_nsec_np).
+            // If this input is beyond this frame, stop
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            // Compute the wall-clock time within CBF's frame window
+            double inputWallTime = lastFrameTime + levelDelta / speed;
+
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
                 0,                // m_step (unused by CBF)
-                inputWallTime     // m_timestamp (double, seconds since boot)
+                inputWallTime     // m_timestamp (double, CBF's timer units)
             });
-            
+
             ++playbackIndex;
         }
     }

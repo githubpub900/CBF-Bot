@@ -69,9 +69,9 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     static void onModify(auto& self) {
-        // CBF uses "VeryEarly" priority on getModifiedDelta. We need to run
-        // BEFORE CBF so our inputs are in m_queuedButtons before CBF's
-        // buildStepQueue() reads them. Lower number = earlier in Geode.
+        // CBF uses "VeryEarly" priority. We need to run BEFORE CBF so our
+        // inputs are in m_queuedButtons before CBF's buildStepQueue() reads them.
+        // In Geode, LOWER priority number = runs EARLIER in the hook chain.
         (void) self.setHookPriority("GJBaseGameLayer::getModifiedDelta", -1000000);
         (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
     }
