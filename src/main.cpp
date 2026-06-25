@@ -165,8 +165,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
         }
-        // No more pushDueInputsToCBF here — inputs are pushed from
-        // PlayerObject::update now, which runs at CBF's sub-step rate.
+        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
+        // Our hook priority is -1000000 (VeryEarly), so we run before CBF.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushDueInputsToCBF();
+        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
@@ -244,33 +247,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
-// ============================================================================
-//  PlayerObject::update hook  --  fire playback inputs at CBF sub-step precision
-// ============================================================================
-//
-//  CBF splits each physics step into sub-steps inside PlayerObject::update.
-//  By hooking here with VeryEarly priority, we run BEFORE CBF's hook, so we
-//  can push our input to CBF's queue before it processes the current sub-step.
-//
-//  This is the ONLY point where true CBF-level accuracy is achievable.
-//
-class $modify(BotPlayerObject, PlayerObject) {
-    static void onModify(auto& self) {
-        // Run BEFORE CBF so our input is in the queue before CBF's sub-step.
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
-    }
 
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer) {
-            // Only push from P1's update (avoid double-pushing on dual)
-            if (this == this->m_gameLayer->m_player1) {
-                bot.pushInputToCBFQueue(dt);
-            }
-        }
-        PlayerObject::update(dt);
-    }
-};
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen

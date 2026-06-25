@@ -815,13 +815,6 @@ public:
     }
 
 
-        // ----- CBF integration ------------------------------------------------
-    // CBF's m_queuedButtons uses wall-clock timestamps, not level time.
-    // We capture the wall-clock / level-time pair at playback start and
-    // convert each input's level time to a wall-clock time for CBF.
-    double    playbackStartWallTime = 0.0;
-    double    playbackStartLevelTime = 0.0;
-
     // Get the current wall-clock time using the EXACT same timer CBF uses.
     // This is critical: CBF compares m_timestamp against its own
     // currentFrameTime, so if we use a different timer, the subtraction
@@ -875,62 +868,7 @@ public:
             if (PlayLayer::get()) PlatformToolbox::hideCursor();
         }
     }
-    
-    // Push the next due input to CBF's m_queuedButtons queue, with a
-    // timestamp computed from the current wall-clock time. Called from
-    // PlayerObject::update (which runs at CBF's sub-step rate).
-    //
-    // Key insight: we don't need to align with CBF's frame window. We just
-    // push the input with a timestamp of "now" (or slightly in the future
-    // for inputs due in this sub-step), and CBF will fire it immediately
-    // in its current sub-step processing.
-    void pushInputToCBFQueue(float stepDelta) {
-        if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double currentWall = getWallTime();
-        double speed = speedMultiplier();
-
-        // Convert macro time (wall-clock from recording) to current wall-clock.
-        // If recording was at 0.2x and playback at 1x, the gap between inputs
-        // in wall-clock time stays the same (since we stored wall-clock).
-        // We just need to check if the next input is due NOW.
-
-        // The macro's timestamps are wall-clock from the RECORDING session.
-        // We need to map them to the PLAYBACK session's wall-clock.
-        // playbackStartWallTime + (inputTime - macro.events[0].time) = due wall time
-        // But since we stored wall-clock, the gap between events is preserved.
-        // An input is "due" when:
-        //   currentWall >= playbackStartWallTime + (input.time - firstEventTime)
-        //               = playbackStartWallTime + input.time - firstEventTime
-
-        if (macro.events.empty()) return;
-        double firstEventTime = macro.events[0].time;
-
-        while (playbackIndex < macro.events.size()) {
-            auto const& e = macro.events[playbackIndex];
-
-            // When should this input fire in playback wall-clock time?
-            double dueWallTime = playbackStartWallTime + (e.time - firstEventTime);
-
-            // If it's due now or in the past, push it to CBF's queue
-            if (dueWallTime > currentWall + 0.001) break;  // not due yet
-
-            // Push with timestamp = currentWall (CBF will fire immediately)
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,                // m_step (unused by CBF)
-                currentWall       // fire NOW in CBF's sub-step
-            });
-
-            ++playbackIndex;
-        }
-    }
 
     // ----- time helpers ----------------------------------------------------
 
@@ -992,24 +930,6 @@ public:
             notifyNoCBF();
             return;
         }
-        if (macro.empty()) {
-            notify("No macro to play", NotificationIcon::Warning);
-            return;
-        }
-        macro.sort();
-        validateAndRepair();
-        warnIfWrongLevel();
-        mode = bot::Mode::Playing;
-
-        // Capture the wall-clock / level-time pair for timestamp conversion.
-        playbackStartWallTime  = getWallTime();
-        playbackStartLevelTime = levelTime(gl);
-
-        seekPlaybackTo(levelTime(gl));
-        applyHeldStateAt(gl, levelTime(gl));
-        log::info("[Bot] Playback started {}", description());
-        notify("Playback started", NotificationIcon::Success);
-        refreshUI();
     }
         if (macro.empty()) {
             notify("No macro to play", NotificationIcon::Warning);
@@ -1243,48 +1163,33 @@ public:
     //
     // This is called from our getModifiedDelta hook (which runs BEFORE CBF's
     // hook) so the inputs are in the queue before CBF processes them.
-         void pushDueInputsToCBF() {
+          void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
         auto pl = PlayLayer::get();
         if (!pl) return;
 
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
+        if (macro.events.empty()) return;
+        double firstEventTime = macro.events[0].time;
 
-        // CBF's frame window is [lastFrameTime, currentFrameTime].
-        // lastFrameTime = m_frameStartWall - m_prevFrameDelta (previous frame's start)
-        // currentFrameTime = m_frameStartWall (this frame's start, captured in CCScheduler::update)
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-
-        // The input fires when m_levelTime reaches e.time.
-        // Frame started at m_frameStartLevel (level time at frame start).
-        // Wall time for the input: currentFrameTime + (e.time - m_frameStartLevel) / speed
-        double frameLevelAdvance = m_prevFrameDelta * speed;
+        double now = getWallTime();
+        // Look ahead by one frame — CBF will keep future inputs in
+        // inputVector for next frame, so there's no delay or duplication.
+        double lookahead = m_prevFrameDelta > 0.0 ? m_prevFrameDelta : 0.016;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
+            double dueWallTime = playbackStartWallTime + (e.time - firstEventTime);
 
-            double levelDelta = e.time - m_frameStartLevel;
-
-            // If this input is beyond this frame, stop — next frame will push it
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            // Compute the wall-clock time within CBF's frame window
-            double inputWallTime = currentFrameTime + levelDelta / speed;
-
-            // Clamp to CBF's frame window to handle rounding edge cases
-            if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
-            if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
+            if (dueWallTime > now + lookahead) break;
 
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
-                0,                // m_step (unused by CBF)
-                inputWallTime     // m_timestamp (double, CBF's timer units)
+                0,
+                dueWallTime
             });
 
             ++playbackIndex;
