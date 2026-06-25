@@ -72,7 +72,27 @@
 #include <limits>
 #include <system_error>
 
+#include <chrono>
+#if defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 using namespace geode::prelude;
+
+// GD's PlayerButtonCommand struct (layout-compatible with CBF's).
+// Used by PlayLayer::m_queuedButtons for Click Between Steps / CBF.
+enum class PlayerButton : int {
+    Jump  = 1,
+    Left  = 2,
+    Right = 3,
+};
+
+struct PlayerButtonCommand {
+    PlayerButton m_button;    // enum: Jump=1, Left=2, Right=3
+    bool m_isPush;
+    bool m_isPlayer2;
+    float m_timestamp;        // ← NOTE: float, not double
+};
 
 // ============================================================================
 // ============================================================================
@@ -302,15 +322,15 @@ struct InputEvent {
     }
 };
 
-// Directly force a CCMenuItemToggler's visual state to match a desired bool.
-// We bypass toggle(bool) entirely (unreliable on some Geode v5 builds) and
-// set button visibility directly. We don't touch the internal bool field
-// (its name varies across binding versions: m_bIsOn / m_on / etc.), because
-// activate() already keeps it in sync when the user clicks, and the only
-// thing the user actually SEES is which button is visible.
+// Directly force a CCMenuItemToggler's internal state + visual to match a
+// desired bool. The key insight: CCMenuItemToggler has an internal `m_on`
+// field (Geode uses cocos2d-iphone bindings, so it's `m_on`, not `m_bIsOn`).
+// When the user clicks, activate() runs toggle(!m_on) -- if m_on doesn't
+// match the visible state, the flip goes the wrong way and the toggler
+// desyncs from our bool. We must keep m_on in sync with the visual.
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
-    // m_onButton shows the "checked" state; m_offButton shows the "unchecked".
+    t->m_on = on;                                    // sync internal state
     if (t->m_onButton)  t->m_onButton->setVisible(on);
     if (t->m_offButton) t->m_offButton->setVisible(!on);
 }
@@ -450,6 +470,31 @@ struct PlayerSnapshot {
         p->m_lastGroundedPos = lastGroundedPos;
     }
 };
+
+    // ----- CBF integration ------------------------------------------------
+    // CBF's m_queuedButtons uses wall-clock timestamps, not level time.
+    // We capture the wall-clock / level-time pair at playback start and
+    // convert each input's level time to a wall-clock time for CBF.
+    double    playbackStartWallTime = 0.0;
+    double    playbackStartLevelTime = 0.0;
+
+    // Get the current wall-clock time in the same units CBF uses.
+    // CBF's currentFrameTime is set in onFrameStart() via getCurrentTimestamp(),
+    // which on iOS/macOS is CFAbsoluteTime (seconds since 2001, as a double),
+    // and on Windows is QueryPerformanceCounter ticks converted to seconds.
+    //
+    // We use CFAbsoluteTimeGetCurrent on Apple platforms (matches CBF), and
+    // steady_clock on others (close enough — CBF compares relative deltas,
+    // not absolute values, so as long as we're consistent within a frame it
+    // works).
+    static double getWallTime() {
+        #if defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        return CFAbsoluteTimeGetCurrent();
+        #else
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        #endif
+    }
 
 // ============================================================================
 //  CheckpointFrame  --  what we remember each time a practice checkpoint is set.
@@ -674,7 +719,7 @@ public:
         refreshUI();
     }
 
-    void startPlayback(GJBaseGameLayer* gl) {
+        void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -687,11 +732,13 @@ public:
         validateAndRepair();
         warnIfWrongLevel();
         mode = bot::Mode::Playing;
-        // Skip any events that are already behind the current level time (e.g.
-        // when starting from a checkpoint partway through a level)...
         seekPlaybackTo(levelTime(gl));
-        // ...and re-press anything that should already be held at that point.
         applyHeldStateAt(gl, levelTime(gl));
+
+        // Capture the wall-clock / level-time pair for CBF timestamp conversion.
+        playbackStartWallTime  = getWallTime();
+        playbackStartLevelTime = levelTime(gl);
+
         log::info("[Bot] Playback started {}", description());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
@@ -916,33 +963,66 @@ public:
     // BEGINNING of the step that should contain it -- true sub-frame accuracy
     // with CBF. Without it, the input would fire AFTER the step, one sub-step
     // late.
-       void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+          // Instead of calling handleButton directly (which bypasses CBF's sub-step
+    // splitting), we push PlayerButtonCommand structs to playLayer->m_queuedButtons.
+    // CBF reads from this queue in buildStepQueue() and fires each input at the
+    // exact sub-step matching its timestamp.
+    //
+    // This is called from our getModifiedDelta hook (which runs BEFORE CBF's
+    // hook) so the inputs are in the queue before CBF processes them.
+        void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double currentWallTime = getWallTime();
+        double currentLevelTime = levelTime(pl);
+        double speed = speedMultiplier();
+
+        // Look-ahead window: one frame's worth of time. CBF will only process
+        // inputs with timestamps <= currentFrameTime, so any inputs we push
+        // beyond that stay in the queue for the next frame.
+        // Use CCDirector's animation interval as the frame duration.
+        float animInterval = CCDirector::sharedDirector()->getAnimationInterval();
+        double lookAhead = std::max(0.016, static_cast<double>(animInterval) * 2.0);
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
 
-            // State alignment: snap the player to the recorded position to
-            // compensate for any sub-frame timing drift. This is what gives
-            // true CBF-level accuracy -- even if the input fires a fraction
-            // of a sub-step late, the position snap corrects it instantly.
-             if (stateAlignEnabled && e.hasState) {
-                if (auto pl = PlayLayer::get()) {
-                    if (pl->m_player1) pl->m_player1->setPosition({ e.p1x, e.p1y });
-                    if (pl->m_player2) pl->m_player2->setPosition({ e.p2x, e.p2y });
-                }
+            // Convert level time to wall-clock time:
+            // The input fires when level time reaches e.time.
+            // At current speed, that takes (e.time - currentLevelTime) / speed
+            // seconds of wall-clock time from now.
+            double inputWallTime = currentWallTime +
+                (e.time - currentLevelTime) / speed;
+
+            // If beyond look-ahead, stop — CBF will pick it up next frame.
+            if (inputWallTime > currentWallTime + lookAhead) break;
+
+            // If past due (e.g. after checkpoint load), fire directly as fallback.
+            if (inputWallTime < currentWallTime - 0.001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
             }
+
+            // Push to m_queuedButtons. The timestamp format must match what
+            // CBF expects: a wall-clock time comparable to its currentFrameTime.
+            PlayerButtonCommand cmd;
+            cmd.m_button = static_cast<PlayerButton>(e.button);
+            cmd.m_isPush = e.down;
+            cmd.m_isPlayer2 = e.player2;
+            cmd.m_timestamp = static_cast<float>(inputWallTime);
+            pl->m_queuedButtons.push_back(cmd);
 
             ++playbackIndex;
         }
-        injecting = false;
     }
-
+    
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
         auto gl = GJBaseGameLayer::get();

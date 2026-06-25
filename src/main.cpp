@@ -68,6 +68,13 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  inject, which is exactly why the whole bot is built around it.
 //
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
+    static void onModify(auto& self) {
+        // CBF uses "VeryEarly" priority on getModifiedDelta. We need to run
+        // BEFORE CBF so our inputs are in m_queuedButtons before CBF's
+        // buildStepQueue() reads them. Lower number = earlier in Geode.
+        (void) self.setHookPriority("GJBaseGameLayer::getModifiedDelta", -1000000);
+        (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
+    }
 
     // ---- input capture (recording) ---------------------------------------
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -91,13 +98,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this)) {
-            // Fire BEFORE the original processCommands so the input state is
-            // set before the physics step computes. We pass dt so the manager
-            // can use the predicted end-of-step time (m_levelTime + dt),
-            // achieving true sub-frame accuracy with CBF.
-            BotManager::get().fireDueInputs(this, dt);
-        }
+        // Inputs are now pushed to m_queuedButtons from getModifiedDelta,
+        // and CBF fires them at the right sub-step. No need to fire here.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -108,19 +110,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // cursor is monotonic, so an input can never be fired twice.
 
     void update(float dt) {
-        // Freeze gameplay while the GUI is open (our own pause -- no menu).
         if (isPlay(this) && BotManager::get().guiPaused) {
             return;
         }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
             BotManager::get().syncRecordingToTime(this);
-            BotManager::get().fireDueInputs(this);
+            // No more fireDueInputs here — CBF handles playback firing now.
         }
-        // Drive the speedhack audio pitch from here -- this fires every
-        // gameplay frame, so the master channel group stays in sync with
-        // bot.speed. applyMusicSpeed() internally checks PlayLayer::get()
-        // and bot.speedhackEnabled, so it's a no-op when neither is active.
         BotManager::get().applyMusicSpeed();
     }
 
@@ -131,12 +128,17 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
+
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
-        // While the GUI is open the level is frozen: hand back a zero delta so no
-        // physics steps run and m_levelTime does not advance (keeps the bot in sync).
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
+        }
+        // Push our playback inputs to m_queuedButtons BEFORE CBF processes
+        // them. CBF's getModifiedDelta hook runs after ours and calls
+        // buildStepQueue(), which reads from m_queuedButtons.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushDueInputsToCBF();
         }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
