@@ -41,6 +41,7 @@
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/modify/MenuLayer.hpp>
 
 using namespace geode::prelude;
 
@@ -280,6 +281,40 @@ class $modify(BotPauseLayer, PauseLayer) {
 };
 
 // ============================================================================
+//  MenuLayer hook  --  spawn the floating UI once GD is fully loaded
+// ============================================================================
+//
+//  $on_mod(Loaded) fires very early, before GD has loaded its sprite sheets.
+//  If we build the panel there, CCMenuItemToggler::createWithStandardSprites
+//  looks up "GJ_checkOff.png" / "GJ_checkOn.png" in an empty sprite frame
+//  cache and falls back to the missing-texture grid (purple/black squares).
+//
+//  MenuLayer::init fires when the main menu first appears, by which point
+//  every sprite sheet GD uses is loaded. Spawning the UI here guarantees
+//  the checkbox sprites resolve correctly.
+//
+class $modify(BotMenuLayer, MenuLayer) {
+    bool init() {
+        if (!MenuLayer::init()) return false;
+
+        auto& bot = BotManager::get();
+        if (!bot.ui) {
+            if (auto ui = BotUILayer::create()) {
+                ui->retain();  // keep alive across scene transitions
+                bot.ui = ui;
+                // Parent to the running scene; update() / ensureInScene()
+                // will re-parent us on every subsequent scene transition.
+                if (auto scene = CCDirector::sharedDirector()->getRunningScene()) {
+                    scene->addChild(ui, (std::numeric_limits<int>::max)());
+                }
+                ui->refreshAll();
+            }
+        }
+        return true;
+    }
+};
+
+// ============================================================================
 //  Mod entry point
 // ============================================================================
 
@@ -308,26 +343,6 @@ class $modify(BotPauseLayer, PauseLayer) {
                       "disabled until CBF is enabled (red). Install '{}'.",
                       bot::SYZZI_CBF_ID);
             break;
-    }
-
-    // ---- spawn the floating GUI ONCE, globally ---------------------------
-    // retain() is the load-bearing part: BotUILayer::create() returns an
-    // autoreleased object, and at mod-load time there is usually no running
-    // scene yet to parent it to. Without this retain, the autorelease pool
-    // would destroy the layer at end of frame, leaving bot.ui dangling --
-    // which is exactly why K did nothing. The manual retain keeps it alive
-    // until its own update() adopts it into the running scene.
-    if (!bot.ui) {
-        if (auto ui = BotUILayer::create()) {
-            ui->retain();
-            bot.ui = ui;
-            // Try to parent immediately if a scene already exists; otherwise
-            // update() will adopt us as soon as one appears.
-            if (auto scene = CCDirector::sharedDirector()->getRunningScene()) {
-                scene->addChild(ui, (std::numeric_limits<int>::max)());
-            }
-            ui->refreshAll();
-        }
     }
 
     log::info("[Bot] Geode Time Macro loaded. Press K anywhere to open the menu.");
