@@ -73,8 +73,13 @@
 #include <system_error>
 
 #include <chrono>
-#if defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-#include <CoreFoundation/CoreFoundation.h>
+#if defined(GEODE_IS_WINDOWS)
+#include <windows.h>
+#elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+#include <time.h>
+#include <mach/mach_time.h>
+#else
+#include <time.h>
 #endif
 
 using namespace geode::prelude;
@@ -460,21 +465,29 @@ struct PlayerSnapshot {
     double    playbackStartWallTime = 0.0;
     double    playbackStartLevelTime = 0.0;
 
-    // Get the current wall-clock time in the same units CBF uses.
-    // CBF's currentFrameTime is set in onFrameStart() via getCurrentTimestamp(),
-    // which on iOS/macOS is CFAbsoluteTime (seconds since 2001, as a double),
-    // and on Windows is QueryPerformanceCounter ticks converted to seconds.
-    //
-    // We use CFAbsoluteTimeGetCurrent on Apple platforms (matches CBF), and
-    // steady_clock on others (close enough — CBF compares relative deltas,
-    // not absolute values, so as long as we're consistent within a frame it
-    // works).
+    // Get the current wall-clock time using the EXACT same timer CBF uses.
+    // This is critical: CBF compares m_timestamp against its own
+    // currentFrameTime, so if we use a different timer, the subtraction
+    // gives a huge wrong value and CBF never fires our inputs.
     static double getWallTime() {
-        #if defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        return CFAbsoluteTimeGetCurrent();
+        #if defined(GEODE_IS_WINDOWS)
+        // CBF uses QueryPerformanceCounter / freq on Windows
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+
         #else
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        // CBF uses clock_gettime(CLOCK_MONOTONIC) on Android/Linux
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
 
@@ -570,11 +583,11 @@ public:
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
     bool      normalizeRecording = false; // shift events so the first one is t=0
-    bool      stateAlignEnabled = true; // snap player to recorded position on playback
+    bool      stateAlignEnabled = false; // snap player to recorded position on playback
 
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
-    bool      autoSaveOnComplete = false;
+    bool      autoSaveOnComplete = true;
 
     // The level time seen on the previous recording tick. If the clock jumps
     // backwards (a restart / respawn / checkpoint load) we know the run was
@@ -992,13 +1005,16 @@ public:
                 continue;
             }
 
-            // Push to m_queuedButtons. The timestamp format must match what
-            // CBF expects: a wall-clock time comparable to its currentFrameTime.
-                      pl->m_queuedButtons.push_back({
+            // PlayerButtonCommand layout: { button, isPush, isPlayer2, step, timestamp }
+            // m_step is GD's own CBS step index — irrelevant for CBF, set to 0.
+            // m_timestamp MUST be a double in the same units as CBF's
+            // currentFrameTime (seconds since boot via clock_gettime_nsec_np).
+            pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
-                static_cast<int>(inputWallTime * 1000.0)  // ms as int
+                0,                // m_step (unused by CBF)
+                inputWallTime     // m_timestamp (double, seconds since boot)
             });
             
             ++playbackIndex;

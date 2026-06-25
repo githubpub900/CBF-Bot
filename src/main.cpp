@@ -332,9 +332,9 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.speedhackEnabled     = Mod::get()->getSavedValue<bool>("speedhack", false);
     bot.practiceFixEnabled   = Mod::get()->getSavedValue<bool>("practice-fix", true);
     bot.discardDeadInputs    = Mod::get()->getSavedValue<bool>("discard-dead", true);
-    bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", false);
+    bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", true);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
-    bot.stateAlignEnabled  = Mod::get()->getSavedValue<bool>("state-align", true);
+    bot.stateAlignEnabled  = Mod::get()->getSavedValue<bool>("state-align", false);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
