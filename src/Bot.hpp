@@ -1002,12 +1002,13 @@ public:
         if (!std::isfinite(speed) || speed <= 0.0) return 1.0;
         return speed;
     }
+
     // ----- speedhack audio ------------------------------------------------
-    // Push the current speedhack multiplier onto the FMOD music channel so the
-    // song plays at the same speed as the physics. FMOD::Channel::setPitch
-    // scales both tempo and pitch together (1.0 = normal). We only touch the
-    // music channel -- SFX stay clean. Called every frame from BotUILayer so a
-    // newly-loaded song (new m_musicChannel) gets re-pitched automatically.
+    // Push the current speedhack multiplier onto the music so the song plays
+    // at the same speed as the physics. GD's own FMODAudioEngine exposes
+    // setSpeedEffect() for exactly this (it's what practice mode uses), and it
+    // works regardless of how the underlying FMOD channel/channel-group is
+    // named in this build's bindings. SFX are left untouched.
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
         if (!fae) return;
@@ -1017,9 +1018,7 @@ public:
         float pitch = (speedhackEnabled && inLevel &&
                        std::isfinite(speed) && speed > 0.0)
                       ? static_cast<float>(speed) : 1.0f;
-        if (fae->m_musicChannel) {
-            fae->m_musicChannel->setPitch(pitch);
-        }
+        fae->setSpeedEffect(pitch);
     }
 
     // Write the current options to the mod's saved values. Called whenever an
@@ -1525,8 +1524,23 @@ public:
     }
 
     // --- periodic refresh so the status colour stays live ------------------
-    void update(float dt) override {
+       void update(float dt) override {
         CCLayer::update(dt);
+
+        // --- self-adoption: re-parent to the current running scene ---------
+        // If our parent isn't the active scene (e.g. after a scene transition
+        // like menu -> level -> pause), re-attach ourselves to the new scene
+        // so the GUI follows the player everywhere. This replaces the
+        // SceneManager::keepNodeAcrossScenes call so we don't depend on that
+        // header existing in every Geode SDK checkout.
+        auto scene = CCDirector::sharedDirector()->getRunningScene();
+        if (scene && this->getParent() != scene) {
+            this->retain();
+            this->removeFromParentAndCleanup(false); // keep children + state
+            scene->addChild(this, (std::numeric_limits<int>::max)());
+            this->release();
+        }
+
         if (m_visible) { refreshStatus(); refreshMode(); }
         // Keep the music pitch aligned with the speedhack multiplier, even when
         // the panel is closed (so toggling it via the K menu still works).

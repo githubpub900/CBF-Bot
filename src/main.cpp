@@ -40,7 +40,6 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
-#include <Geode/ui/SceneManager.hpp>
 
 using namespace geode::prelude;
 
@@ -254,11 +253,17 @@ class $modify(BotPauseLayer, PauseLayer) {
     }
 
     // ---- spawn the floating GUI ONCE, globally ---------------------------
-    // SceneManager::keepNodeAcrossScenes re-parents it to every new scene, so
-    // K toggles the menu on the main menu, in the editor, and inside a level.
+    // The UI re-parents itself to the current running scene every frame from
+    // its update() hook, so K toggles it on the main menu, in the editor,
+    // AND inside a level -- without needing SceneManager.
     if (!bot.ui) {
         if (auto ui = BotUILayer::create()) {
-            geode::SceneManager::get()->keepNodeAcrossScenes(ui);
+            // Parent to whatever scene is currently running (may be null on
+            // the very first frame; update() will adopt us as soon as one
+            // appears).
+            if (auto scene = CCDirector::sharedDirector()->getRunningScene()) {
+                scene->addChild(ui, (std::numeric_limits<int>::max)());
+            }
             bot.ui = ui;
             ui->refreshAll();
         }
