@@ -280,17 +280,21 @@ namespace bot {
 //  next up event for the same button.
 //
 struct InputEvent {
-    double  time     = 0.0;   // m_gameState.m_levelTime at which this fired
-    uint8_t button   = 1;     // bot::Button
-    bool    down     = true;  // press (true) or release (false)
-    bool    player2  = false; // which player (dual support)
+    double  time     = 0.0;
+    uint8_t button   = 1;
+    bool    down     = true;
+    bool    player2  = false;
+
+    // State alignment: player position captured at the moment of this input.
+    // During playback, the player is snapped to this position right after the
+    // input fires, compensating for any sub-frame timing drift.
+    float   p1x = 0.f, p1y = 0.f;
+    float   p2x = 0.f, p2y = 0.f;
+    bool    hasState = false;
 
     InputEvent() = default;
     InputEvent(double t, uint8_t b, bool d, bool p2)
         : time(t), button(b), down(d), player2(p2) {}
-
-    // Stable ordering: by time, then presses before releases so a 0-length tap
-    // on the exact same timestamp still registers a down before its up.
     bool operator<(InputEvent const& o) const {
         if (time != o.time) return time < o.time;
         if (down != o.down) return down && !o.down; // down first
@@ -298,6 +302,17 @@ struct InputEvent {
     }
 };
 
+// Directly force a CCMenuItemToggler's visual + internal state to match a
+// desired bool. Bypasses toggle(bool) entirely, which is unreliable on some
+// Geode v5 builds (can double-flip, fail to update the visual, or fire the
+// selector). We set m_bIsOn + button visibility directly, so there is no
+// ambiguity.
+static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
+    if (!t) return;
+    t->m_bIsOn = on;
+    if (t->m_offButton) t->m_offButton->setVisible(!on);
+    if (t->m_onButton)  t->m_onButton->setVisible(on);
+}
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
 // ============================================================================
@@ -527,6 +542,7 @@ public:
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
     bool      normalizeRecording = false; // shift events so the first one is t=0
+    bool      stateAlignEnabled = true; // snap player to recorded position on playback
 
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
@@ -781,34 +797,37 @@ public:
     // for the same button/player) so the macro stays clean.
     void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
-        if (injecting) return; // never record our own injected playback
-        if (button < 1 || button > 3) return; // only jump/left/right
+        if (injecting) return;
+        if (button < 1 || button > 3) return;
 
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
 
-        // Collapse no-op transitions in O(1): ignore a press if that button is
-        // already held, or a release if it is already up.
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
         double t = levelTime(gl);
-
-        // RobTop's CBS can only land inputs on its ~480 FPS grid, so snap the
-        // timestamp -- but ONLY when RobTop's CBS is the active engine. Syzzi's
-        // CBF (green) is effectively continuous, so it keeps full double precision.
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
         }
 
-        macro.events.emplace_back(t, static_cast<uint8_t>(button), down, player2);
-        refreshUIProgress();
-    }
+        InputEvent e(t, static_cast<uint8_t>(button), down, player2);
 
-    // Snap a timestamp onto RobTop's ~480 FPS input grid.
-    static double quantizeRobTop(double t) {
-        double step = 1.0 / bot::ROBTOP_CBS_FPS;
-        return std::round(t / step) * step;
+        // Capture player positions for state alignment during playback.
+        if (auto pl = PlayLayer::get()) {
+            if (pl->m_player1) {
+                e.p1x = pl->m_player1->getPositionX();
+                e.p1y = pl->m_player1->getPositionY();
+            }
+            if (pl->m_player2) {
+                e.p2x = pl->m_player2->getPositionX();
+                e.p2y = pl->m_player2->getPositionY();
+            }
+            e.hasState = true;
+        }
+
+        macro.events.emplace_back(e);
+        refreshUIProgress();
     }
 
     // Called every frame while recording. If the level clock has gone backwards
@@ -884,29 +903,37 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Called every physics step (and once per frame as a backstop). Fires every
-    // event whose timestamp has been reached. Because this runs per *step* and
-    // CBF makes steps tiny, the worst-case error is a single sub-step.
-    void fireDueInputs(GJBaseGameLayer* gl) {
+    // Called every physics step (and once per frame as a backstop). Fires
+    // every event whose timestamp has been reached. The `dt` parameter, when
+    // nonzero, lets us look AHEAD by one step so the input fires at the
+    // BEGINNING of the step that should contain it -- true sub-frame accuracy
+    // with CBF. Without it, the input would fire AFTER the step, one sub-step
+    // late.
+       void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
 
-        double now = levelTime(gl);
+        double now = levelTime(gl) + dt;
         injecting = true;
         while (playbackIndex < macro.events.size() &&
                macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            // State alignment: snap the player to the recorded position to
+            // compensate for any sub-frame timing drift. This is what gives
+            // true CBF-level accuracy -- even if the input fires a fraction
+            // of a sub-step late, the position snap corrects it instantly.
+            if (stateAlignEnabled && e.hasState) {
+                if (auto pl = PlayLayer::get()) {
+                    if (pl->m_player1) pl->m_player1->setPosition(e.p1x, e.p1y);
+                    if (pl->m_player2) pl->m_player2->setPosition(e.p2x, e.p2y);
+                }
+            }
+
             ++playbackIndex;
         }
         injecting = false;
-
-        // Auto-stop when the macro has been fully replayed.
-        if (playbackIndex >= macro.events.size()) {
-            // Leave the mode as Playing until the level ends so a level that
-            // keeps scrolling past the last input still finishes naturally,
-            // but make sure nothing is stuck down.
-        }
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1059,6 +1086,7 @@ public:
         m->setSavedValue<bool>("discard-dead", discardDeadInputs);
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
+        m->setSavedValue<bool>("state-align", stateAlignEnabled);
     }
 
     void setSpeedFromString(std::string const& s) {
@@ -1416,6 +1444,7 @@ protected:
     CCMenuItemToggler*    m_practiceToggle = nullptr;
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
+    CCMenuItemToggler*    m_stateAlignToggle = nullptr;
     bool                  m_visible      = false;
 
     // Drag state for the panel title bar.
@@ -1690,18 +1719,17 @@ public:
     void syncToggles() {
         auto& bot = BotManager::get();
         syncModeToggles();
-        if (m_speedToggle)      m_speedToggle->toggle(bot.speedhackEnabled);
-        if (m_practiceToggle)   m_practiceToggle->toggle(bot.practiceFixEnabled);
-        if (m_deadToggle)       m_deadToggle->toggle(bot.discardDeadInputs);
-        if (m_autoSaveToggle)   m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
+        forceTogglerState(m_speedToggle,    bot.speedhackEnabled);
+        forceTogglerState(m_practiceToggle, bot.practiceFixEnabled);
+        forceTogglerState(m_deadToggle,     bot.discardDeadInputs);
+        forceTogglerState(m_autoSaveToggle, bot.autoSaveOnComplete);
+        forceTogglerState(m_stateAlignToggle, bot.stateAlignEnabled);
     }
 
     void syncModeToggles() {
         auto& bot = BotManager::get();
-        bool const rec  = bot.mode == bot::Mode::Recording;
-        bool const play = bot.mode == bot::Mode::Playing;
-        if (m_recordToggle) m_recordToggle->toggle(rec);
-        if (m_playToggle)   m_playToggle->toggle(play);
+        forceTogglerState(m_recordToggle, bot.mode == bot::Mode::Recording);
+        forceTogglerState(m_playToggle,   bot.mode == bot::Mode::Playing);
     }
 
 private:
@@ -1832,6 +1860,9 @@ private:
         m_autoSaveToggle = makeToggle(menu, { 40.f, yOpt2 },
             menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
+        m_stateAlignToggle = makeToggle(menu, { 200.f, yOpt2 },
+            menu_selector(BotUILayer::onStateAlign), "State align",
+            bot.stateAlignEnabled);
 
         // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
@@ -1863,7 +1894,7 @@ private:
         // Set the initial checkmark state to match the saved option so the
         // checkmarks never start out of sync (toggle(bool) just sets state and
         // does NOT fire the selector, so this is safe).
-        toggle->toggle(initialState);
+        forceTogglerState(toggle, initialState);
         menu->addChild(toggle);
 
         auto lbl = CCLabelBMFont::create(label, "chatFont.fnt");
@@ -1920,6 +1951,11 @@ private:
     void onAutoSave(CCObject*) {
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
+        bot.persist();
+    }
+    void onStateAlign(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.stateAlignEnabled = !bot.stateAlignEnabled;
         bot.persist();
     }
     void onSave(CCObject*) {

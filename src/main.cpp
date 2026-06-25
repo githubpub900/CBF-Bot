@@ -92,7 +92,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (isPlay(this)) {
-            BotManager::get().fireDueInputs(this);
+            // Fire BEFORE the original processCommands so the input state is
+            // set before the physics step computes. We pass dt so the manager
+            // can use the predicted end-of-step time (m_levelTime + dt),
+            // achieving true sub-frame accuracy with CBF.
+            BotManager::get().fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -328,6 +332,7 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.discardDeadInputs    = Mod::get()->getSavedValue<bool>("discard-dead", true);
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", false);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
+    bot.stateAlignEnabled  = Mod::get()->getSavedValue<bool>("state-align", true);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
