@@ -57,14 +57,15 @@ using namespace geode::prelude;
 //  We hook CCScheduler::update with VeryEarly priority to capture getWallTime()
 //  BEFORE CBF's hook runs, so our m_frameStartWall ≈ CBF's currentFrameTime.
 //
+
 class $modify(BotCCScheduler, CCScheduler) {
     static void onModify(auto& self) {
-        // Run BEFORE CBF so we capture the wall time at the same moment.
         (void) self.setHookPriority("CCScheduler::update", -1000000);
     }
 
     void update(float dt) {
         // Capture frame-start state BEFORE anything else runs this frame.
+        // This aligns with CBF's currentFrameTime (also set at frame start).
         auto& bot = BotManager::get();
         bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
             ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
@@ -123,18 +124,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     }
 
     // ---- playback (primary, per physics step) ----------------------------
-    //
     // processCommands runs once per physics step. With Syzzi's CBF active there
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-            // Fire BEFORE the original so inputs are set before physics.
-            // dt is the physics step delta — looking ahead by one step
-            // gives per-step accuracy.
-            BotManager::get().fireDueInputs(this, dt);
-        }
+        // Inputs are pushed to CBF's queue from getModifiedDelta.
+        // CBF fires them at the exact sub-step. No direct firing here.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -164,10 +160,15 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
 
-      double getModifiedDelta(float dt) {
+    double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
+        }
+        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
+        // Our hook priority is -1000000 (VeryEarly), so we run before CBF.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushDueInputsToCBF();
         }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
