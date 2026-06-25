@@ -284,7 +284,6 @@ struct InputEvent {
     uint8_t button   = 1;     // bot::Button
     bool    down     = true;  // press (true) or release (false)
     bool    player2  = false; // which player (dual support)
-    
 
     InputEvent() = default;
     InputEvent(double t, uint8_t b, bool d, bool p2)
@@ -608,20 +607,18 @@ public:
     // Open/close the GUI: freeze the level, reveal the OS cursor, and pause the
     // song. Closing reverses all three. The actual physics freeze is enforced by
     // the GJBaseGameLayer hooks reading `guiPaused`.
-void setGuiOpen(bool open) {
-    guiPaused = open;
-    auto fae = FMODAudioEngine::sharedEngine();
-    if (open) {
-        PlatformToolbox::showCursor();
-        // Only pause in-level music; leave menu music running.
-        if (PlayLayer::get() && fae) fae->pauseAllMusic(true);
-    } else {
-        if (fae) fae->resumeAllMusic();
-        // Only re-hide the cursor when we are actually in a level
-        // (on menus the cursor should stay visible).
-        if (PlayLayer::get()) PlatformToolbox::hideCursor();
+    void setGuiOpen(bool open) {
+        guiPaused = open;
+        if (open) {
+            PlatformToolbox::showCursor();
+            if (auto fae = FMODAudioEngine::sharedEngine()) fae->pauseAllMusic(true);
+        } else {
+            if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
+            // GD hides the cursor during gameplay; only re-hide it if we are
+            // actually in a level (so we don't hide it back on a menu).
+            if (PlayLayer::get()) PlatformToolbox::hideCursor();
+        }
     }
-}
 
     // ----- time helpers ----------------------------------------------------
 
@@ -1005,18 +1002,26 @@ void setGuiOpen(bool open) {
         if (!std::isfinite(speed) || speed <= 0.0) return 1.0;
         return speed;
     }
-    
-void applySpeedhackAudio() {
-    auto fae = FMODAudioEngine::sharedEngine();
-    if (!fae || !fae->m_system) return;
-    float pitch = (speedhackEnabled && PlayLayer::get())
-                      ? static_cast<float>(speedMultiplier())
-                      : 1.0f;
-    FMOD::ChannelGroup* masterGroup = nullptr;
-    if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK && masterGroup) {
-        masterGroup->setPitch(pitch);
+    // ----- speedhack audio ------------------------------------------------
+    // Push the current speedhack multiplier onto the FMOD music channel so the
+    // song plays at the same speed as the physics. FMOD::Channel::setPitch
+    // scales both tempo and pitch together (1.0 = normal). We only touch the
+    // music channel -- SFX stay clean. Called every frame from BotUILayer so a
+    // newly-loaded song (new m_musicChannel) gets re-pitched automatically.
+    void applyMusicSpeed() {
+        auto fae = FMODAudioEngine::sharedEngine();
+        if (!fae) return;
+        // Only pitch when speedhack is on AND we are actually inside a level,
+        // so menu music keeps playing at normal speed after we exit.
+        bool inLevel = (PlayLayer::get() != nullptr);
+        float pitch = (speedhackEnabled && inLevel &&
+                       std::isfinite(speed) && speed > 0.0)
+                      ? static_cast<float>(speed) : 1.0f;
+        if (fae->m_musicChannel) {
+            fae->m_musicChannel->setPitch(pitch);
+        }
     }
-}
+
     // Write the current options to the mod's saved values. Called whenever an
     // option changes (there is no on-unload event in Geode, so we persist eagerly).
     void persist() {
@@ -1029,19 +1034,19 @@ void applySpeedhackAudio() {
         m->setSavedValue<std::string>("macro-name", macroName);
     }
 
-void setSpeedFromString(std::string const& s) {
-    try {
-        double v = std::stod(s);
-        if (std::isfinite(v) && v > 0.0) {
-            speed = v;
-            log::info("[Bot] Speed set to {}", speed);
-            persist();
-            applySpeedhackAudio(); // <-- NEW: sync audio pitch immediately
+    void setSpeedFromString(std::string const& s) {
+        try {
+            double v = std::stod(s);
+            if (std::isfinite(v) && v > 0.0) {
+                speed = v;
+                log::info("[Bot] Speed set to {}", speed);
+                persist();
+                applyMusicSpeed();   // <-- add this line
+            }
+        } catch (...) {
+            // ignore malformed input; keep the previous value
         }
-    } catch (...) {
-        // ignore malformed input; keep the previous value
     }
-}
 
     // One-line status summary, handy for the log.
     std::string description() const {
@@ -1385,7 +1390,6 @@ protected:
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
-    bool m_syncingToggles = false; // guard: prevents syncToggles() from re-entering callbacks
 
     // Drag state for the panel title bar.
     bool             m_dragging   = false;
@@ -1524,6 +1528,9 @@ public:
     void update(float dt) override {
         CCLayer::update(dt);
         if (m_visible) { refreshStatus(); refreshMode(); }
+        // Keep the music pitch aligned with the speedhack multiplier, even when
+        // the panel is closed (so toggling it via the K menu still works).
+        BotManager::get().applyMusicSpeed();
     }
 
     // --- live refresh entry points (called by the manager) -----------------
@@ -1591,28 +1598,40 @@ public:
         }
     }
 
-    // Push every toggler's visual state from the source-of-truth bools. Used on
-    // open / refresh only (never from a toggle's own callback), so a click never
-    // cascades into the other checkmarks. toggle(bool) does not fire selectors.
-   void syncToggles() {
-    auto& bot = BotManager::get();
-    m_syncingToggles = true;  // block callbacks while we set visual state
-    if (m_recordToggle)   m_recordToggle->toggle(!(bot.mode == bot::Mode::Recording));
-    if (m_playToggle)     m_playToggle->toggle(!(bot.mode == bot::Mode::Playing));
-    if (m_speedToggle)    m_speedToggle->toggle(!bot.speedhackEnabled);
-    if (m_practiceToggle) m_practiceToggle->toggle(!bot.practiceFixEnabled);
-    if (m_deadToggle)     m_deadToggle->toggle(!bot.discardDeadInputs);
-    if (m_autoSaveToggle) m_autoSaveToggle->toggle(!bot.autoSaveOnComplete);
-    m_syncingToggles = false;
-}
+    // Push every toggler's visual state from the source-of-truth bools, but
+    // ONLY when it is actually out of sync. CCMenuItemToggler::activate() has
+    // already flipped the visual by the time our callback runs, so blindly
+    // calling toggle(state) on every refresh used to double-flip toggles and
+    // make them desync / visually cross-activate each other.
+    void syncToggles() {
+        auto& bot = BotManager::get();
+        syncModeToggles();
+        if (m_speedToggle     && m_speedToggle->isToggled()     != bot.speedhackEnabled)   m_speedToggle->toggle(bot.speedhackEnabled);
+        if (m_practiceToggle  && m_practiceToggle->isToggled()  != bot.practiceFixEnabled) m_practiceToggle->toggle(bot.practiceFixEnabled);
+        if (m_deadToggle      && m_deadToggle->isToggled()      != bot.discardDeadInputs)  m_deadToggle->toggle(bot.discardDeadInputs);
+        if (m_autoSaveToggle  && m_autoSaveToggle->isToggled()  != bot.autoSaveOnComplete) m_autoSaveToggle->toggle(bot.autoSaveOnComplete);
+    }
+
+    // Record / Play are driven by `mode`, not by a saved bool, so they need to
+    // be re-synced whenever the mode changes (record button, play button, V/B
+    // keys, level reset, etc.). Kept separate from syncToggles so clicking
+    // Record does not poke the option toggles.
+    void syncModeToggles() {
+        auto& bot = BotManager::get();
+        bool const rec  = bot.mode == bot::Mode::Recording;
+        bool const play = bot.mode == bot::Mode::Playing;
+        if (m_recordToggle && m_recordToggle->isToggled() != rec)  m_recordToggle->toggle(rec);
+        if (m_playToggle   && m_playToggle->isToggled()   != play) m_playToggle->toggle(play);
+    }
 
 private:
     // ----- panel construction ---------------------------------------------
-    private:
     void buildPanel() {
         constexpr float W = 320.f, H = 396.f;
         auto winSize = CCDirector::sharedDirector()->getWinSize();
 
+        // Container node, centred on screen. Scaled down so the panel is compact
+        // and doesn't dominate the screen.
         m_panel = CCNode::create();
         m_panel->setContentSize({ W, H });
         m_panel->setAnchorPoint({ 0.5f, 0.5f });
@@ -1620,52 +1639,52 @@ private:
         m_panel->setPosition({ winSize.width * 0.5f, winSize.height * 0.5f });
         this->addChild(m_panel);
 
-        // Background — fully opaque (Fix 3).
+        // Background (rounded GD square).
         auto bg = cocos2d::extension::CCScale9Sprite::create("GJ_square01.png");
         bg->setContentSize({ W, H });
         bg->setPosition({ W * 0.5f, H * 0.5f });
-        bg->setOpacity(255);          // <-- Fix 3: was 238
+        bg->setOpacity(255);
         m_panel->addChild(bg);
 
-        // Title (centred in the title bar).
+        // Title.
         auto title = CCLabelBMFont::create("Time Macro Bot", "goldFont.fnt");
         title->setPosition({ W * 0.5f, H - 18.f });
         title->setScale(0.72f);
         m_panel->addChild(title);
 
-        // ---- Fix 4: status dot + text in the TOP-RIGHT corner ----
-        // The coloured dot sits right at the top-right; the CBF text
-        // is right-aligned just to its left so it never overlaps the title.
+        // The coloured period + status line. The period is the green/yellow/red
+        // CBF indicator the spec asked for.
+        // Status indicator moved to the top-RIGHT corner of the panel:
+        // [status text] [coloured .]   both right-anchored so they stay
+        // inside the panel regardless of how long the status string is.
         m_periodLabel = CCLabelBMFont::create(".", "bigFont.fnt");
-        m_periodLabel->setAnchorPoint({ 0.5f, 0.5f });
-        m_periodLabel->setPosition({ W - 12.f, H - 16.f });
-        m_periodLabel->setScale(1.0f);
+        m_periodLabel->setAnchorPoint({ 1.f, 0.5f });
+        m_periodLabel->setPosition({ W - 14.f, H - 16.f });
+        m_periodLabel->setScale(1.25f);
         m_panel->addChild(m_periodLabel);
 
         m_statusLabel = CCLabelBMFont::create("CBF: ...", "chatFont.fnt");
-        m_statusLabel->setAnchorPoint({ 1.f, 0.5f });   // right-aligned
-        m_statusLabel->setPosition({ W - 22.f, H - 16.f });
-        m_statusLabel->setScale(0.50f);
+        m_statusLabel->setAnchorPoint({ 1.f, 0.5f });
+        m_statusLabel->setPosition({ W - 30.f, H - 16.f });
+        m_statusLabel->setScale(0.62f);
         m_panel->addChild(m_statusLabel);
-        // -----------------------------------------------------------
 
-        // Mode / progress / stats rows — shifted up now that the status
-        // row is gone (they start at H-44 instead of H-66).
+        // Mode + progress + stats lines.
         m_modeLabel = CCLabelBMFont::create("Mode: idle", "chatFont.fnt");
         m_modeLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_modeLabel->setPosition({ 18.f, H - 44.f });
+        m_modeLabel->setPosition({ 18.f, H - 66.f });
         m_modeLabel->setScale(0.6f);
         m_panel->addChild(m_modeLabel);
 
         m_progressLabel = CCLabelBMFont::create("0 inputs  |  0.00s", "chatFont.fnt");
         m_progressLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_progressLabel->setPosition({ 18.f, H - 62.f });
+        m_progressLabel->setPosition({ 18.f, H - 84.f });
         m_progressLabel->setScale(0.55f);
         m_panel->addChild(m_progressLabel);
 
         m_statsLabel = CCLabelBMFont::create("press 0  rel 0  p1 0  p2 0", "chatFont.fnt");
         m_statsLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_statsLabel->setPosition({ 18.f, H - 78.f });
+        m_statsLabel->setPosition({ 18.f, H - 100.f });
         m_statsLabel->setScale(0.48f);
         m_statsLabel->setOpacity(190);
         m_panel->addChild(m_statsLabel);
@@ -1673,13 +1692,15 @@ private:
         // ---- main menu of buttons / togglers -----------------------------
         auto menu = CCMenu::create();
         menu->setPosition({ 0.f, 0.f });
+        // Capture clicks at a very high priority so they always land on us even
+        // though there is live gameplay underneath.
         menu->setTouchPriority(-1000);
         m_panel->addChild(menu);
 
         auto& bot = BotManager::get();
 
-        // Record / Play — shifted up 30pts vs. old layout.
-        float yRec = H - 106.f;
+        float yRec = H - 130.f;
+        // Record / Play togglers (driven by mode, not a saved bool).
         m_recordToggle = makeToggle(menu, { 40.f, yRec },
             menu_selector(BotUILayer::onRecord), "Record (V)",
             bot.mode == bot::Mode::Recording);
@@ -1717,7 +1738,9 @@ private:
         });
         m_panel->addChild(m_nameInput);
 
-        // Option togglers.
+        // Option togglers. Initial visual state is set from the saved bools so the
+        // checkmarks always start in sync (no manual offset / no 480fps snap -- the
+        // snap is automatic and only applies under RobTop's CBS).
         float yOpt = yName - 36.f;
         m_practiceToggle = makeToggle(menu, { 40.f, yOpt },
             menu_selector(BotUILayer::onPracticeFix), "Practice fix",
@@ -1730,20 +1753,20 @@ private:
             menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
 
-        // File row 1.
+        // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
         makeButton(menu, { 50.f, yFile1 },  "Save",   menu_selector(BotUILayer::onSave));
         makeButton(menu, { 120.f, yFile1 }, "Load",   menu_selector(BotUILayer::onLoad));
         makeButton(menu, { 200.f, yFile1 }, "Export", menu_selector(BotUILayer::onExport));
         makeButton(menu, { 272.f, yFile1 }, "Import", menu_selector(BotUILayer::onImport));
 
-        // File row 2.
+        // File row 2: clear / list / close.
         float yFile2 = yFile1 - 32.f;
         makeButton(menu, { 60.f, yFile2 },  "Clear", menu_selector(BotUILayer::onClear));
         makeButton(menu, { 160.f, yFile2 }, "List",  menu_selector(BotUILayer::onList));
         makeButton(menu, { 255.f, yFile2 }, "Close", menu_selector(BotUILayer::onClose));
 
-        // Hint.
+        // Hint at the bottom.
         auto hint = CCLabelBMFont::create("K: menu   V: record   B: play   N: stop",
                                           "chatFont.fnt");
         hint->setPosition({ W * 0.5f, 14.f });
@@ -1753,22 +1776,23 @@ private:
     }
 
     CCMenuItemToggler* makeToggle(CCMenu* menu, CCPoint pos,
-                              cocos2d::SEL_MenuHandler sel, const char* label,
-                              bool initialState) {
-    auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
-    toggle->setPosition(pos);
-    // CCMenuItemToggler::toggle(true) shows the OFF sprite.
-    // Invert so the visual matches the logical state.
-    toggle->toggle(!initialState);
-    menu->addChild(toggle);
+                                  cocos2d::SEL_MenuHandler sel, const char* label,
+                                  bool initialState) {
+        auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
+        toggle->setPosition(pos);
+        // Set the initial checkmark state to match the saved option so the
+        // checkmarks never start out of sync (toggle(bool) just sets state and
+        // does NOT fire the selector, so this is safe).
+        toggle->toggle(initialState);
+        menu->addChild(toggle);
 
-    auto lbl = CCLabelBMFont::create(label, "chatFont.fnt");
-    lbl->setAnchorPoint({ 0.f, 0.5f });
-    lbl->setPosition({ pos.x + 16.f, pos.y });
-    lbl->setScale(0.55f);
-    m_panel->addChild(lbl);
-    return toggle;
-}
+        auto lbl = CCLabelBMFont::create(label, "chatFont.fnt");
+        lbl->setAnchorPoint({ 0.f, 0.5f });
+        lbl->setPosition({ pos.x + 16.f, pos.y });
+        lbl->setScale(0.55f);
+        m_panel->addChild(lbl);
+        return toggle;
+    }
 
     void makeButton(CCMenu* menu, CCPoint pos, const char* label,
                     cocos2d::SEL_MenuHandler sel) {
@@ -1783,11 +1807,15 @@ private:
     // ----- button callbacks -----------------------------------------------
     void onRecord(CCObject*) {
         BotManager::get().toggleRecording(GJBaseGameLayer::get());
-        refreshAll();
+        // Only sync the mode toggles -- do NOT call refreshAll here, otherwise
+        // syncToggles would poke every option toggle and could desync them.
+        syncModeToggles();
+        refreshProgress();
     }
     void onPlay(CCObject*) {
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
-        refreshAll();
+        syncModeToggles();
+        refreshProgress();
     }
     // Each option callback flips its OWN source-of-truth bool, then forces that
     // one toggler's visual to match (toggle(bool) does not fire the selector).
@@ -1795,36 +1823,31 @@ private:
     // its own flip vs. the callback, it never touches the other toggles, and it
     // always persists -- so checkmarks no longer desync, uncheck siblings, or fail
     // to save.
-static void syncOne(CCObject* sender, bool state) {
-    // Invert: toggle(true) = OFF visual, toggle(false) = ON visual.
-    static_cast<CCMenuItemToggler*>(sender)->toggle(!state);
-    BotManager::get().persist();
-}
-void onSpeedToggle(CCObject* sender) {
-    if (m_syncingToggles) return;
-    auto& bot = BotManager::get();
-    bot.speedhackEnabled = !bot.speedhackEnabled;
-    syncOne(sender, bot.speedhackEnabled);
-    bot.applySpeedhackAudio();          // Fix 1
-}
-void onPracticeFix(CCObject* sender) {
-    if (m_syncingToggles) return;
-    auto& bot = BotManager::get();
-    bot.practiceFixEnabled = !bot.practiceFixEnabled;
-    syncOne(sender, bot.practiceFixEnabled);
-}
-void onDeadInputs(CCObject* sender) {
-    if (m_syncingToggles) return;
-    auto& bot = BotManager::get();
-    bot.discardDeadInputs = !bot.discardDeadInputs;
-    syncOne(sender, bot.discardDeadInputs);
-}
-void onAutoSave(CCObject* sender) {
-    if (m_syncingToggles) return;
-    auto& bot = BotManager::get();
-    bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
-    syncOne(sender, bot.autoSaveOnComplete);
-}
+        // Each option callback: activate() has ALREADY flipped the toggler's
+    // visual, so we just READ the new visual state and copy it into our bool.
+    // We never call toggle() here, so there is no chance of a double-flip and
+    // no chance of cascading into the other toggles. persist() saves it.
+    void onSpeedToggle(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.speedhackEnabled = m_speedToggle->isToggled();
+        bot.persist();
+        bot.applyMusicSpeed(); // keep music pitch in sync with the new state
+    }
+    void onPracticeFix(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.practiceFixEnabled = m_practiceToggle->isToggled();
+        bot.persist();
+    }
+    void onDeadInputs(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.discardDeadInputs = m_deadToggle->isToggled();
+        bot.persist();
+    }
+    void onAutoSave(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.autoSaveOnComplete = m_autoSaveToggle->isToggled();
+        bot.persist();
+    }
     void onSave(CCObject*) {
         BotManager::get().saveMacro(BotManager::get().macroName);
     }

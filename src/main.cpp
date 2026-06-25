@@ -40,7 +40,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
-#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/ui/SceneManager.hpp>
 
 using namespace geode::prelude;
 
@@ -66,25 +66,6 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  CBS, or Syzzi's CBF queue. That makes it the perfect place to both record and
 //  inject, which is exactly why the whole bot is built around it.
 //
-static void attachUI(CCNode* parent) {
-    auto& bot = BotManager::get();
-    if (bot.ui) {
-        // Already exists — just re-parent it to the new layer.
-        bot.ui->retain();
-        bot.ui->removeFromParentAndCleanup(false);
-        parent->addChild(bot.ui, (std::numeric_limits<int>::max)());
-        bot.ui->release();
-        bot.ui->refreshAll();
-    } else {
-        auto ui = BotUILayer::create();
-        if (!ui) return;
-        parent->addChild(ui, (std::numeric_limits<int>::max)());
-        bot.ui = ui;
-        ui->refreshAll();
-    }
-}
-
-
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
     // ---- input capture (recording) ---------------------------------------
@@ -161,59 +142,62 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 //  PlayLayer hooks
 // ============================================================================
 
-class $modify(BotMenuLayer, MenuLayer) {
-    bool init() {
-        if (!MenuLayer::init()) return false;
-        attachUI(this);
-        return true;
-    }
-};
-
 class $modify(BotPlayLayer, PlayLayer) {
 
-    struct Fields { bool uiSpawned = false; };
-
+    // ---- level init: reset state (the UI is spawned globally now) --------
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
-        BotManager::get().onLevelReset(this);
-        if (!m_fields->uiSpawned) {
-            attachUI(this);
-            m_fields->uiSpawned = true;
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
+            return false;
         }
+        BotManager::get().onLevelReset(this);
+        // The floating GUI is created once in $on_mod(Loaded) and kept across
+        // every scene by geode::SceneManager, so it works on the menu, in the
+        // editor, AND inside levels. No per-PlayLayer spawn needed.
         return true;
     }
 
+    // (spawnUI() removed -- no longer used)
+
+    // ---- resetLevel: rewind the playback cursor --------------------------
     void resetLevel() {
         PlayLayer::resetLevel();
         BotManager::get().onLevelReset(this);
     }
+
+    // ---- full restart from the start: revert later inputs ----------------
     void resetLevelFromStart() {
         PlayLayer::resetLevelFromStart();
-        BotManager::get().onRestart(this, true);
+        BotManager::get().onRestart(this, /*fromStart=*/true);
     }
+
+    // ---- death handling --------------------------------------------------
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
         BotManager::get().onPlayerDeath(this);
     }
+
+    // ---- checkpoint stored: snapshot velocity + full player state --------
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         BotManager::get().onCheckpointStored(this, static_cast<void*>(checkpoint));
     }
+
+    // ---- checkpoint loaded: restore snapshot + discard dead inputs -------
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         BotManager::get().onCheckpointLoaded(this, static_cast<void*>(checkpoint));
     }
+
+    // ---- checkpoint removed: keep our stack in sync ----------------------
     void removeCheckpoint(bool first) {
         PlayLayer::removeCheckpoint(first);
         BotManager::get().onCheckpointRemoved();
     }
+
+    // ---- level complete: finish playback cleanly -------------------------
     void levelComplete() {
         BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
-    }
-    void onExit() {
-        BotManager::get().applySpeedhackAudio();
-        PlayLayer::onExit();
     }
 };
 
@@ -242,7 +226,7 @@ class $modify(BotPauseLayer, PauseLayer) {
 //  Mod entry point
 // ============================================================================
 
-$on_mod(Loaded) {
+ $on_mod(Loaded) {
     auto& bot = BotManager::get();
 
     // Pull any persisted options back in.
@@ -253,7 +237,6 @@ $on_mod(Loaded) {
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", false);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
 
-    // Report the CBF situation so the log makes the green/yellow/red state obvious.
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
             log::info("[Bot] Syzzi Click Between Frames detected -- full "
@@ -270,7 +253,18 @@ $on_mod(Loaded) {
             break;
     }
 
-    log::info("[Bot] Geode Time Macro loaded. Press K in a level to open the menu.");
+    // ---- spawn the floating GUI ONCE, globally ---------------------------
+    // SceneManager::keepNodeAcrossScenes re-parents it to every new scene, so
+    // K toggles the menu on the main menu, in the editor, and inside a level.
+    if (!bot.ui) {
+        if (auto ui = BotUILayer::create()) {
+            geode::SceneManager::get()->keepNodeAcrossScenes(ui);
+            bot.ui = ui;
+            ui->refreshAll();
+        }
+    }
+
+    log::info("[Bot] Geode Time Macro loaded. Press K anywhere to open the menu.");
 }
 
 // Note: Geode has no "unloaded" mod event, so options are persisted eagerly by
