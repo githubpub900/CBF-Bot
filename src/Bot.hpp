@@ -1335,7 +1335,7 @@ public:
             ++playbackIndex;
         }
     }
-    
+
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
         auto gl = GJBaseGameLayer::get();
@@ -1404,17 +1404,15 @@ public:
             resetHeldState();
             // Check what buttons are actually held right now
             if (pl->m_player1) {
-                // m_holdingButtons is a set of PlayerButton that the
-                // player is currently holding
-                for (auto& btn : pl->m_player1->m_holdingButtons) {
-                    int b = static_cast<int>(btn);
-                    if (b >= 1 && b <= 3) heldState[0][b] = true;
+                // m_holdingButtons is a map<int, bool> where key=button ID,
+                // value=whether it's currently held
+                for (auto const& [btn, held] : pl->m_player1->m_holdingButtons) {
+                    if (held && btn >= 1 && btn <= 3) heldState[0][btn] = true;
                 }
             }
             if (pl->m_player2) {
-                for (auto& btn : pl->m_player2->m_holdingButtons) {
-                    int b = static_cast<int>(btn);
-                    if (b >= 1 && b <= 3) heldState[1][b] = true;
+                for (auto const& [btn, held] : pl->m_player2->m_holdingButtons) {
+                    if (held && btn >= 1 && btn <= 3) heldState[1][btn] = true;
                 }
             }
         }
