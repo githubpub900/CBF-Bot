@@ -65,34 +65,7 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  jump / left / right, whether it came from a real key press, a touch, RobTop's
 //  CBS, or Syzzi's CBF queue. That makes it the perfect place to both record and
 //  inject, which is exactly why the whole bot is built around it.
-
-class $modify(BotScene, CCScene) {
-    void onEnter() {
-        CCScene::onEnter();
-
-        auto& bot = BotManager::get();
-
-        if (!bot.ui) {
-            auto ui = BotUILayer::create();
-
-            if (ui) {
-                bot.ui = ui;
-                this->addChild(ui, 999999);
-            }
-        }
-        else if (bot.ui->getParent() != this) {
-            bot.ui->retain();
-
-            if (bot.ui->getParent())
-                bot.ui->removeFromParentAndCleanup(false);
-
-            this->addChild(bot.ui, 999999);
-
-            bot.ui->release();
-        }
-    }
-};
-
+//
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
     // ---- input capture (recording) ---------------------------------------
@@ -128,15 +101,18 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // In the rare case a CBF build does not route through processCommands every
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
-void update(float dt) {
-    GJBaseGameLayer::update(dt);
+    void update(float dt) {
+        // Freeze gameplay while the GUI is open (our own pause -- no menu).
+        if (isPlay(this) && BotManager::get().guiPaused) {
+            return;
+        }
+        GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
             // Detect restarts / respawns (level clock jumping backwards) so a
             // re-recorded attempt overwrites the superseded inputs instead of
             // appending them.
             BotManager::get().syncRecordingToTime(this);
             BotManager::get().fireDueInputs(this);
-            BotManager::get().applyAudioSpeed();
         }
     }
 
@@ -165,41 +141,42 @@ void update(float dt) {
 // ============================================================================
 //  PlayLayer hooks
 // ============================================================================
+class $modify(BotSceneHook, cocos2d::CCScene) {
+    void onEnter() {
+        CCScene::onEnter();
 
+        auto& bot = BotManager::get();
+        if (!bot.ui) {
+            // First time: create the layer and add it to this scene.
+            auto ui = BotUILayer::create();
+            if (!ui) return;
+            this->addChild(ui, (std::numeric_limits<int>::max)());
+            bot.ui = ui;
+            ui->refreshAll();
+        } else if (bot.ui->getParent() != this) {
+            // Subsequent scenes: move the existing layer across.
+            bot.ui->retain();
+            bot.ui->removeFromParentAndCleanup(false); // detach without deleting
+            this->addChild(bot.ui, (std::numeric_limits<int>::max)());
+            bot.ui->release();
+            bot.ui->refreshAll();
+        }
+    }
+};
+
+// REPLACE the existing BotPlayLayer::init and Fields with this:
 class $modify(BotPlayLayer, PlayLayer) {
 
-    // Per-instance bookkeeping kept on the layer itself.
-    struct Fields {
-        bool uiSpawned = false;
-    };
+    // (Fields struct removed — no per-instance bookkeeping needed now)
 
-    // ---- level init: reset state and spawn the floating UI ---------------
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
             return false;
         }
-
-        auto& bot = BotManager::get();
-        bot.onLevelReset(this);
-
-        // Build the always-on-top GUI once and parent it high in the z-order so
-        // it floats above every gameplay layer. It owns its own keyboard
-        // delegate, so K toggles it regardless of what else has focus.
-if (!m_fields->uiSpawned) {
-    m_fields->uiSpawned = true;
-    spawnUI();  // <-- add this line
-}
-
+        // BotSceneHook::onEnter already placed the UI in this scene;
+        // we just need to reset bot state for the new level.
+        BotManager::get().onLevelReset(this);
         return true;
-    }
-
-    void spawnUI() {
-        auto ui = BotUILayer::create();
-        if (!ui) return;
-        // INT_MAX z-order -> above the gameplay, objects, and HUD.
-        this->addChild(ui, (std::numeric_limits<int>::max)());
-        BotManager::get().ui = ui;
-        ui->refreshAll();
     }
 
     // ---- resetLevel: rewind the playback cursor --------------------------
@@ -208,51 +185,39 @@ if (!m_fields->uiSpawned) {
         BotManager::get().onLevelReset(this);
     }
 
-    // ---- full restart from the start: revert later inputs ----------------
     void resetLevelFromStart() {
         PlayLayer::resetLevelFromStart();
         BotManager::get().onRestart(this, /*fromStart=*/true);
     }
 
-    // ---- death handling --------------------------------------------------
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
         BotManager::get().onPlayerDeath(this);
     }
 
-    // ---- checkpoint stored: snapshot velocity + full player state --------
-    //
-    // storeCheckpoint is the funnel every practice checkpoint passes through
-    // (manual or automatic). We snapshot here, *after* the engine has registered
-    // the checkpoint, so our parallel stack stays one-to-one with
-    // m_checkpointArray and we capture the exact physics state at that instant.
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         BotManager::get().onCheckpointStored(this, static_cast<void*>(checkpoint));
     }
 
-    // ---- checkpoint loaded: restore snapshot + discard dead inputs -------
-    //
-    // We let the engine do its own (imperfect) restore first, then apply our
-    // accurate snapshot on top -- correcting the velocity / per-gamemode flags
-    // that vanilla practice mode gets wrong. We also truncate the recording back
-    // to the checkpoint, throwing away the "dead inputs" made on the failed
-    // attempt.
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         BotManager::get().onCheckpointLoaded(this, static_cast<void*>(checkpoint));
     }
 
-    // ---- checkpoint removed: keep our stack in sync ----------------------
     void removeCheckpoint(bool first) {
         PlayLayer::removeCheckpoint(first);
         BotManager::get().onCheckpointRemoved();
     }
 
-    // ---- level complete: finish playback cleanly -------------------------
     void levelComplete() {
         BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
+    }
+
+    void onExit() {
+        BotManager::get().applySpeedhackAudio(); // reset pitch (see Fix 1)
+        PlayLayer::onExit();
     }
 };
 
