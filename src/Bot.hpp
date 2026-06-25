@@ -1437,6 +1437,7 @@ public:
         // Touches: we register our own targeted delegate (see
         // registerWithTouchDispatcher) so the panel can swallow background clicks
         // and be dragged without leaking input to the gameplay underneath.
+        cocos2d::CCDirector::sharedDirector()->getKeyboardDispatcher()->addDelegate(this);
         this->setTouchEnabled(true);
         this->setTouchMode(cocos2d::kCCTouchesOneByOne);
         this->setZOrder((std::numeric_limits<int>::max)());
