@@ -66,25 +66,24 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  CBS, or Syzzi's CBF queue. That makes it the perfect place to both record and
 //  inject, which is exactly why the whole bot is built around it.
 //
-static void ensureUI() {
-    auto scene = CCDirector::sharedDirector()->getRunningScene();
-    if (!scene) return;
-
+static void attachUI(CCNode* parent) {
     auto& bot = BotManager::get();
-    if (!bot.ui) {
-        auto ui = BotUILayer::create();
-        if (!ui) return;
-        scene->addChild(ui, (std::numeric_limits<int>::max)());
-        bot.ui = ui;
-        ui->refreshAll();
-    } else if (bot.ui->getParent() != scene) {
+    if (bot.ui) {
+        // Already exists — just re-parent it to the new layer.
         bot.ui->retain();
         bot.ui->removeFromParentAndCleanup(false);
-        scene->addChild(bot.ui, (std::numeric_limits<int>::max)());
+        parent->addChild(bot.ui, (std::numeric_limits<int>::max)());
         bot.ui->release();
         bot.ui->refreshAll();
+    } else {
+        auto ui = BotUILayer::create();
+        if (!ui) return;
+        parent->addChild(ui, (std::numeric_limits<int>::max)());
+        bot.ui = ui;
+        ui->refreshAll();
     }
 }
+
 
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
@@ -165,65 +164,55 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 class $modify(BotMenuLayer, MenuLayer) {
     bool init() {
         if (!MenuLayer::init()) return false;
-        ensureUI();
+        attachUI(this);
         return true;
     }
 };
 
-// REPLACE the existing BotPlayLayer::init and Fields with this:
 class $modify(BotPlayLayer, PlayLayer) {
 
-    // (Fields struct removed — no per-instance bookkeeping needed now)
+    struct Fields { bool uiSpawned = false; };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
-            return false;
-        }
-        // BotSceneHook::onEnter already placed the UI in this scene;
-        // we just need to reset bot state for the new level.
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         BotManager::get().onLevelReset(this);
-         ensureUI();
+        if (!m_fields->uiSpawned) {
+            attachUI(this);
+            m_fields->uiSpawned = true;
+        }
         return true;
     }
 
-    // ---- resetLevel: rewind the playback cursor --------------------------
     void resetLevel() {
         PlayLayer::resetLevel();
         BotManager::get().onLevelReset(this);
     }
-
     void resetLevelFromStart() {
         PlayLayer::resetLevelFromStart();
-        BotManager::get().onRestart(this, /*fromStart=*/true);
+        BotManager::get().onRestart(this, true);
     }
-
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
         BotManager::get().onPlayerDeath(this);
     }
-
     void storeCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::storeCheckpoint(checkpoint);
         BotManager::get().onCheckpointStored(this, static_cast<void*>(checkpoint));
     }
-
     void loadFromCheckpoint(CheckpointObject* checkpoint) {
         PlayLayer::loadFromCheckpoint(checkpoint);
         BotManager::get().onCheckpointLoaded(this, static_cast<void*>(checkpoint));
     }
-
     void removeCheckpoint(bool first) {
         PlayLayer::removeCheckpoint(first);
         BotManager::get().onCheckpointRemoved();
     }
-
     void levelComplete() {
         BotManager::get().onLevelComplete(this);
         PlayLayer::levelComplete();
     }
-
     void onExit() {
-        BotManager::get().applySpeedhackAudio(); // reset pitch (see Fix 1)
+        BotManager::get().applySpeedhackAudio();
         PlayLayer::onExit();
     }
 };
