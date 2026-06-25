@@ -994,11 +994,11 @@ public:
 
             // Push to m_queuedButtons. The timestamp format must match what
             // CBF expects: a wall-clock time comparable to its currentFrameTime.
-            pl->m_queuedButtons.push_back({
+                      pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
-                static_cast<float>(inputWallTime)
+                static_cast<int>(inputWallTime * 1000.0)  // ms as int
             });
             
             ++playbackIndex;
