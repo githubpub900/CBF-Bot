@@ -930,7 +930,6 @@ public:
             notifyNoCBF();
             return;
         }
-    }
         if (macro.empty()) {
             notify("No macro to play", NotificationIcon::Warning);
             return;
@@ -939,13 +938,13 @@ public:
         validateAndRepair();
         warnIfWrongLevel();
         mode = bot::Mode::Playing;
-        seekPlaybackTo(levelTime(gl));
-        applyHeldStateAt(gl, levelTime(gl));
 
-        // Capture the wall-clock / level-time pair for CBF timestamp conversion.
+        // Capture the wall-clock / level-time pair for timestamp conversion.
         playbackStartWallTime  = getWallTime();
         playbackStartLevelTime = levelTime(gl);
 
+        seekPlaybackTo(levelTime(gl));
+        applyHeldStateAt(gl, levelTime(gl));
         log::info("[Bot] Playback started {}", description());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
