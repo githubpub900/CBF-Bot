@@ -253,18 +253,21 @@ class $modify(BotPauseLayer, PauseLayer) {
     }
 
     // ---- spawn the floating GUI ONCE, globally ---------------------------
-    // The UI re-parents itself to the current running scene every frame from
-    // its update() hook, so K toggles it on the main menu, in the editor,
-    // AND inside a level -- without needing SceneManager.
+    // retain() is the load-bearing part: BotUILayer::create() returns an
+    // autoreleased object, and at mod-load time there is usually no running
+    // scene yet to parent it to. Without this retain, the autorelease pool
+    // would destroy the layer at end of frame, leaving bot.ui dangling --
+    // which is exactly why K did nothing. The manual retain keeps it alive
+    // until its own update() adopts it into the running scene.
     if (!bot.ui) {
         if (auto ui = BotUILayer::create()) {
-            // Parent to whatever scene is currently running (may be null on
-            // the very first frame; update() will adopt us as soon as one
-            // appears).
+            ui->retain();
+            bot.ui = ui;
+            // Try to parent immediately if a scene already exists; otherwise
+            // update() will adopt us as soon as one appears.
             if (auto scene = CCDirector::sharedDirector()->getRunningScene()) {
                 scene->addChild(ui, (std::numeric_limits<int>::max)());
             }
-            bot.ui = ui;
             ui->refreshAll();
         }
     }

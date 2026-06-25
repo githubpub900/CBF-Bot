@@ -1440,6 +1440,33 @@ public:
         this->scheduleUpdate();
         return true;
     }
+    
+    // --- survive scene transitions ---------------------------------------
+    // When the scene the UI is parented to gets destroyed (menu -> level,
+    // level -> pause, etc.), cocos2d recursively calls cleanup() on every
+    // child. The base CCLayer::cleanup() would:
+    //   * unschedule all our selectors  -> update() stops firing
+    //   * remove the keyboard delegate  -> K stops working
+    //   * remove the touch delegate     -> panel can't be clicked/dragged
+    //
+    // We intentionally skip the base class so all of those survive. We also
+    // null out m_pParent: the old scene's destructor will still release us
+    // (which is fine, we have a manual retain), but m_pParent would otherwise
+    // be left dangling -- and update() comparing getParent() to the new
+    // scene would dereference that dangling pointer. Setting it to null here
+    // makes getParent() safely return null after the old scene is gone, so
+    // update() can detect "I'm orphaned, re-parent me" without UB.
+    void cleanup() override {
+        m_pParent = nullptr;
+        // Still recursively clean up our own children so their scheduled
+        // callbacks / delegates don't leak.
+        if (m_pChildren && m_pChildren->count() > 0) {
+            cocos2d::CCObject* child;
+            CCARRAY_FOREACH(m_pChildren, child) {
+                static_cast<cocos2d::CCNode*>(child)->cleanup();
+            }
+        }
+    }
 
     // --- keyboard: toggle the panel on K ----------------------------------
     void keyDown(cocos2d::enumKeyCodes key, double timing) override {
