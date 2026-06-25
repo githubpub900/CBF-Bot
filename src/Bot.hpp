@@ -645,38 +645,6 @@ struct PlayerSnapshot {
     }
 };
 
-    // ----- CBF integration ------------------------------------------------
-    // CBF's m_queuedButtons uses wall-clock timestamps, not level time.
-    // We capture the wall-clock / level-time pair at playback start and
-    // convert each input's level time to a wall-clock time for CBF.
-    double    playbackStartWallTime = 0.0;
-    double    playbackStartLevelTime = 0.0;
-
-    // Get the current wall-clock time using the EXACT same timer CBF uses.
-    // This is critical: CBF compares m_timestamp against its own
-    // currentFrameTime, so if we use a different timer, the subtraction
-    // gives a huge wrong value and CBF never fires our inputs.
-    static double getWallTime() {
-        #if defined(GEODE_IS_WINDOWS)
-        // CBF uses QueryPerformanceCounter / freq on Windows
-        static LARGE_INTEGER freq = [](){
-            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
-        }();
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-
-        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
-        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-
-        #else
-        // CBF uses clock_gettime(CLOCK_MONOTONIC) on Android/Linux
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
-        #endif
-    }
 
 // ============================================================================
 //  CheckpointFrame  --  what we remember each time a practice checkpoint is set.
@@ -837,6 +805,40 @@ public:
         }
     }
 
+
+        // ----- CBF integration ------------------------------------------------
+    // CBF's m_queuedButtons uses wall-clock timestamps, not level time.
+    // We capture the wall-clock / level-time pair at playback start and
+    // convert each input's level time to a wall-clock time for CBF.
+    double    playbackStartWallTime = 0.0;
+    double    playbackStartLevelTime = 0.0;
+
+    // Get the current wall-clock time using the EXACT same timer CBF uses.
+    // This is critical: CBF compares m_timestamp against its own
+    // currentFrameTime, so if we use a different timer, the subtraction
+    // gives a huge wrong value and CBF never fires our inputs.
+    static double getWallTime() {
+        #if defined(GEODE_IS_WINDOWS)
+        // CBF uses QueryPerformanceCounter / freq on Windows
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+
+        #else
+        // CBF uses clock_gettime(CLOCK_MONOTONIC) on Android/Linux
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
+        #endif
+    }
+    
     // The smallest time delta the current CBF setup can resolve, in seconds.
     // Syzzi is effectively continuous, so we report the physics tick as a floor;
     // RobTop is bounded by its 480 FPS window.
@@ -887,7 +889,7 @@ public:
         if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
         return baseLevelTime + levelElapsed;
     }
-    
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
