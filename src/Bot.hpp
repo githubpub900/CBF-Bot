@@ -312,13 +312,14 @@ struct InputEvent {
     }
 };
 
-// Directly force a CCMenuItemToggler's internal state + visual to match a
-// desired bool. The binding (CCMenuItemToggler.cpp) shows the field is
-// `m_toggled`, and toggle(bool) is the public setter that updates it + the
-// button visibility. We use toggle(bool) directly — it's idempotent.
+// Directly set m_toggled AND button visibility. No reliance on toggle(bool),
+// which doesn't work reliably on some Geode v5 builds. The binding shows
+// the field is `m_toggled` and the buttons are `m_onButton`/`m_offButton`.
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
-    t->toggle(on);
+    t->m_toggled = on;
+    if (t->m_onButton)  t->m_onButton->setVisible(on);
+    if (t->m_offButton) t->m_offButton->setVisible(!on);
 }
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
@@ -781,7 +782,10 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
-
+    double m_frameStartWall = 0.0;
+    double m_frameStartLevel = 0.0;
+    double m_prevFrameDelta = 0.0;
+    
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -868,6 +872,22 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
+    double preciseLevelTime(GJBaseGameLayer* gl) {
+        if (!gl) return 0.0;
+        double baseLevelTime = levelTime(gl);
+        double wallNow = getWallTime();
+        double speed = speedMultiplier();
+        // How much wall time has elapsed since frame start:
+        double wallElapsed = wallNow - m_frameStartWall;
+        if (wallElapsed < 0.0) wallElapsed = 0.0;
+        // Convert to level time:
+        double levelElapsed = wallElapsed * speed;
+        // Clamp to this frame's level advance to avoid overshooting:
+        double maxElapsed = m_prevFrameDelta * speed;
+        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
+        return baseLevelTime + levelElapsed;
+    }
+    
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1030,7 +1050,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+      void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1041,26 +1061,14 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        double t = levelTime(gl);
+        // Use preciseLevelTime for sub-frame recording precision
+        double t = preciseLevelTime(gl);
+
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
         }
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
-
-        // Capture player positions for state alignment during playback.
-        if (auto pl = PlayLayer::get()) {
-            if (pl->m_player1) {
-                e.p1x = pl->m_player1->getPositionX();
-                e.p1y = pl->m_player1->getPositionY();
-            }
-            if (pl->m_player2) {
-                e.p2x = pl->m_player2->getPositionX();
-                e.p2y = pl->m_player2->getPositionY();
-            }
-            e.hasState = true;
-        }
-
         macro.events.emplace_back(e);
         refreshUIProgress();
     }
@@ -1151,49 +1159,41 @@ public:
     //
     // This is called from our getModifiedDelta hook (which runs BEFORE CBF's
     // hook) so the inputs are in the queue before CBF processes them.
-            void pushDueInputsToCBF() {
+         void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
         auto pl = PlayLayer::get();
         if (!pl) return;
 
-        double currentWallTime = getWallTime();
-        double currentLevelTime = levelTime(pl);
         double speed = speedMultiplier();
+        if (speed <= 0.0) return;
 
         // CBF's frame window is [lastFrameTime, currentFrameTime].
-        // currentFrameTime was set at frame start (very recently, ~now).
-        // lastFrameTime = currentFrameTime - frameDelta (from previous frame).
-        // We approximate lastFrameTime as currentWallTime - actualDelta.
-        float directorDelta = CCDirector::sharedDirector()->getActualDeltaTime();
-        double lastFrameTime = currentWallTime - static_cast<double>(directorDelta);
+        // lastFrameTime = m_frameStartWall - m_prevFrameDelta (previous frame's start)
+        // currentFrameTime = m_frameStartWall (this frame's start, captured in CCScheduler::update)
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
 
         // The input fires when m_levelTime reaches e.time.
-        // This frame advances m_levelTime by (directorDelta * speed).
-        // So the input fires at wall-time: lastFrameTime + (e.time - currentLevelTime) / speed
-        // ...but only if e.time is within [currentLevelTime, currentLevelTime + frameLevelAdvance]
-        double frameLevelAdvance = static_cast<double>(directorDelta) * speed;
+        // Frame started at m_frameStartLevel (level time at frame start).
+        // Wall time for the input: currentFrameTime + (e.time - m_frameStartLevel) / speed
+        double frameLevelAdvance = m_prevFrameDelta * speed;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
 
-            double levelDelta = e.time - currentLevelTime;
+            double levelDelta = e.time - m_frameStartLevel;
 
-            // If this input is in the past, fire it directly (rare)
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            // If this input is beyond this frame, stop
+            // If this input is beyond this frame, stop — next frame will push it
             if (levelDelta > frameLevelAdvance + 0.0001) break;
 
             // Compute the wall-clock time within CBF's frame window
-            double inputWallTime = lastFrameTime + levelDelta / speed;
+            double inputWallTime = currentFrameTime + levelDelta / speed;
+
+            // Clamp to CBF's frame window to handle rounding edge cases
+            if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
+            if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
 
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
@@ -2189,8 +2189,8 @@ private:
     // ----- button callbacks -----------------------------------------------
     void onRecord(CCObject*) {
         BotManager::get().toggleRecording(GJBaseGameLayer::get());
-        // Only sync the mode toggles -- do NOT call refreshAll here, otherwise
-        // syncToggles would poke every option toggle and could desync them.
+        // Force the visual to match the actual mode. Don't rely on activate()
+        // or toggle(bool) — set m_toggled + visibility directly.
         syncModeToggles();
         refreshProgress();
     }

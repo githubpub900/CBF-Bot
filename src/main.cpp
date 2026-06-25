@@ -42,8 +42,38 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
+
+
+// ============================================================================
+//  CCScheduler hook  --  capture frame-start wall time (matches CBF's timer)
+// ============================================================================
+//
+//  CBF sets currentFrameTime in onFrameStart(), which is called from
+//  CCScheduler::update (on non-Windows) or CCEGLView::pollEvents (Windows).
+//  We hook CCScheduler::update with VeryEarly priority to capture getWallTime()
+//  BEFORE CBF's hook runs, so our m_frameStartWall ≈ CBF's currentFrameTime.
+//
+class $modify(BotCCScheduler, CCScheduler) {
+    static void onModify(auto& self) {
+        // Run BEFORE CBF so we capture the wall time at the same moment.
+        (void) self.setHookPriority("CCScheduler::update", -1000000);
+    }
+
+    void update(float dt) {
+        // Capture frame-start state BEFORE anything else runs this frame.
+        auto& bot = BotManager::get();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        if (auto pl = PlayLayer::get()) {
+            bot.m_frameStartLevel = BotManager::levelTime(pl);
+        }
+        CCScheduler::update(dt);
+    }
+};
 
 // ============================================================================
 //  Small helpers
@@ -98,8 +128,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // Inputs are now pushed to m_queuedButtons from getModifiedDelta,
-        // and CBF fires them at the right sub-step. No need to fire here.
+        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
+           // BotManager::get().fireDueInputs(this, 0.0f);
+        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -134,9 +165,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
         }
-        // Push our playback inputs to m_queuedButtons BEFORE CBF processes
-        // them. CBF's getModifiedDelta hook runs after ours and calls
-        // buildStepQueue(), which reads from m_queuedButtons.
+        // Push inputs to CBF's queue with precise timestamps.
+        // This runs BEFORE CBF's buildStepQueue (we have VeryEarly priority).
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.pushDueInputsToCBF();
         }
