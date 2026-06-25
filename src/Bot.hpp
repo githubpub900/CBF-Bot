@@ -748,14 +748,6 @@ public:
     double m_frameStartWall = 0.0;
     double m_frameStartLevel = 0.0;
     double m_prevFrameDelta = 0.0;
-
-    // Frame-start anchors, captured in CCScheduler::update BEFORE CBF runs.
-    // These align with CBF's currentFrameTime / lastFrameTime, so our
-    // timestamp conversion is deterministic (no randomness from mid-frame
-    // getWallTime() calls).
-    double m_frameStartWall = 0.0;
-    double m_frameStartLevel = 0.0;
-    double m_prevFrameDelta = 0.0;
     
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
