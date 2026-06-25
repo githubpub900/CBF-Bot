@@ -528,7 +528,6 @@ public:
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
     bool      normalizeRecording = false; // shift events so the first one is t=0
-    bool m_syncingToggles = false; // guard: prevents syncToggles() from re-entering callbacks
 
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
@@ -1386,6 +1385,7 @@ protected:
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
+    bool m_syncingToggles = false; // guard: prevents syncToggles() from re-entering callbacks
 
     // Drag state for the panel title bar.
     bool             m_dragging   = false;
