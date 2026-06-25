@@ -1450,7 +1450,7 @@ public:
     }
 
     // --- keyboard: toggle the panel on K ----------------------------------
-    void keyDown(cocos2d::enumKeyCodes key) override {
+    void keyDown(cocos2d::enumKeyCodes key, double timing) override {
         auto& bot = BotManager::get();
         switch (key) {
             case bot::TOGGLE_KEY:                       // K -> toggle the menu
@@ -1471,7 +1471,7 @@ public:
             default:
                 break;
         }
-        CCLayer::keyDown(key);
+        CCLayer::keyDown(key, timing);
     }
 
     void togglePanel() { setPanelVisible(!m_visible); }
