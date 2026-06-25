@@ -327,13 +327,13 @@ static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
 struct PlayerSnapshot {
     bool   valid = false;
 
-    // Transform.
+    // Transform
     cocos2d::CCPoint position{0.f, 0.f};
     float  rotation = 0.f;
     float  scaleX = 1.f;
     float  scaleY = 1.f;
 
-    // Velocity / gravity (the bits RobTop's checkpoint is sloppy about).
+    // Velocity / gravity
     double yVelocity = 0.0;
     double platformerXVelocity = 0.0;
     double gravity = 0.0;
@@ -342,95 +342,35 @@ struct PlayerSnapshot {
     float  gravityMod = 1.f;
     double yStart = 0.0;
 
-    // Gamemode booleans -- "all gamemodes".
+    // Gamemode booleans
     bool isShip = false;
-    bool isBird = false;     // UFO
+    bool isBird = false;
     bool isBall = false;
-    bool isDart = false;     // wave
+    bool isDart = false;
     bool isRobot = false;
     bool isSpider = false;
     bool isSwing = false;
 
-    // Orientation / contact state.
+    // Orientation / contact state
     bool isUpsideDown = false;
     bool isSideways = false;
     bool isGoingLeft = false;
     bool isOnGround = false;
     bool isOnGround2 = false;
+    bool isOnGround3 = false;
+    bool isOnGround4 = false;
     bool isDashing = false;
     bool isLocked = false;
     bool isDead = false;
     bool isHolding = false;
 
-    // Platformer movement intent.
+    // Platformer movement intent
     bool platformerMovingLeft = false;
     bool platformerMovingRight = false;
 
-        // Velocity / physics state
-    // double m_xVelocity = 0.0;
-    double m_slopeVelocity = 0.0;
-    double m_slopeStartTime = 0.0;
-    float  m_rotateSpeed = 1.0f;
-    float  m_rotationSpeed = 0.f;
-    float  m_vehicleSize = 1.f;
-    float  m_playerSpeed = 0.9f;
-    double m_totalTime = 0.0;
-    double m_gameModeChangedTime = 0.0;
-    double m_lastFlipTime = 0.0;
-    double m_lastSpiderFlipTime = 0.0;
-    double m_lastLandTime = 0.0;
-    double m_yStart = 0.0;
+    cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
 
-    // State flags
-    bool m_isRotating = false;
-    bool m_isBallRotating = false;
-    bool m_isBallRotating2 = false;
-    bool m_isCurrentSlopeTop = false;
-    bool m_slopeFlipGravityRelated = false;
-    bool m_wasOnSlope = false;
-    bool m_isOnSlope = false;
-    bool m_isOnSlope2 = false;  // may not exist, see note
-    bool m_isOnGround4 = false;
-    bool m_isHidden = false;
-    bool m_isPlatformer = false;
-    bool m_isAccelerating = false;
-    bool m_affectedByForces = false;
-    bool m_jumpBuffered = false;
-    bool m_stateJumpBuffered = false;
-    bool m_stateRingJump = false;
-    bool m_stateRingJump2 = false;
-    bool m_wasTeleported = false;
-    bool m_ringJumpRelated = false;
-    bool m_maybeSpriteRelated = false;
-    bool m_isDontBoostX = false;
-    bool m_isDontBoostY = false;
-    bool m_stateBoostX = false;
-    bool m_stateBoostY = false;
-
-    // Collision state
-    int m_lastCollisionBottom = -1;
-    int m_lastCollisionTop = -1;
-    int m_lastCollisionLeft = -1;
-    int m_lastCollisionRight = -1;
-    int m_stateOnGround = 0;
-    int m_stateHitHead = 0;
-    int m_stateFlipGravity = 0;
-    int m_stateForce = 0;
-    int m_stateDartSlide = 0;
-    int m_stateNoAutoJump = 0;
-    int m_stateScale = 0;
-    cocos2d::CCPoint m_stateForceVector {0.f, 0.f};
-
-    // Gamemode-specific
-    bool m_isShip = false;
-    bool m_isBird = false;
-    bool m_isBall = false;
-    bool m_isDart = false;
-    bool m_isRobot = false;
-    bool m_isSpider = false;
-    bool m_isSwing = false;
-
-        // --- Slope state (critical for slope accuracy) ---
+    // --- Slope state (critical for slope accuracy) ---
     GameObject* m_currentSlope = nullptr;
     GameObject* m_currentSlope2 = nullptr;
     GameObject* m_currentSlope3 = nullptr;
@@ -449,6 +389,7 @@ struct PlayerSnapshot {
     int    m_collidingWithSlopeId = 0;
     bool   m_isCurrentSlopeTop = false;
     bool   m_maybeUpsideDownSlope = false;
+    bool   m_wasOnSlope = false;
 
     // --- Dash state (critical for dash orbs) ---
     double m_dashX = 0.0;
@@ -457,7 +398,7 @@ struct PlayerSnapshot {
     double m_dashStartTime = 0.0;
     GameObject* m_dashRing = nullptr;
 
-    // --- Collision state (critical for ground/platform accuracy) ---
+    // --- Collision state ---
     cocos2d::CCArray* m_collisionLogTop = nullptr;
     cocos2d::CCArray* m_collisionLogBottom = nullptr;
     cocos2d::CCArray* m_collisionLogLeft = nullptr;
@@ -484,12 +425,8 @@ struct PlayerSnapshot {
     double m_platformerVelocityRelated = 0.0;
     float  m_shipRotation = 0.f;
     float  m_vehicleSize = 1.f;
-
-    // --- Ground state ---
-    bool   m_isOnGround2 = false;
-    bool   m_isOnGround3 = false;
-    bool   m_isOnGround4 = false;
-    bool   m_wasOnSlope = false;
+    float  m_rotateSpeed = 1.0f;
+    float  m_rotationSpeed = 0.f;
 
     // --- Time tracking ---
     double m_totalTime = 0.0;
@@ -519,6 +456,11 @@ struct PlayerSnapshot {
     bool   m_maybeGoingCorrectSlopeDirection = false;
     bool   m_maybeHasStopped = false;
 
+    // --- Rotation state ---
+    bool   m_isRotating = false;
+    bool   m_isBallRotating = false;
+    bool   m_isBallRotating2 = false;
+
     // --- Other important fields ---
     cocos2d::CCArray* m_touchingRings = nullptr;
     GameObject* m_lastActivatedPortal = nullptr;
@@ -529,23 +471,24 @@ struct PlayerSnapshot {
     bool   m_isOutOfBounds = false;
     bool   m_inputsLocked = false;
     bool   m_controlsDisabled = false;
-    bool   m_isLocked = false;
+    bool   m_isHidden = false;
+    bool   m_isPlatformer = false;
     bool   m_quickCheckpointMode = false;
     bool   m_checkpointTimeout = false;
     double m_lastCheckpointTime = 0.0;
-
-    cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
 
     // Capture every field above out of a live PlayerObject.
     void capture(PlayerObject* p) {
         if (!p) { valid = false; return; }
         valid = true;
 
+        // Transform
         position = p->getPosition();
         rotation = p->getRotation();
         scaleX   = p->getScaleX();
         scaleY   = p->getScaleY();
 
+        // Velocity / gravity
         yVelocity           = p->m_yVelocity;
         platformerXVelocity = p->m_platformerXVelocity;
         gravity             = p->m_gravity;
@@ -554,6 +497,7 @@ struct PlayerSnapshot {
         gravityMod          = p->m_gravityMod;
         yStart              = p->m_yStart;
 
+        // Gamemode
         isShip   = p->m_isShip;
         isBird   = p->m_isBird;
         isBall   = p->m_isBall;
@@ -562,83 +506,23 @@ struct PlayerSnapshot {
         isSpider = p->m_isSpider;
         isSwing  = p->m_isSwing;
 
+        // Orientation / contact
         isUpsideDown = p->m_isUpsideDown;
         isSideways   = p->m_isSideways;
         isGoingLeft  = p->m_isGoingLeft;
         isOnGround   = p->m_isOnGround;
         isOnGround2  = p->m_isOnGround2;
+        isOnGround3  = p->m_isOnGround3;
+        isOnGround4  = p->m_isOnGround4;
         isDashing    = p->m_isDashing;
         isLocked     = p->m_isLocked;
         isDead       = p->m_isDead;
 
         platformerMovingLeft  = p->m_platformerMovingLeft;
         platformerMovingRight = p->m_platformerMovingRight;
-
         lastGroundedPos = p->m_lastGroundedPos;
 
-                // Velocity / physics
-       // m_xVelocity = p->m_xVelocity;
-        m_slopeVelocity = p->m_slopeVelocity;
-        m_slopeStartTime = p->m_slopeStartTime;
-        m_rotateSpeed = p->m_rotateSpeed;
-        m_rotationSpeed = p->m_rotationSpeed;
-        m_vehicleSize = p->m_vehicleSize;
-        m_playerSpeed = p->m_playerSpeed;
-        m_totalTime = p->m_totalTime;
-        m_gameModeChangedTime = p->m_gameModeChangedTime;
-        m_lastFlipTime = p->m_lastFlipTime;
-        m_lastSpiderFlipTime = p->m_lastSpiderFlipTime;
-        m_lastLandTime = p->m_lastLandTime;
-        m_yStart = p->m_yStart;
-
-        // State flags
-        m_isRotating = p->m_isRotating;
-        m_isBallRotating = p->m_isBallRotating;
-        m_isBallRotating2 = p->m_isBallRotating2;
-        m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
-        m_slopeFlipGravityRelated = p->m_slopeFlipGravityRelated;
-        m_wasOnSlope = p->m_wasOnSlope;
-        m_isOnSlope = p->m_isOnSlope;
-        // m_isOnSlope2 may not exist — comment out if compile error
-        // m_isOnGround4 = p->m_isOnGround4;
-        m_isHidden = p->m_isHidden;
-        m_isPlatformer = p->m_isPlatformer;
-        m_isAccelerating = p->m_isAccelerating;
-        m_affectedByForces = p->m_affectedByForces;
-        m_jumpBuffered = p->m_jumpBuffered;
-        m_stateJumpBuffered = p->m_stateJumpBuffered;
-        m_stateRingJump = p->m_stateRingJump;
-        m_stateRingJump2 = p->m_stateRingJump2;
-        m_wasTeleported = p->m_wasTeleported;
-        m_ringJumpRelated = p->m_ringJumpRelated;
-        m_maybeSpriteRelated = p->m_maybeSpriteRelated;
-        m_isDontBoostX = p->m_isDontBoostX;
-        m_isDontBoostY = p->m_isDontBoostY;
-
-        // Collision state
-        m_lastCollisionBottom = p->m_lastCollisionBottom;
-        m_lastCollisionTop = p->m_lastCollisionTop;
-        m_lastCollisionLeft = p->m_lastCollisionLeft;
-        m_lastCollisionRight = p->m_lastCollisionRight;
-        m_stateOnGround = p->m_stateOnGround;
-        m_stateHitHead = p->m_stateHitHead;
-        m_stateFlipGravity = p->m_stateFlipGravity;
-        m_stateForce = p->m_stateForce;
-        m_stateDartSlide = p->m_stateDartSlide;
-        m_stateNoAutoJump = p->m_stateNoAutoJump;
-        m_stateScale = p->m_stateScale;
-        m_stateForceVector = p->m_stateForceVector;
-
-        // Gamemode
-        m_isShip = p->m_isShip;
-        m_isBird = p->m_isBird;
-        m_isBall = p->m_isBall;
-        m_isDart = p->m_isDart;
-        m_isRobot = p->m_isRobot;
-        m_isSpider = p->m_isSpider;
-        m_isSwing = p->m_isSwing;
-
-                // Slope
+        // Slope
         m_currentSlope = p->m_currentSlope;
         m_currentSlope2 = p->m_currentSlope2;
         m_currentSlope3 = p->m_currentSlope3;
@@ -657,6 +541,7 @@ struct PlayerSnapshot {
         m_collidingWithSlopeId = p->m_collidingWithSlopeId;
         m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
         m_maybeUpsideDownSlope = p->m_maybeUpsideDownSlope;
+        m_wasOnSlope = p->m_wasOnSlope;
 
         // Dash
         m_dashX = p->m_dashX;
@@ -685,19 +570,15 @@ struct PlayerSnapshot {
         m_collidingWithLeft = p->m_collidingWithLeft;
         m_collidingWithRight = p->m_collidingWithRight;
 
-        // Velocity
+        // Velocity / physics
         m_groundYVelocity = p->m_groundYVelocity;
         m_yVelocityRelated = p->m_yVelocityRelated;
         m_fallSpeed = p->m_fallSpeed;
         m_platformerVelocityRelated = p->m_platformerVelocityRelated;
         m_shipRotation = p->m_shipRotation;
         m_vehicleSize = p->m_vehicleSize;
-
-        // Ground
-        m_isOnGround2 = p->m_isOnGround2;
-        m_isOnGround3 = p->m_isOnGround3;
-        m_isOnGround4 = p->m_isOnGround4;
-        m_wasOnSlope = p->m_wasOnSlope;
+        m_rotateSpeed = p->m_rotateSpeed;
+        m_rotationSpeed = p->m_rotationSpeed;
 
         // Time
         m_totalTime = p->m_totalTime;
@@ -727,6 +608,11 @@ struct PlayerSnapshot {
         m_maybeGoingCorrectSlopeDirection = p->m_maybeGoingCorrectSlopeDirection;
         m_maybeHasStopped = p->m_maybeHasStopped;
 
+        // Rotation
+        m_isRotating = p->m_isRotating;
+        m_isBallRotating = p->m_isBallRotating;
+        m_isBallRotating2 = p->m_isBallRotating2;
+
         // Other
         m_touchingRings = p->m_touchingRings;
         m_lastActivatedPortal = p->m_lastActivatedPortal;
@@ -737,23 +623,24 @@ struct PlayerSnapshot {
         m_isOutOfBounds = p->m_isOutOfBounds;
         m_inputsLocked = p->m_inputsLocked;
         m_controlsDisabled = p->m_controlsDisabled;
-        m_isLocked = p->m_isLocked;
+        m_isHidden = p->m_isHidden;
+        m_isPlatformer = p->m_isPlatformer;
         m_quickCheckpointMode = p->m_quickCheckpointMode;
         m_checkpointTimeout = p->m_checkpointTimeout;
         m_lastCheckpointTime = p->m_lastCheckpointTime;
     }
 
-    // Push every captured field back into a live PlayerObject. Called *after*
-    // RobTop's own loadFromCheckpoint has run, so we only correct what it got
-    // wrong rather than fighting it.
+    // Push every captured field back into a live PlayerObject.
     void apply(PlayerObject* p) const {
         if (!p || !valid) return;
 
+        // Transform
         p->setPosition(position);
         p->setRotation(rotation);
         p->setScaleX(scaleX);
         p->setScaleY(scaleY);
 
+        // Velocity / gravity
         p->m_yVelocity           = yVelocity;
         p->m_platformerXVelocity = platformerXVelocity;
         p->m_gravity             = gravity;
@@ -762,6 +649,7 @@ struct PlayerSnapshot {
         p->m_gravityMod          = gravityMod;
         p->m_yStart              = yStart;
 
+        // Gamemode
         p->m_isShip   = isShip;
         p->m_isBird   = isBird;
         p->m_isBall   = isBall;
@@ -770,81 +658,23 @@ struct PlayerSnapshot {
         p->m_isSpider = isSpider;
         p->m_isSwing  = isSwing;
 
+        // Orientation / contact
         p->m_isUpsideDown = isUpsideDown;
         p->m_isSideways   = isSideways;
         p->m_isGoingLeft  = isGoingLeft;
         p->m_isOnGround   = isOnGround;
         p->m_isOnGround2  = isOnGround2;
+        p->m_isOnGround3  = isOnGround3;
+        p->m_isOnGround4  = isOnGround4;
         p->m_isDashing    = isDashing;
         p->m_isLocked     = isLocked;
         p->m_isDead       = isDead;
 
         p->m_platformerMovingLeft  = platformerMovingLeft;
         p->m_platformerMovingRight = platformerMovingRight;
-
         p->m_lastGroundedPos = lastGroundedPos;
 
-                // Velocity / physics state
-        p->m_slopeVelocity = m_slopeVelocity;
-        p->m_slopeStartTime = m_slopeStartTime;
-        p->m_rotateSpeed = m_rotateSpeed;
-        p->m_rotationSpeed = m_rotationSpeed;
-        p->m_vehicleSize = m_vehicleSize;
-        p->m_playerSpeed = m_playerSpeed;
-        p->m_totalTime = m_totalTime;
-        p->m_gameModeChangedTime = m_gameModeChangedTime;
-        p->m_lastFlipTime = m_lastFlipTime;
-        p->m_lastSpiderFlipTime = m_lastSpiderFlipTime;
-        p->m_lastLandTime = m_lastLandTime;
-        p->m_yStart = m_yStart;
-
-        // State flags
-        p->m_isRotating = m_isRotating;
-        p->m_isBallRotating = m_isBallRotating;
-        p->m_isBallRotating2 = m_isBallRotating2;
-        p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
-        p->m_slopeFlipGravityRelated = m_slopeFlipGravityRelated;
-        p->m_wasOnSlope = m_wasOnSlope;
-        p->m_isOnSlope = m_isOnSlope;
-        // p->m_isOnGround4 = m_isOnGround4;  // comment out if missing
-        p->m_isHidden = m_isHidden;
-        p->m_isPlatformer = m_isPlatformer;
-        p->m_isAccelerating = m_isAccelerating;
-        p->m_affectedByForces = m_affectedByForces;
-        p->m_jumpBuffered = m_jumpBuffered;
-        p->m_stateJumpBuffered = m_stateJumpBuffered;
-        p->m_stateRingJump = m_stateRingJump;
-        p->m_stateRingJump2 = m_stateRingJump2;
-        p->m_wasTeleported = m_wasTeleported;
-        p->m_ringJumpRelated = m_ringJumpRelated;
-        p->m_maybeSpriteRelated = m_maybeSpriteRelated;
-        p->m_isDontBoostX = m_isDontBoostX;
-        p->m_isDontBoostY = m_isDontBoostY;
-
-        // Collision state
-        p->m_lastCollisionBottom = m_lastCollisionBottom;
-        p->m_lastCollisionTop = m_lastCollisionTop;
-        p->m_lastCollisionLeft = m_lastCollisionLeft;
-        p->m_lastCollisionRight = m_lastCollisionRight;
-        p->m_stateOnGround = m_stateOnGround;
-        p->m_stateHitHead = m_stateHitHead;
-        p->m_stateFlipGravity = m_stateFlipGravity;
-        p->m_stateForce = m_stateForce;
-        p->m_stateDartSlide = m_stateDartSlide;
-        p->m_stateNoAutoJump = m_stateNoAutoJump;
-        p->m_stateScale = m_stateScale;
-        p->m_stateForceVector = m_stateForceVector;
-
-        // Gamemode flags
-        p->m_isShip = m_isShip;
-        p->m_isBird = m_isBird;
-        p->m_isBall = m_isBall;
-        p->m_isDart = m_isDart;
-        p->m_isRobot = m_isRobot;
-        p->m_isSpider = m_isSpider;
-        p->m_isSwing = m_isSwing;
-
-                // Slope
+        // Slope
         p->m_currentSlope = m_currentSlope;
         p->m_currentSlope2 = m_currentSlope2;
         p->m_currentSlope3 = m_currentSlope3;
@@ -863,6 +693,7 @@ struct PlayerSnapshot {
         p->m_collidingWithSlopeId = m_collidingWithSlopeId;
         p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
         p->m_maybeUpsideDownSlope = m_maybeUpsideDownSlope;
+        p->m_wasOnSlope = m_wasOnSlope;
 
         // Dash
         p->m_dashX = m_dashX;
@@ -891,19 +722,15 @@ struct PlayerSnapshot {
         p->m_collidingWithLeft = m_collidingWithLeft;
         p->m_collidingWithRight = m_collidingWithRight;
 
-        // Velocity
+        // Velocity / physics
         p->m_groundYVelocity = m_groundYVelocity;
         p->m_yVelocityRelated = m_yVelocityRelated;
         p->m_fallSpeed = m_fallSpeed;
         p->m_platformerVelocityRelated = m_platformerVelocityRelated;
         p->m_shipRotation = m_shipRotation;
         p->m_vehicleSize = m_vehicleSize;
-
-        // Ground
-        p->m_isOnGround2 = m_isOnGround2;
-        p->m_isOnGround3 = m_isOnGround3;
-        p->m_isOnGround4 = m_isOnGround4;
-        p->m_wasOnSlope = m_wasOnSlope;
+        p->m_rotateSpeed = m_rotateSpeed;
+        p->m_rotationSpeed = m_rotationSpeed;
 
         // Time
         p->m_totalTime = m_totalTime;
@@ -933,6 +760,11 @@ struct PlayerSnapshot {
         p->m_maybeGoingCorrectSlopeDirection = m_maybeGoingCorrectSlopeDirection;
         p->m_maybeHasStopped = m_maybeHasStopped;
 
+        // Rotation
+        p->m_isRotating = m_isRotating;
+        p->m_isBallRotating = m_isBallRotating;
+        p->m_isBallRotating2 = m_isBallRotating2;
+
         // Other
         p->m_touchingRings = m_touchingRings;
         p->m_lastActivatedPortal = m_lastActivatedPortal;
@@ -943,7 +775,8 @@ struct PlayerSnapshot {
         p->m_isOutOfBounds = m_isOutOfBounds;
         p->m_inputsLocked = m_inputsLocked;
         p->m_controlsDisabled = m_controlsDisabled;
-        p->m_isLocked = m_isLocked;
+        p->m_isHidden = m_isHidden;
+        p->m_isPlatformer = m_isPlatformer;
         p->m_quickCheckpointMode = m_quickCheckpointMode;
         p->m_checkpointTimeout = m_checkpointTimeout;
         p->m_lastCheckpointTime = m_lastCheckpointTime;
