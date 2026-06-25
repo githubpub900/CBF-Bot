@@ -9,7 +9,7 @@
  *  Design goals (see the request that spawned this file):
  *
  *    * Record a run in Practice Mode, play it back in Normal Mode.
- *    * Work with Syzzi's Click Between Frames (mod id: syzzi.click_between_frames)
+ *    * Work with Syzzi's Click Between Frames
  *      which lets you click on *practically infinite* sub-frames, and also keep
  *      working with RobTop's built in "Click Between Steps" (limited to a
  *      ~480 FPS input window).
