@@ -166,7 +166,6 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             return 0.0;
         }
         // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
-        // Our hook priority is -1000000 (VeryEarly), so we run before CBF.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.pushDueInputsToCBF();
         }
