@@ -40,7 +40,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/binding/CheckpointObject.hpp>
 #include <Geode/binding/PauseLayer.hpp>
-#include <Geode/modify/CCScene.hpp>
+#include <Geode/modify/MenuLayer.hpp>
 
 using namespace geode::prelude;
 
@@ -66,6 +66,26 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //  CBS, or Syzzi's CBF queue. That makes it the perfect place to both record and
 //  inject, which is exactly why the whole bot is built around it.
 //
+static void ensureUI() {
+    auto scene = CCDirector::sharedDirector()->getRunningScene();
+    if (!scene) return;
+
+    auto& bot = BotManager::get();
+    if (!bot.ui) {
+        auto ui = BotUILayer::create();
+        if (!ui) return;
+        scene->addChild(ui, (std::numeric_limits<int>::max)());
+        bot.ui = ui;
+        ui->refreshAll();
+    } else if (bot.ui->getParent() != scene) {
+        bot.ui->retain();
+        bot.ui->removeFromParentAndCleanup(false);
+        scene->addChild(bot.ui, (std::numeric_limits<int>::max)());
+        bot.ui->release();
+        bot.ui->refreshAll();
+    }
+}
+
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 
     // ---- input capture (recording) ---------------------------------------
@@ -141,26 +161,12 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 // ============================================================================
 //  PlayLayer hooks
 // ============================================================================
-class $modify(BotSceneHook, cocos2d::CCScene) {
-    void onEnter() {
-        CCScene::onEnter();
 
-        auto& bot = BotManager::get();
-        if (!bot.ui) {
-            // First time: create the layer and add it to this scene.
-            auto ui = BotUILayer::create();
-            if (!ui) return;
-            this->addChild(ui, (std::numeric_limits<int>::max)());
-            bot.ui = ui;
-            ui->refreshAll();
-        } else if (bot.ui->getParent() != this) {
-            // Subsequent scenes: move the existing layer across.
-            bot.ui->retain();
-            bot.ui->removeFromParentAndCleanup(false); // detach without deleting
-            this->addChild(bot.ui, (std::numeric_limits<int>::max)());
-            bot.ui->release();
-            bot.ui->refreshAll();
-        }
+class $modify(BotMenuLayer, MenuLayer) {
+    bool init() {
+        if (!MenuLayer::init()) return false;
+        ensureUI();
+        return true;
     }
 };
 
@@ -176,6 +182,7 @@ class $modify(BotPlayLayer, PlayLayer) {
         // BotSceneHook::onEnter already placed the UI in this scene;
         // we just need to reset bot state for the new level.
         BotManager::get().onLevelReset(this);
+         ensureUI();
         return true;
     }
 
