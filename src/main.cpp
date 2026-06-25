@@ -63,9 +63,7 @@ class $modify(BotCCScheduler, CCScheduler) {
         (void) self.setHookPriority("CCScheduler::update", -1000000);
     }
 
-    void update(float dt) {
-        // Capture frame-start state BEFORE anything else runs this frame.
-        // This aligns with CBF's currentFrameTime (also set at frame start).
+       void update(float dt) {
         auto& bot = BotManager::get();
         bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
             ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;

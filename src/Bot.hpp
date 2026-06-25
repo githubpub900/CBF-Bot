@@ -1280,7 +1280,7 @@ public:
     //
     // Per-frame re-anchoring means no drift over time (unlike the
     // playbackStartWallTime approach which drifted after ~30s).
-    void pushDueInputsToCBF() {
+        void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -1290,8 +1290,8 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // CBF's frame window: [lastFrameTime, currentFrameTime]
-        // Both captured at frame start, matching CBF's own timer.
+        // Use frame-start anchors (captured in CCScheduler::update BEFORE CBF).
+        // This aligns our timestamps with CBF's currentFrameTime/lastFrameTime.
         double currentFrameTime = m_frameStartWall;
         double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameLevel = m_frameStartLevel;
@@ -1304,11 +1304,10 @@ public:
 
             double levelDelta = e.time - frameLevel;
 
-            // If input is beyond this frame, stop — next frame will push it
+            // If input is beyond this frame, stop
             if (levelDelta > frameLevelAdvance + 0.0001) break;
 
-            // If input is past due (should have fired in a previous frame),
-            // fire directly as a fallback
+            // If past due, fire directly
             if (levelDelta < -0.0001) {
                 injecting = true;
                 pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
@@ -1317,11 +1316,11 @@ public:
                 continue;
             }
 
-            // Convert level time to wall-clock time within CBF's frame window.
+            // Convert level time to wall-clock within CBF's frame window.
             // inputWall = lastFrameTime + levelDelta / speed
             double inputWallTime = lastFrameTime + levelDelta / speed;
 
-            // Clamp to CBF's frame window (handles rounding edge cases)
+            // Clamp to CBF's frame window
             if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
             if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
 
@@ -1336,7 +1335,7 @@ public:
             ++playbackIndex;
         }
     }
-
+    
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
         auto gl = GJBaseGameLayer::get();
@@ -1374,7 +1373,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+        void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1389,53 +1388,82 @@ public:
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
 
             // Release jump button after checkpoint load to prevent stuck
-            // inputs (xdBot does this — prevents the player from auto-jumping
-            // after a checkpoint if jump was held when the checkpoint was set)
+            // inputs (xdBot does this)
             pl->m_player1->releaseButton(PlayerButton::Jump);
             if (pl->m_player2) pl->m_player2->releaseButton(PlayerButton::Jump);
         }
 
         if (mode == bot::Mode::Playing) {
             seekPlaybackTo(frame->levelTime);
+        } else if (mode == bot::Mode::Recording) {
+            // After applying the snapshot, sync heldState to match the
+            // actual player state. The snapshot may have restored jump-buffer
+            // state that doesn't match what buttons the player is actually
+            // holding. Without this sync, the next real input gets dropped
+            // as "redundant" or held too long.
+            resetHeldState();
+            // Check what buttons are actually held right now
+            if (pl->m_player1) {
+                // m_holdingButtons is a set of PlayerButton that the
+                // player is currently holding
+                for (auto& btn : pl->m_player1->m_holdingButtons) {
+                    int b = static_cast<int>(btn);
+                    if (b >= 1 && b <= 3) heldState[0][b] = true;
+                }
+            }
+            if (pl->m_player2) {
+                for (auto& btn : pl->m_player2->m_holdingButtons) {
+                    int b = static_cast<int>(btn);
+                    if (b >= 1 && b <= 3) heldState[1][b] = true;
+                }
+            }
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
-    void onRestart(PlayLayer* pl, bool fromStart) {
+       void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
-            // Full reset: cursor to start, release all buttons, re-apply
-            // held state from the beginning of the macro.
+            // Full reset: release all buttons, cursor to start
             releaseAll();
             playbackIndex = 0;
             if (pl) {
                 seekPlaybackTo(0.0);
+                // Re-apply held state from the beginning of the macro
                 applyHeldStateAt(pl, 0.0);
             }
+            log::info("[Bot] Playback reset on restart");
         } else if (mode == bot::Mode::Recording) {
-            // Recording restart: discard everything after time 0
             truncateAfter(0.0);
             recomputeHeldState();
+            resetHeldState();
         }
         refreshUIProgress();
     }
 
     // Fresh level / resetLevel: reset transient state but keep the macro.
-    void onLevelReset(PlayLayer* pl) {
+        void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
-            seekPlaybackTo(0.0);
             releaseAll();
+            playbackIndex = 0;
+            seekPlaybackTo(0.0);
+            if (pl) applyHeldStateAt(pl, 0.0);
         }
     }
 
-    void onPlayerDeath(PlayLayer* pl) {
-        // In normal-mode playback a death means the attempt failed; stop cleanly
-        // so we are not still injecting on the respawn.
+     void onPlayerDeath(PlayLayer* pl) {
         if (mode == bot::Mode::Playing && pl && !pl->m_isPracticeMode) {
-            // Keep the macro but halt injection until the next reset.
+            // In normal-mode playback, death means the attempt failed.
+            // Reset playback to start so next attempt plays from beginning.
+            releaseAll();
+            playbackIndex = 0;
+            seekPlaybackTo(0.0);
+            log::info("[Bot] Playback reset on death (normal mode)");
         }
+        // In practice mode, the checkpoint system handles the reset
+        // via onCheckpointLoaded, so we don't need to do anything here.
     }
 
     // ----- speedhack -------------------------------------------------------
