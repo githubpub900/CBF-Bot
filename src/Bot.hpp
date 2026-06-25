@@ -57,6 +57,7 @@
 #include <Geode/binding/PlatformToolbox.hpp>
 #include <Geode/binding/FMODAudioEngine.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <Geode/binding/DashRingObject.hpp>
 
 #include <vector>
 #include <array>
@@ -373,7 +374,7 @@ struct PlayerSnapshot {
     // --- Slope state (critical for slope accuracy) ---
     GameObject* m_currentSlope = nullptr;
     GameObject* m_currentSlope2 = nullptr;
-    GameObject* m_currentSlope3 = nullptr;
+   // GameObject* m_currentSlope3 = nullptr;
     GameObject* m_preLastGroundObject = nullptr;
     GameObject* m_maybeLastGroundObject = nullptr;
     float  m_slopeAngle = 0.f;
@@ -396,13 +397,13 @@ struct PlayerSnapshot {
     double m_dashY = 0.0;
     float  m_dashAngle = 0.f;
     double m_dashStartTime = 0.0;
-    GameObject* m_dashRing = nullptr;
+    DashRingObject* m_dashRing = nullptr;
 
     // --- Collision state ---
-    cocos2d::CCArray* m_collisionLogTop = nullptr;
-    cocos2d::CCArray* m_collisionLogBottom = nullptr;
-    cocos2d::CCArray* m_collisionLogLeft = nullptr;
-    cocos2d::CCArray* m_collisionLogRight = nullptr;
+    cocos2d::CCDictionary* m_collisionLogTop = nullptr;
+    cocos2d::CCDictionary* m_collisionLogBottom = nullptr;
+    cocos2d::CCDictionary* m_collisionLogLeft = nullptr;
+    cocos2d::CCDictionary* m_collisionLogRight = nullptr;
     int    m_lastCollisionBottom = -1;
     int    m_lastCollisionTop = -1;
     int    m_lastCollisionLeft = -1;
@@ -415,15 +416,15 @@ struct PlayerSnapshot {
     double m_collidedRightMinX = 0.0;
     GameObject* m_collidedObject = nullptr;
     GameObject* m_lastGroundObject = nullptr;
-    bool   m_collidingWithLeft = false;
-    bool   m_collidingWithRight = false;
+    GameObject* m_collidingWithLeft = nullptr;
+    GameObject* m_collidingWithRight = nullptr;
 
     // --- Velocity / physics ---
     double m_groundYVelocity = 0.0;
     double m_yVelocityRelated = 0.0;
     double m_fallSpeed = 0.0;
     double m_platformerVelocityRelated = 0.0;
-    float  m_shipRotation = 0.f;
+    cocos2d::CCPoint m_shipRotation {0.f, 0.f};
     float  m_vehicleSize = 1.f;
     float  m_rotateSpeed = 1.0f;
     float  m_rotationSpeed = 0.f;
@@ -525,7 +526,7 @@ struct PlayerSnapshot {
         // Slope
         m_currentSlope = p->m_currentSlope;
         m_currentSlope2 = p->m_currentSlope2;
-        m_currentSlope3 = p->m_currentSlope3;
+        //m_currentSlope3 = p->m_currentSlope3;
         m_preLastGroundObject = p->m_preLastGroundObject;
         m_maybeLastGroundObject = p->m_maybeLastGroundObject;
         m_slopeAngle = p->m_slopeAngle;
@@ -677,7 +678,7 @@ struct PlayerSnapshot {
         // Slope
         p->m_currentSlope = m_currentSlope;
         p->m_currentSlope2 = m_currentSlope2;
-        p->m_currentSlope3 = m_currentSlope3;
+        // p->m_currentSlope3 = m_currentSlope3;
         p->m_preLastGroundObject = m_preLastGroundObject;
         p->m_maybeLastGroundObject = m_maybeLastGroundObject;
         p->m_slopeAngle = m_slopeAngle;
