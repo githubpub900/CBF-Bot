@@ -1179,7 +1179,7 @@ public:
     // Wait — that's the point. Level time is the source of truth. We convert
     // to wall-clock ONLY for CBF's queue, and the conversion accounts for
     // current playback speed.
-    void pushDueInputsToCBF() {
+        void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -1189,26 +1189,23 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        double currentWall = getWallTime();
-        double currentLevel = levelTime(pl);
-
-        // How much wall time until the input's level time is reached?
-        // inputWall = currentWall + (inputLevel - currentLevel) / speed
-        // Look ahead by one frame so CBF can place inputs in sub-steps.
-        double lookahead = m_prevFrameDelta > 0.0 ? m_prevFrameDelta : 0.016;
+        // CBF's frame window: [lastFrameTime, currentFrameTime]
+        // currentFrameTime ≈ m_frameStartWall (captured at frame start)
+        // lastFrameTime ≈ m_frameStartWall - m_prevFrameDelta
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
 
-            // Convert level time to wall-clock time
-            double inputWallTime = currentWall +
-                (e.time - currentLevel) / speed;
+            // Convert level time to ABSOLUTE wall time using playback anchors.
+            // This is deterministic — the same input always maps to the same
+            // wall time, regardless of when our hook runs during the frame.
+            double inputWallTime = playbackStartWallTime +
+                (e.time - playbackStartLevelTime) / speed;
 
-            // If beyond this frame's window, stop — next frame will push it
-            if (inputWallTime > currentWall + lookahead) break;
-
-            // If past due (should have fired already), fire now
-            if (inputWallTime < currentWall - 0.001) {
+            // If input should have fired in a previous frame, fire directly
+            if (inputWallTime < lastFrameTime - 0.001) {
                 injecting = true;
                 pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
                 injecting = false;
@@ -1216,12 +1213,19 @@ public:
                 continue;
             }
 
+            // If input is for a future frame, stop — next frame will push it
+            if (inputWallTime > currentFrameTime + 0.001) break;
+
+            // Clamp to CBF's frame window to handle rounding
+            if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
+            if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
+
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
-                0,                // m_step (unused by CBF)
-                inputWallTime     // m_timestamp (wall-clock, CBF's units)
+                0,
+                inputWallTime
             });
 
             ++playbackIndex;
@@ -1265,11 +1269,9 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+        void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
-        // Find the matching frame. Prefer an exact pointer match, else fall
-        // back to the most recent one (RobTop loads the last checkpoint).
         CheckpointFrame* frame = nullptr;
         for (auto it = checkpoints.rbegin(); it != checkpoints.rend(); ++it) {
             if (it->checkpointPtr == cpPtr) { frame = &*it; break; }
@@ -1277,18 +1279,22 @@ public:
         if (!frame && !checkpoints.empty()) frame = &checkpoints.back();
         if (!frame) return;
 
-        // ---- accurate practice fix ----------------------------------------
+        // Apply accurate practice fix
         if (practiceFixEnabled) {
             frame->p1.apply(pl->m_player1);
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
         }
 
-        // Keep playback (if running) lined up with the checkpoint time.
+        // Re-align playback to the checkpoint
         if (mode == bot::Mode::Playing) {
             seekPlaybackTo(frame->levelTime);
+
+            // Reset the wall-clock anchor so future inputs map correctly
+            // after the time jump
+            playbackStartWallTime = getWallTime();
+            playbackStartLevelTime = frame->levelTime;
         }
     }
-
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
