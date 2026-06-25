@@ -290,24 +290,18 @@ namespace bot {
 //  next up event for the same button.
 //
 struct InputEvent {
-    double  time     = 0.0;
+    double  time     = 0.0;   // WALL-CLOCK time (CBF's timestamp format)
     uint8_t button   = 1;
     bool    down     = true;
     bool    player2  = false;
 
-    // State alignment: player position captured at the moment of this input.
-    // During playback, the player is snapped to this position right after the
-    // input fires, compensating for any sub-frame timing drift.
-    float   p1x = 0.f, p1y = 0.f;
-    float   p2x = 0.f, p2y = 0.f;
-    bool    hasState = false;
-
     InputEvent() = default;
     InputEvent(double t, uint8_t b, bool d, bool p2)
         : time(t), button(b), down(d), player2(p2) {}
+
     bool operator<(InputEvent const& o) const {
         if (time != o.time) return time < o.time;
-        if (down != o.down) return down && !o.down; // down first
+        if (down != o.down) return down && !o.down;
         return button < o.button;
     }
 };
@@ -688,6 +682,7 @@ struct Macro {
     bool empty() const { return events.empty(); }
 
     // The level time of the final input -- used for the progress readout.
+    // Since timestamps are now wall-clock, this returns wall-clock duration.
     double duration() const {
         return events.empty() ? 0.0 : events.back().time;
     }
@@ -753,6 +748,20 @@ public:
     double m_frameStartWall = 0.0;
     double m_frameStartLevel = 0.0;
     double m_prevFrameDelta = 0.0;
+
+        // ----- CBF-accurate playback ------------------------------------------
+    // We store macro timestamps as wall-clock time (same as CBF's
+    // currentFrameTime). At playback start, we capture the wall-clock /
+    // level-time pair, then convert each input's level-time to wall-clock
+    // using: inputWall = playbackStartWall + (inputLevel - playbackStartLevel)
+    //
+    // This is speedhack-INDEPENDENT: whether you record at 0.2x or 1x,
+    // the wall-clock gap between clicks is preserved. Playback at any speed
+    // fires at the right wall-clock moment, which CBF then places at the
+    // exact sub-step.
+    double    playbackStartWallTime  = 0.0;
+    double    playbackStartLevelTime = 0.0;
+
     
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -838,7 +847,7 @@ public:
         return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
-    
+
     // The smallest time delta the current CBF setup can resolve, in seconds.
     // Syzzi is effectively continuous, so we report the physics tick as a floor;
     // RobTop is bounded by its 480 FPS window.
@@ -864,6 +873,62 @@ public:
             PlatformToolbox::showCursor();
         } else {
             if (PlayLayer::get()) PlatformToolbox::hideCursor();
+        }
+    }
+    
+    // Push the next due input to CBF's m_queuedButtons queue, with a
+    // timestamp computed from the current wall-clock time. Called from
+    // PlayerObject::update (which runs at CBF's sub-step rate).
+    //
+    // Key insight: we don't need to align with CBF's frame window. We just
+    // push the input with a timestamp of "now" (or slightly in the future
+    // for inputs due in this sub-step), and CBF will fire it immediately
+    // in its current sub-step processing.
+    void pushInputToCBFQueue(float stepDelta) {
+        if (mode != bot::Mode::Playing) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
+
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double currentWall = getWallTime();
+        double speed = speedMultiplier();
+
+        // Convert macro time (wall-clock from recording) to current wall-clock.
+        // If recording was at 0.2x and playback at 1x, the gap between inputs
+        // in wall-clock time stays the same (since we stored wall-clock).
+        // We just need to check if the next input is due NOW.
+
+        // The macro's timestamps are wall-clock from the RECORDING session.
+        // We need to map them to the PLAYBACK session's wall-clock.
+        // playbackStartWallTime + (inputTime - macro.events[0].time) = due wall time
+        // But since we stored wall-clock, the gap between events is preserved.
+        // An input is "due" when:
+        //   currentWall >= playbackStartWallTime + (input.time - firstEventTime)
+        //               = playbackStartWallTime + input.time - firstEventTime
+
+        if (macro.events.empty()) return;
+        double firstEventTime = macro.events[0].time;
+
+        while (playbackIndex < macro.events.size()) {
+            auto const& e = macro.events[playbackIndex];
+
+            // When should this input fire in playback wall-clock time?
+            double dueWallTime = playbackStartWallTime + (e.time - firstEventTime);
+
+            // If it's due now or in the past, push it to CBF's queue
+            if (dueWallTime > currentWall + 0.001) break;  // not due yet
+
+            // Push with timestamp = currentWall (CBF will fire immediately)
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,                // m_step (unused by CBF)
+                currentWall       // fire NOW in CBF's sub-step
+            });
+
+            ++playbackIndex;
         }
     }
 
@@ -922,11 +987,30 @@ public:
         refreshUI();
     }
 
-        void startPlayback(GJBaseGameLayer* gl) {
+    void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
         }
+        if (macro.empty()) {
+            notify("No macro to play", NotificationIcon::Warning);
+            return;
+        }
+        macro.sort();
+        validateAndRepair();
+        warnIfWrongLevel();
+        mode = bot::Mode::Playing;
+
+        // Capture the wall-clock / level-time pair for timestamp conversion.
+        playbackStartWallTime  = getWallTime();
+        playbackStartLevelTime = levelTime(gl);
+
+        seekPlaybackTo(levelTime(gl));
+        applyHeldStateAt(gl, levelTime(gl));
+        log::info("[Bot] Playback started {}", description());
+        notify("Playback started", NotificationIcon::Success);
+        refreshUI();
+    }
         if (macro.empty()) {
             notify("No macro to play", NotificationIcon::Warning);
             return;
@@ -1052,7 +1136,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-      void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1063,12 +1147,10 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Use preciseLevelTime for sub-frame recording precision
-        double t = preciseLevelTime(gl);
-
-        if (cbfState() == bot::CBFState::RobTop) {
-            t = quantizeRobTop(t);
-        }
+        // Store WALL-CLOCK time, not level time. This makes the macro
+        // speedhack-independent: the wall-clock gap between clicks is
+        // preserved regardless of recording or playback speed.
+        double t = getWallTime();
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);

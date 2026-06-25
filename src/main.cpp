@@ -43,6 +43,7 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -128,9 +129,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-           // BotManager::get().fireDueInputs(this, 0.0f);
-        }
+        // Playback inputs are now pushed from PlayerObject::update hook,
+        // which runs at CBF's sub-step rate. No need to fire here.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -165,11 +165,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
         }
-        // Push inputs to CBF's queue with precise timestamps.
-        // This runs BEFORE CBF's buildStepQueue (we have VeryEarly priority).
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushDueInputsToCBF();
-        }
+        // No more pushDueInputsToCBF here — inputs are pushed from
+        // PlayerObject::update now, which runs at CBF's sub-step rate.
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
@@ -244,6 +241,34 @@ class $modify(BotPlayLayer, PlayLayer) {
     void onExit() {
         PlayLayer::onExit();
         BotManager::get().resetAudioPitch();
+    }
+};
+
+// ============================================================================
+//  PlayerObject::update hook  --  fire playback inputs at CBF sub-step precision
+// ============================================================================
+//
+//  CBF splits each physics step into sub-steps inside PlayerObject::update.
+//  By hooking here with VeryEarly priority, we run BEFORE CBF's hook, so we
+//  can push our input to CBF's queue before it processes the current sub-step.
+//
+//  This is the ONLY point where true CBF-level accuracy is achievable.
+//
+class $modify(BotPlayerObject, PlayerObject) {
+    static void onModify(auto& self) {
+        // Run BEFORE CBF so our input is in the queue before CBF's sub-step.
+        (void) self.setHookPriority("PlayerObject::update", -1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer) {
+            // Only push from P1's update (avoid double-pushing on dual)
+            if (this == this->m_gameLayer->m_player1) {
+                bot.pushInputToCBFQueue(dt);
+            }
+        }
+        PlayerObject::update(dt);
     }
 };
 
