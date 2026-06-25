@@ -220,8 +220,9 @@ class $modify(BotPlayLayer, PlayLayer) {
 //  in the editor, inside a level, and while paused.
 //
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool down, bool idk) {
-        if (down) {
+    bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool isKeyDown,
+                             bool isKeyRepeat, double timestamp) {
+        if (isKeyDown && !isKeyRepeat) {  // ignore auto-repeat key holds
             auto& bot = BotManager::get();
 
             // K -> toggle the GUI (works on every screen)
@@ -252,7 +253,8 @@ class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
                 }
             }
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, idk);
+        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, isKeyDown,
+                                                         isKeyRepeat, timestamp);
     }
 };
 
