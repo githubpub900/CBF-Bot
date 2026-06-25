@@ -129,8 +129,12 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // Playback inputs are now pushed from PlayerObject::update hook,
-        // which runs at CBF's sub-step rate. No need to fire here.
+        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
+            // Fire BEFORE the original so inputs are set before physics.
+            // dt is the physics step delta — looking ahead by one step
+            // gives per-step accuracy.
+            BotManager::get().fireDueInputs(this, dt);
+        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -160,14 +164,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
 
-    double getModifiedDelta(float dt) {
+      double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
-        }
-        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushDueInputsToCBF();
         }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {

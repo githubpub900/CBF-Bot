@@ -749,19 +749,6 @@ public:
     double m_frameStartLevel = 0.0;
     double m_prevFrameDelta = 0.0;
 
-        // ----- CBF-accurate playback ------------------------------------------
-    // We store macro timestamps as wall-clock time (same as CBF's
-    // currentFrameTime). At playback start, we capture the wall-clock /
-    // level-time pair, then convert each input's level-time to wall-clock
-    // using: inputWall = playbackStartWall + (inputLevel - playbackStartLevel)
-    //
-    // This is speedhack-INDEPENDENT: whether you record at 0.2x or 1x,
-    // the wall-clock gap between clicks is preserved. Playback at any speed
-    // fires at the right wall-clock moment, which CBF then places at the
-    // exact sub-step.
-    double    playbackStartWallTime  = 0.0;
-    double    playbackStartLevelTime = 0.0;
-
     
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -877,21 +864,6 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-    double preciseLevelTime(GJBaseGameLayer* gl) {
-        if (!gl) return 0.0;
-        double baseLevelTime = levelTime(gl);
-        double wallNow = getWallTime();
-        double speed = speedMultiplier();
-        // How much wall time has elapsed since frame start:
-        double wallElapsed = wallNow - m_frameStartWall;
-        if (wallElapsed < 0.0) wallElapsed = 0.0;
-        // Convert to level time:
-        double levelElapsed = wallElapsed * speed;
-        // Clamp to this frame's level advance to avoid overshooting:
-        double maxElapsed = m_prevFrameDelta * speed;
-        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
-        return baseLevelTime + levelElapsed;
-    }
 
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
@@ -925,7 +897,7 @@ public:
         refreshUI();
     }
 
-    void startPlayback(GJBaseGameLayer* gl) {
+        void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -938,13 +910,6 @@ public:
         validateAndRepair();
         warnIfWrongLevel();
         mode = bot::Mode::Playing;
-
-        // Capture the wall-clock / level-time pair for CBF timestamp conversion.
-        // Macro stores LEVEL TIME. When pushing to CBF's queue, we convert:
-        //   inputWall = playbackStartWall + (inputLevel - playbackStartLevel) / speed
-        playbackStartWallTime  = getWallTime();
-        playbackStartLevelTime = levelTime(gl);
-
         seekPlaybackTo(levelTime(gl));
         applyHeldStateAt(gl, levelTime(gl));
         log::info("[Bot] Playback started {}", description());
@@ -1057,7 +1022,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1068,9 +1033,10 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Use preciseLevelTime — gives sub-frame level time using wall clock.
-        // This preserves the exact moment the click happened, even at low speed.
-        double t = preciseLevelTime(gl);
+        // Use plain levelTime. m_levelTime advances per physics step (240Hz
+        // with CBF), so this is accurate to ~4ms. No wall-clock conversion
+        // needed — level time is the source of truth.
+        double t = levelTime(gl);
 
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
@@ -1179,57 +1145,23 @@ public:
     // Wait — that's the point. Level time is the source of truth. We convert
     // to wall-clock ONLY for CBF's queue, and the conversion accounts for
     // current playback speed.
-        void pushDueInputsToCBF() {
+       // Fire inputs directly. Called from processCommands BEFORE the original,
+    // so inputs are set before physics computes. Uses levelTime + dt to look
+    // ahead by one step — gives per-physics-step accuracy (~4ms at 240Hz).
+    // Simple, reliable, no randomness.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
+        if (!gl) return;
 
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        // CBF's frame window: [lastFrameTime, currentFrameTime]
-        // currentFrameTime ≈ m_frameStartWall (captured at frame start)
-        // lastFrameTime ≈ m_frameStartWall - m_prevFrameDelta
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-
-        while (playbackIndex < macro.events.size()) {
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
-
-            // Convert level time to ABSOLUTE wall time using playback anchors.
-            // This is deterministic — the same input always maps to the same
-            // wall time, regardless of when our hook runs during the frame.
-            double inputWallTime = playbackStartWallTime +
-                (e.time - playbackStartLevelTime) / speed;
-
-            // If input should have fired in a previous frame, fire directly
-            if (inputWallTime < lastFrameTime - 0.001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            // If input is for a future frame, stop — next frame will push it
-            if (inputWallTime > currentFrameTime + 0.001) break;
-
-            // Clamp to CBF's frame window to handle rounding
-            if (inputWallTime < lastFrameTime) inputWallTime = lastFrameTime + 0.000001;
-            if (inputWallTime > currentFrameTime) inputWallTime = currentFrameTime;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
+        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1269,9 +1201,11 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-        void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
+        // Find the matching frame. Prefer an exact pointer match, else fall
+        // back to the most recent one (RobTop loads the last checkpoint).
         CheckpointFrame* frame = nullptr;
         for (auto it = checkpoints.rbegin(); it != checkpoints.rend(); ++it) {
             if (it->checkpointPtr == cpPtr) { frame = &*it; break; }
@@ -1279,20 +1213,17 @@ public:
         if (!frame && !checkpoints.empty()) frame = &checkpoints.back();
         if (!frame) return;
 
-        // Apply accurate practice fix
+        // Apply accurate practice fix — restore full player state on top of
+        // the engine's own (imperfect) restore.
         if (practiceFixEnabled) {
             frame->p1.apply(pl->m_player1);
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
         }
 
-        // Re-align playback to the checkpoint
+        // Re-align playback cursor to the checkpoint's level time.
+        // No wall-clock anchor reset needed — we use level time directly.
         if (mode == bot::Mode::Playing) {
             seekPlaybackTo(frame->levelTime);
-
-            // Reset the wall-clock anchor so future inputs map correctly
-            // after the time jump
-            playbackStartWallTime = getWallTime();
-            playbackStartLevelTime = frame->levelTime;
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
