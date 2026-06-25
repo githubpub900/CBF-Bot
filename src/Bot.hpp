@@ -430,6 +430,110 @@ struct PlayerSnapshot {
     bool m_isSpider = false;
     bool m_isSwing = false;
 
+        // --- Slope state (critical for slope accuracy) ---
+    GameObject* m_currentSlope = nullptr;
+    GameObject* m_currentSlope2 = nullptr;
+    GameObject* m_currentSlope3 = nullptr;
+    GameObject* m_preLastGroundObject = nullptr;
+    GameObject* m_maybeLastGroundObject = nullptr;
+    float  m_slopeAngle = 0.f;
+    float  m_slopeAngleRadians = 0.f;
+    double m_slopeVelocity = 0.0;
+    double m_slopeStartTime = 0.0;
+    float  m_slopeRotation = 0.f;
+    double m_currentSlopeYVelocity = 0.0;
+    double m_yVelocityBeforeSlope = 0.0;
+    bool   m_slopeFlipGravityRelated = false;
+    bool   m_slopeSlidingMaybeRotated = false;
+    bool   m_isCollidingWithSlope = false;
+    int    m_collidingWithSlopeId = 0;
+    bool   m_isCurrentSlopeTop = false;
+    bool   m_maybeUpsideDownSlope = false;
+
+    // --- Dash state (critical for dash orbs) ---
+    double m_dashX = 0.0;
+    double m_dashY = 0.0;
+    float  m_dashAngle = 0.f;
+    double m_dashStartTime = 0.0;
+    GameObject* m_dashRing = nullptr;
+
+    // --- Collision state (critical for ground/platform accuracy) ---
+    cocos2d::CCArray* m_collisionLogTop = nullptr;
+    cocos2d::CCArray* m_collisionLogBottom = nullptr;
+    cocos2d::CCArray* m_collisionLogLeft = nullptr;
+    cocos2d::CCArray* m_collisionLogRight = nullptr;
+    int    m_lastCollisionBottom = -1;
+    int    m_lastCollisionTop = -1;
+    int    m_lastCollisionLeft = -1;
+    int    m_lastCollisionRight = -1;
+    int    m_unk50C = -1;
+    int    m_unk510 = -1;
+    double m_collidedTopMinY = 0.0;
+    double m_collidedBottomMaxY = 0.0;
+    double m_collidedLeftMaxX = 0.0;
+    double m_collidedRightMinX = 0.0;
+    GameObject* m_collidedObject = nullptr;
+    GameObject* m_lastGroundObject = nullptr;
+    bool   m_collidingWithLeft = false;
+    bool   m_collidingWithRight = false;
+
+    // --- Velocity / physics ---
+    double m_groundYVelocity = 0.0;
+    double m_yVelocityRelated = 0.0;
+    double m_fallSpeed = 0.0;
+    double m_platformerVelocityRelated = 0.0;
+    float  m_shipRotation = 0.f;
+    float  m_vehicleSize = 1.f;
+
+    // --- Ground state ---
+    bool   m_isOnGround2 = false;
+    bool   m_isOnGround3 = false;
+    bool   m_isOnGround4 = false;
+    bool   m_wasOnSlope = false;
+
+    // --- Time tracking ---
+    double m_totalTime = 0.0;
+    double m_gameModeChangedTime = 0.0;
+    double m_lastLandTime = 0.0;
+    double m_lastFlipTime = 0.0;
+    double m_lastSpiderFlipTime = 0.0;
+    double m_lastJumpTime = 0.0;
+
+    // --- Jump buffer state ---
+    bool   m_jumpBuffered = false;
+    bool   m_stateRingJump = false;
+    bool   m_stateRingJump2 = false;
+    bool   m_stateJumpBuffered = false;
+    bool   m_wasJumpBuffered = false;
+    bool   m_wasRobotJump = false;
+    bool   m_touchedRing = false;
+    bool   m_touchedCustomRing = false;
+    bool   m_touchedGravityPortal = false;
+    bool   m_ringJumpRelated = false;
+
+    // --- Movement state ---
+    bool   m_isMoving = false;
+    bool   m_isSliding = false;
+    bool   m_isSlidingRight = false;
+    bool   m_isOnIce = false;
+    bool   m_maybeGoingCorrectSlopeDirection = false;
+    bool   m_maybeHasStopped = false;
+
+    // --- Other important fields ---
+    cocos2d::CCArray* m_touchingRings = nullptr;
+    GameObject* m_lastActivatedPortal = nullptr;
+    bool   m_hasEverJumped = false;
+    bool   m_isAccelerating = false;
+    bool   m_affectedByForces = false;
+    bool   m_isBeingSpawnedByDualPortal = false;
+    bool   m_isOutOfBounds = false;
+    bool   m_inputsLocked = false;
+    bool   m_controlsDisabled = false;
+    bool   m_isLocked = false;
+    bool   m_quickCheckpointMode = false;
+    bool   m_checkpointTimeout = false;
+    double m_lastCheckpointTime = 0.0;
+
     cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
 
     // Capture every field above out of a live PlayerObject.
@@ -534,6 +638,109 @@ struct PlayerSnapshot {
         m_isSpider = p->m_isSpider;
         m_isSwing = p->m_isSwing;
 
+                // Slope
+        m_currentSlope = p->m_currentSlope;
+        m_currentSlope2 = p->m_currentSlope2;
+        m_currentSlope3 = p->m_currentSlope3;
+        m_preLastGroundObject = p->m_preLastGroundObject;
+        m_maybeLastGroundObject = p->m_maybeLastGroundObject;
+        m_slopeAngle = p->m_slopeAngle;
+        m_slopeAngleRadians = p->m_slopeAngleRadians;
+        m_slopeVelocity = p->m_slopeVelocity;
+        m_slopeStartTime = p->m_slopeStartTime;
+        m_slopeRotation = p->m_slopeRotation;
+        m_currentSlopeYVelocity = p->m_currentSlopeYVelocity;
+        m_yVelocityBeforeSlope = p->m_yVelocityBeforeSlope;
+        m_slopeFlipGravityRelated = p->m_slopeFlipGravityRelated;
+        m_slopeSlidingMaybeRotated = p->m_slopeSlidingMaybeRotated;
+        m_isCollidingWithSlope = p->m_isCollidingWithSlope;
+        m_collidingWithSlopeId = p->m_collidingWithSlopeId;
+        m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
+        m_maybeUpsideDownSlope = p->m_maybeUpsideDownSlope;
+
+        // Dash
+        m_dashX = p->m_dashX;
+        m_dashY = p->m_dashY;
+        m_dashAngle = p->m_dashAngle;
+        m_dashStartTime = p->m_dashStartTime;
+        m_dashRing = p->m_dashRing;
+
+        // Collision
+        m_collisionLogTop = p->m_collisionLogTop;
+        m_collisionLogBottom = p->m_collisionLogBottom;
+        m_collisionLogLeft = p->m_collisionLogLeft;
+        m_collisionLogRight = p->m_collisionLogRight;
+        m_lastCollisionBottom = p->m_lastCollisionBottom;
+        m_lastCollisionTop = p->m_lastCollisionTop;
+        m_lastCollisionLeft = p->m_lastCollisionLeft;
+        m_lastCollisionRight = p->m_lastCollisionRight;
+        m_unk50C = p->m_unk50C;
+        m_unk510 = p->m_unk510;
+        m_collidedTopMinY = p->m_collidedTopMinY;
+        m_collidedBottomMaxY = p->m_collidedBottomMaxY;
+        m_collidedLeftMaxX = p->m_collidedLeftMaxX;
+        m_collidedRightMinX = p->m_collidedRightMinX;
+        m_collidedObject = p->m_collidedObject;
+        m_lastGroundObject = p->m_lastGroundObject;
+        m_collidingWithLeft = p->m_collidingWithLeft;
+        m_collidingWithRight = p->m_collidingWithRight;
+
+        // Velocity
+        m_groundYVelocity = p->m_groundYVelocity;
+        m_yVelocityRelated = p->m_yVelocityRelated;
+        m_fallSpeed = p->m_fallSpeed;
+        m_platformerVelocityRelated = p->m_platformerVelocityRelated;
+        m_shipRotation = p->m_shipRotation;
+        m_vehicleSize = p->m_vehicleSize;
+
+        // Ground
+        m_isOnGround2 = p->m_isOnGround2;
+        m_isOnGround3 = p->m_isOnGround3;
+        m_isOnGround4 = p->m_isOnGround4;
+        m_wasOnSlope = p->m_wasOnSlope;
+
+        // Time
+        m_totalTime = p->m_totalTime;
+        m_gameModeChangedTime = p->m_gameModeChangedTime;
+        m_lastLandTime = p->m_lastLandTime;
+        m_lastFlipTime = p->m_lastFlipTime;
+        m_lastSpiderFlipTime = p->m_lastSpiderFlipTime;
+        m_lastJumpTime = p->m_lastJumpTime;
+
+        // Jump buffer
+        m_jumpBuffered = p->m_jumpBuffered;
+        m_stateRingJump = p->m_stateRingJump;
+        m_stateRingJump2 = p->m_stateRingJump2;
+        m_stateJumpBuffered = p->m_stateJumpBuffered;
+        m_wasJumpBuffered = p->m_wasJumpBuffered;
+        m_wasRobotJump = p->m_wasRobotJump;
+        m_touchedRing = p->m_touchedRing;
+        m_touchedCustomRing = p->m_touchedCustomRing;
+        m_touchedGravityPortal = p->m_touchedGravityPortal;
+        m_ringJumpRelated = p->m_ringJumpRelated;
+
+        // Movement
+        m_isMoving = p->m_isMoving;
+        m_isSliding = p->m_isSliding;
+        m_isSlidingRight = p->m_isSlidingRight;
+        m_isOnIce = p->m_isOnIce;
+        m_maybeGoingCorrectSlopeDirection = p->m_maybeGoingCorrectSlopeDirection;
+        m_maybeHasStopped = p->m_maybeHasStopped;
+
+        // Other
+        m_touchingRings = p->m_touchingRings;
+        m_lastActivatedPortal = p->m_lastActivatedPortal;
+        m_hasEverJumped = p->m_hasEverJumped;
+        m_isAccelerating = p->m_isAccelerating;
+        m_affectedByForces = p->m_affectedByForces;
+        m_isBeingSpawnedByDualPortal = p->m_isBeingSpawnedByDualPortal;
+        m_isOutOfBounds = p->m_isOutOfBounds;
+        m_inputsLocked = p->m_inputsLocked;
+        m_controlsDisabled = p->m_controlsDisabled;
+        m_isLocked = p->m_isLocked;
+        m_quickCheckpointMode = p->m_quickCheckpointMode;
+        m_checkpointTimeout = p->m_checkpointTimeout;
+        m_lastCheckpointTime = p->m_lastCheckpointTime;
     }
 
     // Push every captured field back into a live PlayerObject. Called *after*
@@ -636,6 +843,110 @@ struct PlayerSnapshot {
         p->m_isRobot = m_isRobot;
         p->m_isSpider = m_isSpider;
         p->m_isSwing = m_isSwing;
+
+                // Slope
+        p->m_currentSlope = m_currentSlope;
+        p->m_currentSlope2 = m_currentSlope2;
+        p->m_currentSlope3 = m_currentSlope3;
+        p->m_preLastGroundObject = m_preLastGroundObject;
+        p->m_maybeLastGroundObject = m_maybeLastGroundObject;
+        p->m_slopeAngle = m_slopeAngle;
+        p->m_slopeAngleRadians = m_slopeAngleRadians;
+        p->m_slopeVelocity = m_slopeVelocity;
+        p->m_slopeStartTime = m_slopeStartTime;
+        p->m_slopeRotation = m_slopeRotation;
+        p->m_currentSlopeYVelocity = m_currentSlopeYVelocity;
+        p->m_yVelocityBeforeSlope = m_yVelocityBeforeSlope;
+        p->m_slopeFlipGravityRelated = m_slopeFlipGravityRelated;
+        p->m_slopeSlidingMaybeRotated = m_slopeSlidingMaybeRotated;
+        p->m_isCollidingWithSlope = m_isCollidingWithSlope;
+        p->m_collidingWithSlopeId = m_collidingWithSlopeId;
+        p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
+        p->m_maybeUpsideDownSlope = m_maybeUpsideDownSlope;
+
+        // Dash
+        p->m_dashX = m_dashX;
+        p->m_dashY = m_dashY;
+        p->m_dashAngle = m_dashAngle;
+        p->m_dashStartTime = m_dashStartTime;
+        p->m_dashRing = m_dashRing;
+
+        // Collision
+        p->m_collisionLogTop = m_collisionLogTop;
+        p->m_collisionLogBottom = m_collisionLogBottom;
+        p->m_collisionLogLeft = m_collisionLogLeft;
+        p->m_collisionLogRight = m_collisionLogRight;
+        p->m_lastCollisionBottom = m_lastCollisionBottom;
+        p->m_lastCollisionTop = m_lastCollisionTop;
+        p->m_lastCollisionLeft = m_lastCollisionLeft;
+        p->m_lastCollisionRight = m_lastCollisionRight;
+        p->m_unk50C = m_unk50C;
+        p->m_unk510 = m_unk510;
+        p->m_collidedTopMinY = m_collidedTopMinY;
+        p->m_collidedBottomMaxY = m_collidedBottomMaxY;
+        p->m_collidedLeftMaxX = m_collidedLeftMaxX;
+        p->m_collidedRightMinX = m_collidedRightMinX;
+        p->m_collidedObject = m_collidedObject;
+        p->m_lastGroundObject = m_lastGroundObject;
+        p->m_collidingWithLeft = m_collidingWithLeft;
+        p->m_collidingWithRight = m_collidingWithRight;
+
+        // Velocity
+        p->m_groundYVelocity = m_groundYVelocity;
+        p->m_yVelocityRelated = m_yVelocityRelated;
+        p->m_fallSpeed = m_fallSpeed;
+        p->m_platformerVelocityRelated = m_platformerVelocityRelated;
+        p->m_shipRotation = m_shipRotation;
+        p->m_vehicleSize = m_vehicleSize;
+
+        // Ground
+        p->m_isOnGround2 = m_isOnGround2;
+        p->m_isOnGround3 = m_isOnGround3;
+        p->m_isOnGround4 = m_isOnGround4;
+        p->m_wasOnSlope = m_wasOnSlope;
+
+        // Time
+        p->m_totalTime = m_totalTime;
+        p->m_gameModeChangedTime = m_gameModeChangedTime;
+        p->m_lastLandTime = m_lastLandTime;
+        p->m_lastFlipTime = m_lastFlipTime;
+        p->m_lastSpiderFlipTime = m_lastSpiderFlipTime;
+        p->m_lastJumpTime = m_lastJumpTime;
+
+        // Jump buffer
+        p->m_jumpBuffered = m_jumpBuffered;
+        p->m_stateRingJump = m_stateRingJump;
+        p->m_stateRingJump2 = m_stateRingJump2;
+        p->m_stateJumpBuffered = m_stateJumpBuffered;
+        p->m_wasJumpBuffered = m_wasJumpBuffered;
+        p->m_wasRobotJump = m_wasRobotJump;
+        p->m_touchedRing = m_touchedRing;
+        p->m_touchedCustomRing = m_touchedCustomRing;
+        p->m_touchedGravityPortal = m_touchedGravityPortal;
+        p->m_ringJumpRelated = m_ringJumpRelated;
+
+        // Movement
+        p->m_isMoving = m_isMoving;
+        p->m_isSliding = m_isSliding;
+        p->m_isSlidingRight = m_isSlidingRight;
+        p->m_isOnIce = m_isOnIce;
+        p->m_maybeGoingCorrectSlopeDirection = m_maybeGoingCorrectSlopeDirection;
+        p->m_maybeHasStopped = m_maybeHasStopped;
+
+        // Other
+        p->m_touchingRings = m_touchingRings;
+        p->m_lastActivatedPortal = m_lastActivatedPortal;
+        p->m_hasEverJumped = m_hasEverJumped;
+        p->m_isAccelerating = m_isAccelerating;
+        p->m_affectedByForces = m_affectedByForces;
+        p->m_isBeingSpawnedByDualPortal = m_isBeingSpawnedByDualPortal;
+        p->m_isOutOfBounds = m_isOutOfBounds;
+        p->m_inputsLocked = m_inputsLocked;
+        p->m_controlsDisabled = m_controlsDisabled;
+        p->m_isLocked = m_isLocked;
+        p->m_quickCheckpointMode = m_quickCheckpointMode;
+        p->m_checkpointTimeout = m_checkpointTimeout;
+        p->m_lastCheckpointTime = m_lastCheckpointTime;
     }
 };
 
@@ -1229,7 +1540,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1242,6 +1553,12 @@ public:
         if (practiceFixEnabled) {
             frame->p1.apply(pl->m_player1);
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
+
+            // Release jump button after checkpoint load to prevent stuck
+            // inputs (xdBot does this — prevents the player from auto-jumping
+            // after a checkpoint if jump was held when the checkpoint was set)
+            pl->m_player1->releaseButton(PlayerButton::Jump);
+            if (pl->m_player2) pl->m_player2->releaseButton(PlayerButton::Jump);
         }
 
         if (mode == bot::Mode::Playing) {
@@ -1253,7 +1570,20 @@ public:
     // checkpoint stack and rewind the playback cursor here.
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
-        if (mode == bot::Mode::Playing) playbackIndex = 0;
+        if (mode == bot::Mode::Playing) {
+            // Full reset: cursor to start, release all buttons, re-apply
+            // held state from the beginning of the macro.
+            releaseAll();
+            playbackIndex = 0;
+            if (pl) {
+                seekPlaybackTo(0.0);
+                applyHeldStateAt(pl, 0.0);
+            }
+        } else if (mode == bot::Mode::Recording) {
+            // Recording restart: discard everything after time 0
+            truncateAfter(0.0);
+            recomputeHeldState();
+        }
         refreshUIProgress();
     }
 
