@@ -372,7 +372,7 @@ struct PlayerSnapshot {
     bool platformerMovingRight = false;
 
         // Velocity / physics state
-    double m_xVelocity = 0.0;
+    // double m_xVelocity = 0.0;
     double m_slopeVelocity = 0.0;
     double m_slopeStartTime = 0.0;
     float  m_rotateSpeed = 1.0f;
@@ -478,7 +478,7 @@ struct PlayerSnapshot {
         lastGroundedPos = p->m_lastGroundedPos;
 
                 // Velocity / physics
-        m_xVelocity = p->m_xVelocity;
+       // m_xVelocity = p->m_xVelocity;
         m_slopeVelocity = p->m_slopeVelocity;
         m_slopeStartTime = p->m_slopeStartTime;
         m_rotateSpeed = p->m_rotateSpeed;
@@ -538,7 +538,7 @@ struct PlayerSnapshot {
         m_isRobot = p->m_isRobot;
         m_isSpider = p->m_isSpider;
         m_isSwing = p->m_isSwing;
-        
+
     }
 
     // Push every captured field back into a live PlayerObject. Called *after*
@@ -581,6 +581,66 @@ struct PlayerSnapshot {
         p->m_platformerMovingRight = platformerMovingRight;
 
         p->m_lastGroundedPos = lastGroundedPos;
+
+                // Velocity / physics state
+        p->m_slopeVelocity = m_slopeVelocity;
+        p->m_slopeStartTime = m_slopeStartTime;
+        p->m_rotateSpeed = m_rotateSpeed;
+        p->m_rotationSpeed = m_rotationSpeed;
+        p->m_vehicleSize = m_vehicleSize;
+        p->m_playerSpeed = m_playerSpeed;
+        p->m_totalTime = m_totalTime;
+        p->m_gameModeChangedTime = m_gameModeChangedTime;
+        p->m_lastFlipTime = m_lastFlipTime;
+        p->m_lastSpiderFlipTime = m_lastSpiderFlipTime;
+        p->m_lastLandTime = m_lastLandTime;
+        p->m_yStart = m_yStart;
+
+        // State flags
+        p->m_isRotating = m_isRotating;
+        p->m_isBallRotating = m_isBallRotating;
+        p->m_isBallRotating2 = m_isBallRotating2;
+        p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
+        p->m_slopeFlipGravityRelated = m_slopeFlipGravityRelated;
+        p->m_wasOnSlope = m_wasOnSlope;
+        p->m_isOnSlope = m_isOnSlope;
+        // p->m_isOnGround4 = m_isOnGround4;  // comment out if missing
+        p->m_isHidden = m_isHidden;
+        p->m_isPlatformer = m_isPlatformer;
+        p->m_isAccelerating = m_isAccelerating;
+        p->m_affectedByForces = m_affectedByForces;
+        p->m_jumpBuffered = m_jumpBuffered;
+        p->m_stateJumpBuffered = m_stateJumpBuffered;
+        p->m_stateRingJump = m_stateRingJump;
+        p->m_stateRingJump2 = m_stateRingJump2;
+        p->m_wasTeleported = m_wasTeleported;
+        p->m_ringJumpRelated = m_ringJumpRelated;
+        p->m_maybeSpriteRelated = m_maybeSpriteRelated;
+        p->m_isDontBoostX = m_isDontBoostX;
+        p->m_isDontBoostY = m_isDontBoostY;
+
+        // Collision state
+        p->m_lastCollisionBottom = m_lastCollisionBottom;
+        p->m_lastCollisionTop = m_lastCollisionTop;
+        p->m_lastCollisionLeft = m_lastCollisionLeft;
+        p->m_lastCollisionRight = m_lastCollisionRight;
+        p->m_stateOnGround = m_stateOnGround;
+        p->m_stateHitHead = m_stateHitHead;
+        p->m_stateFlipGravity = m_stateFlipGravity;
+        p->m_stateForce = m_stateForce;
+        p->m_stateDartSlide = m_stateDartSlide;
+        p->m_stateNoAutoJump = m_stateNoAutoJump;
+        p->m_stateScale = m_stateScale;
+        p->m_stateForceVector = m_stateForceVector;
+
+        // Gamemode flags
+        p->m_isShip = m_isShip;
+        p->m_isBird = m_isBird;
+        p->m_isBall = m_isBall;
+        p->m_isDart = m_isDart;
+        p->m_isRobot = m_isRobot;
+        p->m_isSpider = m_isSpider;
+        p->m_isSwing = m_isSwing;
     }
 };
 
