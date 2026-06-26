@@ -1368,7 +1368,7 @@ public:
                 inputWallTime
             });
 
-            priorityIndex++;
+            ++playbackIndex;
         }
     }
 
