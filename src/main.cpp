@@ -42,8 +42,31 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-
+#include <Geode/modify/PlayerObject.hpp>
 using namespace geode::prelude;
+
+
+// ----- player object hook -----------------------------------------------------
+class $modify(BotPlayerObject, PlayerObject) {
+    static void onModify(auto& self) {
+        // Run AFTER CBF so CBF has already split the step and updated
+        // m_levelTime to the sub-step time. Our input fires at the exact
+        // sub-step, not one step late.
+        (void) self.setHookPriority("PlayerObject::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+            this == this->m_gameLayer->m_player1) {
+            // dt here is the SUB-STEP delta. Fire inputs due within this
+            // sub-step. By running AFTER CBF, m_levelTime is already updated
+            // to the sub-step boundary, so we fire at the exact right time.
+            bot.fireDueInputs(this->m_gameLayer, 0.0f);
+        }
+        PlayerObject::update(dt);
+    }
+};
 
 
 // ============================================================================
@@ -98,15 +121,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-            // Fire BEFORE the original so inputs are set before physics.
-            // dt is the physics step delta. levelTime + dt looks ahead by
-            // one step — deterministic, never drops inputs.
-            BotManager::get().fireDueInputs(this, dt);
-        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
-
     // ---- playback (backstop, per frame) ----------------------------------
     //
     // In the rare case a CBF build does not route through processCommands every
@@ -143,6 +159,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         return modified;
     }
 };
+
 
 // ============================================================================
 //  PlayLayer hooks
