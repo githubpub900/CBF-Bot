@@ -1187,11 +1187,6 @@ public:
     // of appending to it.
     double    m_lastRecordTime = 0.0;
 
-     // Sub-step level time tracking (for speed-independent accuracy)
-    double m_frameStartLevel = 0.0;      // level time at frame start
-    double m_subStepAccumulated = 0.0;   // accumulated sub-step delta this frame
-
-
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -1581,10 +1576,9 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+        void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
-
         double now = levelTime(gl) + dt;
         injecting = true;
         while (playbackIndex < macro.events.size() &&

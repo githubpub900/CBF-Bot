@@ -98,14 +98,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this)) {
-            // Capture the frame's starting level time BEFORE the original
-            // advances m_levelTime. Used by PlayerObject::update to compute
-            // exact sub-step level time.
-            auto& bot = BotManager::get();
-            bot.m_frameStartLevel = BotManager::levelTime(this);
-            bot.m_subStepAccumulated = 0.0;
+     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
+            BotManager::get().fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -230,23 +225,16 @@ class $modify(BotPlayLayer, PlayLayer) {
 
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        // Run AFTER CBF so CBF's sub-step splitting calls our hook per sub-step.
-        // CBF calls PlayerObject::update(substepDelta) per sub-step, and with
-        // priority 1000000, our hook is the next in the chain — so we get
-        // called PER SUB-STEP, not just once per frame.
-        (void) self.setHookPriority("PlayerObject::update", 1000000);
+        (void) self.setHookPriority("PlayerObject::update", -1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // dt is the SUB-STEP delta (level time). Accumulate it to compute
-            // the exact sub-step level time. This is speed-independent:
-            // each sub-step covers ~4ms of level time regardless of speedhack.
-            bot.m_subStepAccumulated += dt;
-            double subStepLevel = bot.m_frameStartLevel + bot.m_subStepAccumulated;
-            bot.fireDueInputsAtLevel(this->m_gameLayer, subStepLevel);
+            // Use levelTime directly — no sub-step accumulation.
+            // This was the version that worked well.
+            bot.fireDueInputs(this->m_gameLayer, 0.0f);
         }
         PlayerObject::update(dt);
     }
