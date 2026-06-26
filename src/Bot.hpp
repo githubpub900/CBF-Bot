@@ -85,17 +85,6 @@
 
 using namespace geode::prelude;
 
-// ============================================================================
-//  CBF internal symbols (declared extern so we can read CBF's actual timers)
-// ============================================================================
-//  CBF's source defines these as non-static globals, so they're exported:
-//    TimestampType lastFrameTime;
-//    TimestampType currentFrameTime;
-//  Reading these directly eliminates ALL timestamp alignment jitter.
-//
-//  TimestampType is `double` (from CBF's timestamp.hpp).
-extern double lastFrameTime;
-extern double currentFrameTime;
 
 // ============================================================================
 // ============================================================================
@@ -1327,7 +1316,7 @@ public:
     // This runs BEFORE CBF's sub-step splitting, so the input is set before
     // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
     // 240Hz, less at higher CBF step counts).
-    void pushDueInputsToCBF() {
+       void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -1337,18 +1326,19 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // Read CBF's ACTUAL frame window — no approximation, no jitter.
-        // This is the key fix: we use CBF's own lastFrameTime/currentFrameTime
-        // instead of guessing with getWallTime().
-        double cbfLast = lastFrameTime;
-        double cbfCurrent = currentFrameTime;
+        // Capture wall time NOW — this runs inside getModifiedDelta, which
+        // runs BEFORE CBF's buildStepQueue. CBF's currentFrameTime was set
+        // at frame start (in onFrameStart), which was ~1 frame ago.
+        // Our m_frameStartWall is also from frame start (CCScheduler::update
+        // with priority 1000000 runs after CBF), so they should be very close.
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameLevel = m_frameStartLevel;
         double frameLevelAdvance = m_prevFrameDelta * speed;
 
-        // Small safety margin (2% of frame) to avoid boundary edge cases
         double safetyMargin = m_prevFrameDelta * 0.02;
-        double safeLow  = cbfLast + safetyMargin;
-        double safeHigh = cbfCurrent - safetyMargin;
+        double safeLow  = lastFrameTime + safetyMargin;
+        double safeHigh = currentFrameTime - safetyMargin;
 
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
@@ -1365,8 +1355,7 @@ public:
                 continue;
             }
 
-            // Convert level time to wall-clock using CBF's ACTUAL frame window
-            double inputWallTime = cbfLast + levelDelta / speed;
+            double inputWallTime = lastFrameTime + levelDelta / speed;
 
             if (inputWallTime < safeLow)  inputWallTime = safeLow;
             if (inputWallTime > safeHigh) inputWallTime = safeHigh;
@@ -1379,7 +1368,7 @@ public:
                 inputWallTime
             });
 
-            ++playbackIndex;
+            priorityIndex++;
         }
     }
 
