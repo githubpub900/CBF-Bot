@@ -1005,18 +1005,6 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-    double preciseLevelTime(GJBaseGameLayer* gl) {
-        if (!gl) return 0.0;
-        double baseLevelTime = levelTime(gl);
-        double wallNow = getWallTime();
-        double speed = speedMultiplier();
-        double wallElapsed = wallNow - m_frameStartWall;
-        if (wallElapsed < 0.0) wallElapsed = 0.0;
-        double levelElapsed = wallElapsed * speed;
-        double maxElapsed = m_prevFrameDelta * speed;
-        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
-        return baseLevelTime + levelElapsed;
-    }
 
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
