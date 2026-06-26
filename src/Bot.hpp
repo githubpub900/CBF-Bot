@@ -1316,7 +1316,7 @@ public:
     // This runs BEFORE CBF's sub-step splitting, so the input is set before
     // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
     // 240Hz, less at higher CBF step counts).
-       void pushDueInputsToCBF() {
+    void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -1326,11 +1326,6 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // Capture wall time NOW — this runs inside getModifiedDelta, which
-        // runs BEFORE CBF's buildStepQueue. CBF's currentFrameTime was set
-        // at frame start (in onFrameStart), which was ~1 frame ago.
-        // Our m_frameStartWall is also from frame start (CCScheduler::update
-        // with priority 1000000 runs after CBF), so they should be very close.
         double currentFrameTime = m_frameStartWall;
         double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameLevel = m_frameStartLevel;
@@ -1348,6 +1343,7 @@ public:
             if (levelDelta > frameLevelAdvance + 0.0001) break;
 
             if (levelDelta < -0.0001) {
+                // Past due — fire directly
                 injecting = true;
                 pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
                 injecting = false;
@@ -1355,18 +1351,32 @@ public:
                 continue;
             }
 
-            double inputWallTime = lastFrameTime + levelDelta / speed;
+            // RELEASES: fire directly immediately. CBF's one-step delay
+            // causes releases to fire late, which makes buttons stick down
+            // ("holding too long" bug). By firing releases directly, they
+            // happen at the exact level time, preventing stuck holds.
+            //
+            // PRESSES: push to CBF's queue for sub-step accuracy. The 4ms
+            // delay is fine for presses — it doesn't cause visible issues.
+            if (!e.down) {
+                // Release — fire NOW via handleButton
+                injecting = true;
+                pl->handleButton(false, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+            } else {
+                // Press — push to CBF queue for sub-step accuracy
+                double inputWallTime = lastFrameTime + levelDelta / speed;
+                if (inputWallTime < safeLow)  inputWallTime = safeLow;
+                if (inputWallTime > safeHigh) inputWallTime = safeHigh;
 
-            if (inputWallTime < safeLow)  inputWallTime = safeLow;
-            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
+                pl->m_queuedButtons.push_back({
+                    static_cast<PlayerButton>(e.button),
+                    e.down,
+                    e.player2,
+                    0,
+                    inputWallTime
+                });
+            }
 
             ++playbackIndex;
         }
