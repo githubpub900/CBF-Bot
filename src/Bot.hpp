@@ -1266,21 +1266,10 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-       void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
 
-        // Use levelTime + dt to look ahead by one step. This fires inputs
-        // at the START of the step that should contain them.
-        //
-        // With CBF, processCommands runs once per FRAME, but CBF splits
-        // the frame into sub-steps inside PlayerObject::update. CBF keeps
-        // m_levelTime advancing per sub-step, so by the time processCommands
-        // returns, m_levelTime reflects the full frame's advance.
-        //
-        // Firing here with dt = the step delta gives us step-level accuracy
-        // (~4ms at 240Hz). For tighter accuracy, we'd need to hook
-        // PlayerObject::update (per sub-step), but that caused issues before.
         double now = levelTime(gl) + dt;
         injecting = true;
         while (playbackIndex < macro.events.size() &&

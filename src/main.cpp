@@ -42,6 +42,7 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -97,12 +98,16 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-       void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
+            // Fire BEFORE the original so inputs are set before physics.
+            // dt is the physics step delta. levelTime + dt looks ahead by
+            // one step — deterministic, never drops inputs.
             BotManager::get().fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
+
     // ---- playback (backstop, per frame) ----------------------------------
     //
     // In the rare case a CBF build does not route through processCommands every
@@ -209,6 +214,37 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
+// ============================================================================
+//  PlayerObject::update hook  --  fire at CBF sub-step precision
+// ============================================================================
+//
+//  CBF splits each physics step into sub-steps inside PlayerObject::update.
+//  By hooking here with VeryEarly priority, we run BEFORE CBF's sub-step
+//  splitting, so our input is set before CBF processes the current sub-step.
+//
+//  This runs IN ADDITION TO processCommands. Both fire inputs that are due,
+//  and double-firing is harmless (GD's handleButton just sets the same state).
+//
+class $modify(BotPlayerObject, PlayerObject) {
+    static void onModify(auto& self) {
+        // Run BEFORE CBF so our input is set before CBF processes this sub-step
+        (void) self.setHookPriority("PlayerObject::update", -1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        // Only fire from P1's update (avoid double-fire on dual)
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+            this == this->m_gameLayer->m_player1) {
+            // dt here is the SUB-STEP delta. We use 0 (no lookahead) because
+            // m_levelTime has already advanced to the sub-step boundary.
+            // Firing here gives us sub-step accuracy WITHOUT the CBF queue's
+            // hold bug (we fire directly via handleButton, not through the queue).
+            bot.fireDueInputs(this->m_gameLayer, 0.0f);
+        }
+        PlayerObject::update(dt);
+    }
+};
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen
