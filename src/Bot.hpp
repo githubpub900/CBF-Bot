@@ -1316,7 +1316,7 @@ public:
     // This runs BEFORE CBF's sub-step splitting, so the input is set before
     // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
     // 240Hz, less at higher CBF step counts).
-    void pushDueInputsToCBF() {
+        void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
 
@@ -1351,20 +1351,18 @@ public:
                 continue;
             }
 
-            // RELEASES: fire directly immediately. CBF's one-step delay
-            // causes releases to fire late, which makes buttons stick down
-            // ("holding too long" bug). By firing releases directly, they
-            // happen at the exact level time, preventing stuck holds.
-            //
-            // PRESSES: push to CBF's queue for sub-step accuracy. The 4ms
-            // delay is fine for presses — it doesn't cause visible issues.
+            // HYBRID APPROACH:
+            // - Releases fire DIRECTLY via handleButton. This prevents the
+            //   "random holding" bug where CBF defers a release to the next
+            //   sub-step/frame, causing buttons to stick down too long.
+            // - Presses go through CBF's queue for sub-step accuracy.
             if (!e.down) {
-                // Release — fire NOW via handleButton
+                // Release — fire NOW
                 injecting = true;
                 pl->handleButton(false, static_cast<int>(e.button), !e.player2);
                 injecting = false;
             } else {
-                // Press — push to CBF queue for sub-step accuracy
+                // Press — CBF queue for sub-step accuracy
                 double inputWallTime = lastFrameTime + levelDelta / speed;
                 if (inputWallTime < safeLow)  inputWallTime = safeLow;
                 if (inputWallTime > safeHigh) inputWallTime = safeHigh;
@@ -1381,7 +1379,7 @@ public:
             ++playbackIndex;
         }
     }
-
+    
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
         auto gl = GJBaseGameLayer::get();
