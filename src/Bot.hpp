@@ -1210,14 +1210,50 @@ public:
         double t = levelTime(gl);
         if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
             truncateAfter(t);
-            // RECOMPUTE (not reset) held state from the surviving events.
-            // resetHeldState() was wrong: it set everything to false, so if a
-            // button was held at the checkpoint time, the next release would
-            // be dropped as "redundant" (heldState=false == down=false),
-            // leaving an unbalanced press with no matching release.
-            // recomputeHeldState() replays the remaining events and sets
-            // heldState to what it actually was at time t.
             recomputeHeldState();
+
+            // CRITICAL FIX: After truncating, the player might still be
+            // physically holding buttons (e.g., placed a checkpoint while
+            // holding jump, then died). GD won't re-fire handleButton for
+            // buttons that are already down, so the press event is missing
+            // from the macro. We need to record synthetic press events for
+            // any buttons the player is currently holding but that aren't
+            // in heldState.
+            if (auto pl = PlayLayer::get()) {
+                double pressTime = t;
+
+                // RobTop's CBS snap (if applicable)
+                if (cbfState() == bot::CBFState::RobTop) {
+                    pressTime = quantizeRobTop(pressTime);
+                }
+
+                // Check P1
+                if (pl->m_player1) {
+                    for (auto const& [btn, held] : pl->m_player1->m_holdingButtons) {
+                        if (held && btn >= 1 && btn <= 3 && !heldState[0][btn]) {
+                            // Player is holding this button but our macro
+                            // doesn't have a press for it. Record one now.
+                            heldState[0][btn] = true;
+                            macro.events.emplace_back(pressTime,
+                                static_cast<uint8_t>(btn), true, false);
+                            log::debug("[Bot] Synthetic press recorded after "
+                                       "checkpoint: btn={} at t={:.6f}", btn, pressTime);
+                        }
+                    }
+                }
+                // Check P2
+                if (pl->m_player2) {
+                    for (auto const& [btn, held] : pl->m_player2->m_holdingButtons) {
+                        if (held && btn >= 1 && btn <= 3 && !heldState[1][btn]) {
+                            heldState[1][btn] = true;
+                            macro.events.emplace_back(pressTime,
+                                static_cast<uint8_t>(btn), true, true);
+                            log::debug("[Bot] Synthetic P2 press recorded after "
+                                       "checkpoint: btn={} at t={:.6f}", btn, pressTime);
+                        }
+                    }
+                }
+            }
         }
         m_lastRecordTime = t;
     }
