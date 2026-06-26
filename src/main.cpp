@@ -42,10 +42,26 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
 
+class $modify(BotCCScheduler, CCScheduler) {
+    static void onModify(auto& self) {
+        (void) self.setHookPriority("CCScheduler::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        if (auto pl = PlayLayer::get()) {
+            bot.m_frameStartLevel = BotManager::levelTime(pl);
+        }
+        CCScheduler::update(dt);
+    }
+};
 
 // ============================================================================
 //  Small helpers
@@ -98,8 +114,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // Inputs fire from PlayerObject::update (per sub-step) now
+       void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -129,12 +144,12 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
 
-    double getModifiedDelta(float dt) {
+       double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
-        if (isPlay(this) && bot.guiPaused) {
-            return 0.0;
+        if (isPlay(this) && bot.guiPaused) return 0.0;
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushDueInputsToCBF();
         }
-        // No CBF queue push — inputs fire from PlayerObject::update now
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
@@ -212,36 +227,6 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
-// ============================================================================
-//  PlayerObject::update hook  --  fire playback at CBF sub-step precision
-// ============================================================================
-//
-//  CBF splits each physics step into sub-steps inside PlayerObject::update.
-//  By hooking here with VeryEarly priority, we run BEFORE CBF's sub-step
-//  splitting, and we fire inputs using LEVEL TIME (deterministic) instead
-//  of wall-clock time (jittery).
-//
-//  This gives sub-step accuracy (CBF runs this 240+ times/sec) AND
-//  determinism (level time is the same every attempt).
-//
-class $modify(BotPlayerObject, PlayerObject) {
-    static void onModify(auto& self) {
-        // Run BEFORE CBF so our input is set before CBF splits the step
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        // Only fire from P1's update (avoid double-firing on dual)
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
-            this == this->m_gameLayer->m_player1) {
-            // dt is the SUB-STEP delta (not the full frame delta).
-            // Fire inputs due within this sub-step using levelTime + dt.
-            bot.fireDueInputs(this->m_gameLayer, dt);
-        }
-        PlayerObject::update(dt);
-    }
-};
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen

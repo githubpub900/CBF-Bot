@@ -86,6 +86,18 @@
 using namespace geode::prelude;
 
 // ============================================================================
+//  CBF internal symbols (declared extern so we can read CBF's actual timers)
+// ============================================================================
+//  CBF's source defines these as non-static globals, so they're exported:
+//    TimestampType lastFrameTime;
+//    TimestampType currentFrameTime;
+//  Reading these directly eliminates ALL timestamp alignment jitter.
+//
+//  TimestampType is `double` (from CBF's timestamp.hpp).
+extern double lastFrameTime;
+extern double currentFrameTime;
+
+// ============================================================================
 // ============================================================================
 //
 //   DESIGN & USAGE REFERENCE
@@ -890,8 +902,7 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
-    double m_lastInputRecordTime = -1.0;
-
+    
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -1006,7 +1017,19 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-
+    double preciseLevelTime(GJBaseGameLayer* gl) {
+        if (!gl) return 0.0;
+        double baseLevelTime = levelTime(gl);
+        double wallNow = getWallTime();
+        double speed = speedMultiplier();
+        double wallElapsed = wallNow - m_frameStartWall;
+        if (wallElapsed < 0.0) wallElapsed = 0.0;
+        double levelElapsed = wallElapsed * speed;
+        double maxElapsed = m_prevFrameDelta * speed;
+        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
+        return baseLevelTime + levelElapsed;
+    }
+    
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1165,7 +1188,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-          void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1176,17 +1199,7 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        double t = levelTime(gl);
-
-        // During death animation or checkpoint load, m_levelTime can be frozen.
-        // If we record multiple inputs at the same frozen time, they get the
-        // same timestamp. Fix: if this input is at the same time as the last
-        // one, nudge it forward by a tiny epsilon so it doesn't get collapsed
-        // or sorted out of order.
-        if (t <= m_lastInputRecordTime) {
-            t = m_lastInputRecordTime + 0.000001;  // 1 microsecond nudge
-        }
-        m_lastInputRecordTime = t;
+        double t = preciseLevelTime(gl);
 
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
@@ -1313,19 +1326,60 @@ public:
     // This runs BEFORE CBF's sub-step splitting, so the input is set before
     // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
     // 240Hz, less at higher CBF step counts).
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
+
+        // Read CBF's ACTUAL frame window — no approximation, no jitter.
+        // This is the key fix: we use CBF's own lastFrameTime/currentFrameTime
+        // instead of guessing with getWallTime().
+        double cbfLast = lastFrameTime;
+        double cbfCurrent = currentFrameTime;
+        double frameLevel = m_frameStartLevel;
+        double frameLevelAdvance = m_prevFrameDelta * speed;
+
+        // Small safety margin (2% of frame) to avoid boundary edge cases
+        double safetyMargin = m_prevFrameDelta * 0.02;
+        double safeLow  = cbfLast + safetyMargin;
+        double safeHigh = cbfCurrent - safetyMargin;
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            double levelDelta = e.time - frameLevel;
+
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            if (levelDelta < -0.0001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            // Convert level time to wall-clock using CBF's ACTUAL frame window
+            double inputWallTime = cbfLast + levelDelta / speed;
+
+            if (inputWallTime < safeLow)  inputWallTime = safeLow;
+            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
+
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,
+                inputWallTime
+            });
+
             ++playbackIndex;
         }
-        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1385,18 +1439,7 @@ public:
         }
 
         if (mode == bot::Mode::Playing) {
-            // Seek the playback cursor to the checkpoint time
             seekPlaybackTo(frame->levelTime);
-
-            // CRITICAL: re-apply held state from the macro. After a checkpoint
-            // load, the player's actual held buttons might not match what the
-            // macro says should be held at this time. If we don't sync them,
-            // the next release input gets dropped (heldState thinks button
-            // isn't held, so the release looks "redundant" and is discarded),
-            // leaving the button stuck down and breaking the macro.
-            //
-            // First release everything, then re-press what the macro says
-            // should be held at this exact time.
             releaseAll();
             applyHeldStateAt(pl, frame->levelTime);
         } else if (mode == bot::Mode::Recording) {
