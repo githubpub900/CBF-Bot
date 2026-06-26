@@ -1058,7 +1058,6 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         resetHeldState();
-        m_lastInputRecordTime = -1.0;  // ← ADD THIS
         m_lastRecordTime = macro.recordStartTime;
         log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
