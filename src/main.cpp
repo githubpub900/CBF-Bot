@@ -42,38 +42,10 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
-
-// ============================================================================
-//  CCScheduler hook  --  capture frame-start wall time (matches CBF's timer)
-// ============================================================================
-//
-//  CBF sets currentFrameTime in onFrameStart(), which is called from
-//  CCScheduler::update (on non-Windows) or CCEGLView::pollEvents (Windows).
-//  We hook CCScheduler::update with VeryEarly priority to capture getWallTime()
-//  BEFORE CBF's hook runs, so our m_frameStartWall ≈ CBF's currentFrameTime.
-//
-
-class $modify(BotCCScheduler, CCScheduler) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("CCScheduler::update", -1000000);
-    }
-
-       void update(float dt) {
-        auto& bot = BotManager::get();
-        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
-            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
-        bot.m_frameStartWall = BotManager::getWallTime();
-        if (auto pl = PlayLayer::get()) {
-            bot.m_frameStartLevel = BotManager::levelTime(pl);
-        }
-        CCScheduler::update(dt);
-    }
-};
 
 // ============================================================================
 //  Small helpers
@@ -127,8 +99,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // Inputs are pushed to CBF's queue from getModifiedDelta.
-        // CBF fires them at the exact sub-step. No direct firing here.
+        // Inputs fire from PlayerObject::update (per sub-step) now
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -163,11 +134,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         if (isPlay(this) && bot.guiPaused) {
             return 0.0;
         }
-        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
-        // Our hook priority is -1000000 (VeryEarly), so we run before CBF.
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushDueInputsToCBF();
-        }
+        // No CBF queue push — inputs fire from PlayerObject::update now
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
@@ -245,7 +212,36 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
+// ============================================================================
+//  PlayerObject::update hook  --  fire playback at CBF sub-step precision
+// ============================================================================
+//
+//  CBF splits each physics step into sub-steps inside PlayerObject::update.
+//  By hooking here with VeryEarly priority, we run BEFORE CBF's sub-step
+//  splitting, and we fire inputs using LEVEL TIME (deterministic) instead
+//  of wall-clock time (jittery).
+//
+//  This gives sub-step accuracy (CBF runs this 240+ times/sec) AND
+//  determinism (level time is the same every attempt).
+//
+class $modify(BotPlayerObject, PlayerObject) {
+    static void onModify(auto& self) {
+        // Run BEFORE CBF so our input is set before CBF splits the step
+        (void) self.setHookPriority("PlayerObject::update", -1000000);
+    }
 
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        // Only fire from P1's update (avoid double-firing on dual)
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+            this == this->m_gameLayer->m_player1) {
+            // dt is the SUB-STEP delta (not the full frame delta).
+            // Fire inputs due within this sub-step using levelTime + dt.
+            bot.fireDueInputs(this->m_gameLayer, dt);
+        }
+        PlayerObject::update(dt);
+    }
+};
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen

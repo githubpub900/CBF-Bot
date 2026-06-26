@@ -890,9 +890,6 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
-    double m_frameStartWall = 0.0;
-    double m_frameStartLevel = 0.0;
-    double m_prevFrameDelta = 0.0;
     
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -1178,7 +1175,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1189,7 +1186,8 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        double t = preciseLevelTime(gl);
+        // Use plain levelTime — deterministic, same every attempt
+        double t = levelTime(gl);
 
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
@@ -1309,71 +1307,26 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Push due inputs to CBF's m_queuedButtons queue. Uses frame-start anchors
-    // (m_frameStartWall, m_frameStartLevel) captured in CCScheduler::update,
-    // NOT mid-frame getWallTime(). This aligns our timestamps with CBF's
-    // currentFrameTime, eliminating the randomness.
+       // Fire inputs directly from PlayerObject::update (runs per CBF sub-step).
+    // Uses LEVEL TIME + dt (the sub-step delta) — fully deterministic, no
+    // wall-clock conversion, no timestamp alignment issues.
     //
-    // Per-frame re-anchoring means no drift over time (unlike the
-    // playbackStartWallTime approach which drifted after ~30s).
-        void pushDueInputsToCBF() {
+    // This runs BEFORE CBF's sub-step splitting, so the input is set before
+    // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
+    // 240Hz, less at higher CBF step counts).
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
+        if (!gl) return;
 
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-        double frameLevel = m_frameStartLevel;
-        double frameLevelAdvance = m_prevFrameDelta * speed;
-
-        // Safety margin: 2% of frame time. This keeps timestamps AWAY from
-        // the frame boundaries (lastFrameTime and currentFrameTime), so CBF
-        // always processes them this frame instead of sometimes deferring.
-        // The randomness was caused by timestamps landing exactly on
-        // currentFrameTime — CBF would sometimes process, sometimes defer.
-        double safetyMargin = m_prevFrameDelta * 0.02;
-        double safeLow  = lastFrameTime + safetyMargin;
-        double safeHigh = currentFrameTime - safetyMargin;
-
-        while (playbackIndex < macro.events.size()) {
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
-
-            double levelDelta = e.time - frameLevel;
-
-            // If input is beyond this frame, stop
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            // If past due, fire directly
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            // Convert level time to wall-clock
-            double inputWallTime = lastFrameTime + levelDelta / speed;
-
-            // Clamp to SAFE interior of CBF's frame window (away from edges)
-            if (inputWallTime < safeLow)  inputWallTime = safeLow;
-            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
+        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
