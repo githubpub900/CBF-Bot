@@ -1187,6 +1187,11 @@ public:
     // of appending to it.
     double    m_lastRecordTime = 0.0;
 
+     // Sub-step level time tracking (for speed-independent accuracy)
+    double m_frameStartLevel = 0.0;      // level time at frame start
+    double m_subStepAccumulated = 0.0;   // accumulated sub-step delta this frame
+
+
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -1285,6 +1290,21 @@ public:
         if (!std::isfinite(t)) return 0.0;
         double scale = std::pow(10.0, std::min(bot::TEXT_TIME_DECIMALS, 15));
         return std::round(t * scale) / scale;
+    }
+
+
+    // Fire inputs due at a SPECIFIC level time (used for sub-step accuracy)
+    void fireDueInputsAtLevel(GJBaseGameLayer* gl, double targetLevel) {
+        if (mode != bot::Mode::Playing) return;
+        if (!gl) return;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= targetLevel) {
+            auto const& e = macro.events[playbackIndex];
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            ++playbackIndex;
+        }
+        injecting = false;
     }
 
     // ----- mode control ----------------------------------------------------

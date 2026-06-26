@@ -99,11 +99,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-            // Fire BEFORE the original so inputs are set before physics.
-            // dt is the physics step delta. levelTime + dt looks ahead by
-            // one step — deterministic, never drops inputs.
-            BotManager::get().fireDueInputs(this, dt);
+        if (isPlay(this)) {
+            // Capture the frame's starting level time BEFORE the original
+            // advances m_levelTime. Used by PlayerObject::update to compute
+            // exact sub-step level time.
+            auto& bot = BotManager::get();
+            bot.m_frameStartLevel = BotManager::levelTime(this);
+            bot.m_subStepAccumulated = 0.0;
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -225,22 +227,26 @@ class $modify(BotPlayLayer, PlayLayer) {
 //  This runs IN ADDITION TO processCommands. Both fire inputs that are due,
 //  and double-firing is harmless (GD's handleButton just sets the same state).
 //
+
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        // Run BEFORE CBF so our input is set before CBF processes this sub-step
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
+        // Run AFTER CBF so CBF's sub-step splitting calls our hook per sub-step.
+        // CBF calls PlayerObject::update(substepDelta) per sub-step, and with
+        // priority 1000000, our hook is the next in the chain — so we get
+        // called PER SUB-STEP, not just once per frame.
+        (void) self.setHookPriority("PlayerObject::update", 1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Only fire from P1's update (avoid double-fire on dual)
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // dt here is the SUB-STEP delta. We use 0 (no lookahead) because
-            // m_levelTime has already advanced to the sub-step boundary.
-            // Firing here gives us sub-step accuracy WITHOUT the CBF queue's
-            // hold bug (we fire directly via handleButton, not through the queue).
-            bot.fireDueInputs(this->m_gameLayer, 0.0f);
+            // dt is the SUB-STEP delta (level time). Accumulate it to compute
+            // the exact sub-step level time. This is speed-independent:
+            // each sub-step covers ~4ms of level time regardless of speedhack.
+            bot.m_subStepAccumulated += dt;
+            double subStepLevel = bot.m_frameStartLevel + bot.m_subStepAccumulated;
+            bot.fireDueInputsAtLevel(this->m_gameLayer, subStepLevel);
         }
         PlayerObject::update(dt);
     }
