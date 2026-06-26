@@ -42,26 +42,9 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
 
-class $modify(BotCCScheduler, CCScheduler) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("CCScheduler::update", 1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
-            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
-        bot.m_frameStartWall = BotManager::getWallTime();
-        if (auto pl = PlayLayer::get()) {
-            bot.m_frameStartLevel = BotManager::levelTime(pl);
-        }
-        CCScheduler::update(dt);
-    }
-};
 
 // ============================================================================
 //  Small helpers
@@ -114,7 +97,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-       void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
+            // Fire BEFORE the original so inputs are set before physics.
+            // dt is the physics step delta. levelTime + dt looks ahead by
+            // one step — deterministic, never drops inputs.
+            BotManager::get().fireDueInputs(this, dt);
+        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -144,12 +133,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
 
-       double getModifiedDelta(float dt) {
+    double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushDueInputsToCBF();
-        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();

@@ -891,9 +891,7 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
-    double m_frameStartWall = 0.0;
-    double m_frameStartLevel = 0.0;
-    double m_prevFrameDelta = 0.0;
+
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -946,31 +944,6 @@ public:
     }
 
 
-    // Get the current wall-clock time using the EXACT same timer CBF uses.
-    // This is critical: CBF compares m_timestamp against its own
-    // currentFrameTime, so if we use a different timer, the subtraction
-    // gives a huge wrong value and CBF never fires our inputs.
-    static double getWallTime() {
-        #if defined(GEODE_IS_WINDOWS)
-        // CBF uses QueryPerformanceCounter / freq on Windows
-        static LARGE_INTEGER freq = [](){
-            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
-        }();
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-
-        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
-        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-
-        #else
-        // CBF uses clock_gettime(CLOCK_MONOTONIC) on Android/Linux
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
-        #endif
-    }
 
     // The smallest time delta the current CBF setup can resolve, in seconds.
     // Syzzi is effectively continuous, so we report the physics tick as a floor;
@@ -1006,19 +979,6 @@ public:
     // Read the authoritative, frame-rate independent level clock.
     static double levelTime(GJBaseGameLayer* gl) {
         return gl ? gl->m_gameState.m_levelTime : 0.0;
-    }
-
-    double preciseLevelTime(GJBaseGameLayer* gl) {
-        if (!gl) return 0.0;
-        double baseLevelTime = levelTime(gl);
-        double wallNow = getWallTime();
-        double speed = speedMultiplier();
-        double wallElapsed = wallNow - m_frameStartWall;
-        if (wallElapsed < 0.0) wallElapsed = 0.0;
-        double levelElapsed = wallElapsed * speed;
-        double maxElapsed = m_prevFrameDelta * speed;
-        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
-        return baseLevelTime + levelElapsed;
     }
     
     // Round a timestamp the way a text export wants it: clamp to a sane number
@@ -1178,26 +1138,16 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+         void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
 
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
-
-        // Update heldState (still useful for applyHeldStateAt etc.)
         heldState[pi][button] = down;
 
-        // Record EVERY input — don't collapse redundant transitions.
-        // The redundancy check was dropping real inputs when heldState got
-        // out of sync (after checkpoint loads, deaths, etc.), causing
-        // presses with no matching releases → buttons stuck down.
-        //
-        // Redundant events (double-press, double-release) are harmless —
-        // GD's handleButton just sets the state, so calling it twice is fine.
         double t = levelTime(gl);
-
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
         }
@@ -1315,68 +1265,19 @@ public:
     }
 
     // ----- playback --------------------------------------------------------
-
-       // Fire inputs directly from PlayerObject::update (runs per CBF sub-step).
-    // Uses LEVEL TIME + dt (the sub-step delta) — fully deterministic, no
-    // wall-clock conversion, no timestamp alignment issues.
-    //
-    // This runs BEFORE CBF's sub-step splitting, so the input is set before
-    // CBF processes the current sub-step. Accuracy = one sub-step (~4ms at
-    // 240Hz, less at higher CBF step counts).
-     void pushDueInputsToCBF() {
+.
+        void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
-
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        // Capture wall time NOW — this runs inside getModifiedDelta, which
-        // runs BEFORE CBF's buildStepQueue. CBF's currentFrameTime was set
-        // at frame start (in onFrameStart), which was ~1 frame ago.
-        // Our m_frameStartWall is also from frame start (CCScheduler::update
-        // with priority 1000000 runs after CBF), so they should be very close.
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-        double frameLevel = m_frameStartLevel;
-        double frameLevelAdvance = m_prevFrameDelta * speed;
-
-        double safetyMargin = m_prevFrameDelta * 0.02;
-        double safeLow  = lastFrameTime + safetyMargin;
-        double safeHigh = currentFrameTime - safetyMargin;
-
-        while (playbackIndex < macro.events.size()) {
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
-
-            double levelDelta = e.time - frameLevel;
-
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            double inputWallTime = lastFrameTime + levelDelta / speed;
-
-            if (inputWallTime < safeLow)  inputWallTime = safeLow;
-            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
-                ++playbackIndex;
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            ++playbackIndex;
         }
+        injecting = false;
     }
     
     // Force-release every button (used when stopping playback abruptly).
