@@ -1265,7 +1265,7 @@ public:
     }
 
     // ----- playback --------------------------------------------------------
-.
+
         void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
