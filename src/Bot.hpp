@@ -325,463 +325,758 @@ static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
 //  do not faithfully restore velocity and a handful of per-gamemode flags, which
 //  is why vanilla practice can feel "off" after a respawn. We snapshot every
 //  field that matters for every gamemode so a reload is bit-for-bit consistent.
-//
+// thanks silicate
 struct PlayerSnapshot {
-    bool   valid = false;
+    bool valid = false;
 
     // Transform
-    cocos2d::CCPoint position{0.f, 0.f};
-    float  rotation = 0.f;
-    float  scaleX = 1.f;
-    float  scaleY = 1.f;
+    cocos2d::CCPoint m_position{0.f, 0.f};
+    float m_ccRotation = 0.f;
 
-    // Velocity / gravity
-    double yVelocity = 0.0;
-    double platformerXVelocity = 0.0;
-    double gravity = 0.0;
-    double speedMultiplier = 0.0;
-    float  playerSpeed = 0.f;
-    float  gravityMod = 1.f;
-    double yStart = 0.0;
-
-    // Gamemode booleans
-    bool isShip = false;
-    bool isBird = false;
-    bool isBall = false;
-    bool isDart = false;
-    bool isRobot = false;
-    bool isSpider = false;
-    bool isSwing = false;
-
-    // Orientation / contact state
-    bool isUpsideDown = false;
-    bool isSideways = false;
-    bool isGoingLeft = false;
-    bool isOnGround = false;
-    bool isOnGround2 = false;
-    bool isOnGround3 = false;
-    bool isOnGround4 = false;
-    bool isDashing = false;
-    bool isLocked = false;
-    bool isDead = false;
-    bool isHolding = false;
-
-    // Platformer movement intent
-    bool platformerMovingLeft = false;
-    bool platformerMovingRight = false;
-
-    cocos2d::CCPoint lastGroundedPos{0.f, 0.f};
-
-    // --- Slope state (critical for slope accuracy) ---
-    GameObject* m_currentSlope = nullptr;
-    GameObject* m_currentSlope2 = nullptr;
-   // GameObject* m_currentSlope3 = nullptr;
-    GameObject* m_preLastGroundObject = nullptr;
-    GameObject* m_maybeLastGroundObject = nullptr;
-    float  m_slopeAngle = 0.f;
-    float  m_slopeAngleRadians = 0.f;
-    double m_slopeVelocity = 0.0;
-    double m_slopeStartTime = 0.0;
-    float  m_slopeRotation = 0.f;
-    double m_currentSlopeYVelocity = 0.0;
+    // Teleport / gravity / reverse
+    bool m_wasTeleported = false;
+    bool m_fixGravityBug = false;
+    bool m_reverseSync = false;
     double m_yVelocityBeforeSlope = 0.0;
-    bool   m_slopeFlipGravityRelated = false;
-    bool   m_slopeSlidingMaybeRotated = false;
-    bool   m_isCollidingWithSlope = false;
-    int    m_collidingWithSlopeId = 0;
-    bool   m_isCurrentSlopeTop = false;
-    bool   m_maybeUpsideDownSlope = false;
-    bool   m_wasOnSlope = false;
 
-    // --- Dash state (critical for dash orbs) ---
+    // Dash
     double m_dashX = 0.0;
     double m_dashY = 0.0;
-    float  m_dashAngle = 0.f;
+    double m_dashAngle = 0.0;
     double m_dashStartTime = 0.0;
     DashRingObject* m_dashRing = nullptr;
 
-    // --- Collision state ---
-    cocos2d::CCDictionary* m_collisionLogTop = nullptr;
-    cocos2d::CCDictionary* m_collisionLogBottom = nullptr;
-    cocos2d::CCDictionary* m_collisionLogLeft = nullptr;
-    cocos2d::CCDictionary* m_collisionLogRight = nullptr;
-    int    m_lastCollisionBottom = -1;
-    int    m_lastCollisionTop = -1;
-    int    m_lastCollisionLeft = -1;
-    int    m_lastCollisionRight = -1;
-    int    m_unk50C = -1;
-    int    m_unk510 = -1;
-    double m_collidedTopMinY = 0.0;
-    double m_collidedBottomMaxY = 0.0;
-    double m_collidedLeftMaxX = 0.0;
-    double m_collidedRightMinX = 0.0;
+    // Slope
+    double m_slopeStartTime = 0.0;
+    bool m_justPlacedStreak = false;
+    GameObject* m_maybeLastGroundObject = nullptr;
+    int m_lastCollisionBottom = -1;
+    int m_lastCollisionTop = -1;
+    int m_lastCollisionLeft = -1;
+    int m_lastCollisionRight = -1;
+    int m_unk50C = -1;
+    int m_unk510 = -1;
+    GameObject* m_currentSlope2 = nullptr;
+    GameObject* m_preLastGroundObject = nullptr;
+    float m_slopeAngle = 0.f;
+    bool m_slopeSlidingMaybeRotated = false;
+    bool m_quickCheckpointMode = false;
     GameObject* m_collidedObject = nullptr;
     GameObject* m_lastGroundObject = nullptr;
     GameObject* m_collidingWithLeft = nullptr;
     GameObject* m_collidingWithRight = nullptr;
-
-    // --- Velocity / physics ---
+    int m_maybeSavedPlayerFrame = 0;
+    double m_scaleXRelated2 = 0.0;
     double m_groundYVelocity = 0.0;
     double m_yVelocityRelated = 0.0;
-    double m_fallSpeed = 0.0;
-    double m_platformerVelocityRelated = 0.0;
-    cocos2d::CCPoint m_shipRotation {0.f, 0.f};
-    float  m_vehicleSize = 1.f;
-    float  m_rotateSpeed = 1.0f;
-    float  m_rotationSpeed = 0.f;
+    double m_scaleXRelated3 = 0.0;
+    double m_scaleXRelated4 = 0.0;
+    double m_scaleXRelated5 = 0.0;
+    bool m_isCollidingWithSlope = false;
+    bool m_isBallRotating = false;
+    bool m_unk669 = false;
+    GameObject* m_currentPotentialSlope = nullptr;
+    GameObject* m_currentSlope = nullptr;
+    double unk_584 = 0.0;
+    int m_collidingWithSlopeId = 0;
+    bool m_slopeFlipGravityRelated = false;
+    cocos2d::CCArray* m_particleSystems = nullptr;
+    float m_slopeAngleRadians = 0.f;
+    float m_rotationSpeed = 0.f;
+    float m_rotateSpeed = 1.0f;
+    bool m_isRotating = false;
+    bool m_isBallRotating2 = false;
+    bool m_hasGlow = false;
+    bool m_isHidden = false;
 
-    // --- Time tracking ---
-    double m_totalTime = 0.0;
+    // Physics
+    double m_speedMultiplier = 0.0;
+    double m_yStart = 0.0;
+    double m_gravity = 0.0;
+    float m_trailingParticleLife = 0.f;
+    float m_unk648 = 0.f;
     double m_gameModeChangedTime = 0.0;
-    double m_lastLandTime = 0.0;
-    double m_lastFlipTime = 0.0;
-    double m_lastSpiderFlipTime = 0.0;
-    double m_lastJumpTime = 0.0;
-
-    // --- Jump buffer state ---
-    bool   m_jumpBuffered = false;
-    bool   m_stateRingJump = false;
-    bool   m_stateRingJump2 = false;
-    bool   m_stateJumpBuffered = false;
-    bool   m_wasJumpBuffered = false;
-    bool   m_wasRobotJump = false;
-    bool   m_touchedRing = false;
-    bool   m_touchedCustomRing = false;
-    bool   m_touchedGravityPortal = false;
-    bool   m_ringJumpRelated = false;
-
-    // --- Movement state ---
-    bool   m_isMoving = false;
-    bool   m_isSliding = false;
-    bool   m_isSlidingRight = false;
-    bool   m_isOnIce = false;
-    bool   m_maybeGoingCorrectSlopeDirection = false;
-    bool   m_maybeHasStopped = false;
-
-    // --- Rotation state ---
-    bool   m_isRotating = false;
-    bool   m_isBallRotating = false;
-    bool   m_isBallRotating2 = false;
-
-    // --- Other important fields ---
-    cocos2d::CCArray* m_touchingRings = nullptr;
-    GameObject* m_lastActivatedPortal = nullptr;
-    bool   m_hasEverJumped = false;
-    bool   m_isAccelerating = false;
-    bool   m_affectedByForces = false;
-    bool   m_isBeingSpawnedByDualPortal = false;
-    bool   m_isOutOfBounds = false;
-    bool   m_inputsLocked = false;
-    bool   m_controlsDisabled = false;
-    bool   m_isHidden = false;
-    bool   m_isPlatformer = false;
-    bool   m_quickCheckpointMode = false;
-    bool   m_checkpointTimeout = false;
+    bool m_padRingRelated = false;
+    bool m_maybeReducedEffects = false;
+    bool m_maybeIsFalling = false;
+    bool m_shouldTryPlacingCheckpoint = false;
+    bool m_playEffects = false;
+    bool m_maybeCanRunIntoBlocks = false;
+    bool m_hasGroundParticles = false;
+    bool m_hasShipParticles = false;
+    bool m_isOnGround3 = false;
+    bool m_checkpointTimeout = false;
     double m_lastCheckpointTime = 0.0;
+    double m_lastJumpTime = 0.0;
+    double m_lastFlipTime = 0.0;
+    double m_flashTime = 0.0;
+    float m_flashDuration = 0.f;
+    float m_flashDelay = 0.f;
+    double m_lastSpiderFlipTime = 0.0;
+    bool m_unkBool5 = false;
+    bool m_maybeIsVehicleGlowing = false;
+    bool m_switchWaveTrailColor = false;
+    bool m_practiceDeathEffect = false;
+    double m_accelerationOrSpeed = 0.0;
+    double m_snapDistance = 0.0;
+    bool m_ringJumpRelated = false;
+    GameObject* m_objectSnappedTo = nullptr;
+    CheckpointObject* m_pendingCheckpoint = nullptr;
+    int m_onFlyCheckpointTries = 0;
+    bool m_maybeSpriteRelated = false;
+    bool m_useLandParticles0 = false;
+    float m_landParticlesAngle = 0.f;
+    float m_landParticleRelatedY = 0.f;
+    int m_playerStreak = 0;
+    float m_streakStrokeWidth = 0.f;
+    bool m_disableStreakTint = false;
+    bool m_alwaysShowStreak = false;
+    int m_shipStreakType = 0;
+    double m_slopeRotation = 0.0;
+    double m_currentSlopeYVelocity = 0.0;
+    double m_unk3d0 = 0.0;
+    double m_blackOrbRelated = 0.0;
+    bool m_unk3e0 = false;
+    bool m_unk3e1 = false;
+    bool m_isAccelerating = false;
+    bool m_isCurrentSlopeTop = false;
+    double m_collidedTopMinY = 0.0;
+    double m_collidedBottomMaxY = 0.0;
+    double m_collidedLeftMaxX = 0.0;
+    double m_collidedRightMinX = 0.0;
+    bool m_fadeOutStreak = false;
+    bool m_canPlaceCheckpoint = false;
+    bool m_hasCustomGlowColor = false;
+    bool m_maybeIsColliding = false;
 
-    // Capture every field above out of a live PlayerObject.
+    // Jump buffer
+    bool m_jumpBuffered = false;
+    bool m_stateRingJump = false;
+    bool m_wasJumpBuffered = false;
+    bool m_wasRobotJump = false;
+    unsigned char m_stateJumpBuffered = 0;
+    bool m_stateRingJump2 = false;
+    bool m_touchedRing = false;
+    bool m_touchedCustomRing = false;
+    bool m_touchedGravityPortal = false;
+    bool m_maybeTouchedBreakableBlock = false;
+    bool m_touchedPad = false;
+
+    // Velocity
+    double m_yVelocity = 0.0;
+    double m_fallSpeed = 0.0;
+    bool m_isOnSlope = false;
+    bool m_wasOnSlope = false;
+    float m_slopeVelocity = 0.f;
+    bool m_maybeUpsideDownSlope = false;
+
+    // Gamemode
+    bool m_isShip = false;
+    bool m_isBird = false;
+    bool m_isBall = false;
+    bool m_isDart = false;
+    bool m_isRobot = false;
+    bool m_isSpider = false;
+    bool m_isUpsideDown = false;
+    bool m_isDead = false;
+    bool m_isOnGround = false;
+    bool m_isGoingLeft = false;
+    bool m_isSideways = false;
+    bool m_isSwing = false;
+    int m_reverseRelated = 0;
+    double m_maybeReverseSpeed = 0.0;
+    double m_maybeReverseAcceleration = 0.0;
+    float m_xVelocityRelated2 = 0.f;
+    bool m_isDashing = false;
+    int m_dashFireFrame = 0;
+    int m_groundObjectMaterial = 0;
+    float m_vehicleSize = 1.f;
+    float m_playerSpeed = 0.f;
+    cocos2d::CCPoint m_shipRotation{0.f, 0.f};
+    cocos2d::CCPoint m_lastPortalPos{0.f, 0.f};
+    float m_unkUnused3 = 0.f;
+    bool m_isOnGround2 = false;
+    double m_lastLandTime = 0.0;
+    float m_platformerVelocityRelated = 0.f;
+    bool m_maybeIsBoosted = false;
+    double m_scaleXRelatedTime = 0.0;
+    bool m_decreaseBoostSlide = false;
+    bool m_unkA29 = false;
+    bool m_isLocked = false;
+    bool m_controlsDisabled = false;
+    cocos2d::CCPoint m_lastGroundedPos{0.f, 0.f};
+
+    // Rings
+    std::vector<cocos2d::CCObject*> m_touchingRingsList;
+    GameObject* m_lastActivatedPortal = nullptr;
+    bool m_hasEverJumped = false;
+    bool m_hasEverHitRing = false;
+
+    // Identity / time
+    bool m_isSecondPlayer = false;
+    bool m_unkA99 = false;
+    double m_totalTime = 0.0;
+    bool m_isBeingSpawnedByDualPortal = false;
+    float m_audioScale = 0.f;
+    float m_unkAngle1 = 0.f;
+    float m_yVelocityRelated3 = 0.f;
+    bool m_defaultMiniIcon = false;
+    bool m_swapColors = false;
+    bool m_switchDashFireColor = false;
+    int m_followRelated = 0;
+    std::vector<float> m_playerFollowFloats;
+    float m_unk838 = 0.f;
+
+    // State variables
+    int m_stateOnGround = 0;
+    unsigned char m_stateUnk = 0;
+    unsigned char m_stateNoStickX = 0;
+    unsigned char m_stateNoStickY = 0;
+    unsigned char m_stateUnk2 = 0;
+    int m_stateBoostX = 0;
+    int m_stateBoostY = 0;
+    int m_maybeStateForce2 = 0;
+    int m_stateScale = 0;
+    double m_platformerXVelocity = 0.0;
+    bool m_holdingRight = false;
+    bool m_holdingLeft = false;
+    bool m_leftPressedFirst = false;
+    double m_scaleXRelated = 0.0;
+    bool m_maybeHasStopped = false;
+    float m_xVelocityRelated = 0.f;
+    bool m_maybeGoingCorrectSlopeDirection = false;
+    bool m_isSliding = false;
+    double m_maybeSlopeForce = 0.0;
+    bool m_isOnIce = false;
+    double m_physDeltaRelated = 0.0;
+    bool m_isOnGround4 = false;
+    int m_maybeSlidingTime = 0;
+    double m_maybeSlidingStartTime = 0.0;
+    double m_changedDirectionsTime = 0.0;
+    double m_slopeEndTime = 0.0;
+    bool m_isMoving = false;
+    bool m_platformerMovingLeft = false;
+    bool m_platformerMovingRight = false;
+    bool m_isSlidingRight = false;
+    double m_maybeChangedDirectionAngle = 0.0;
+    double m_unkUnused2 = 0.0;
+    bool m_isPlatformer = false;
+    int m_stateNoAutoJump = 0;
+    int m_stateDartSlide = 0;
+    int m_stateHitHead = 0;
+    int m_stateFlipGravity = 0;
+    float m_gravityMod = 1.f;
+    int m_stateForce = 0;
+    cocos2d::CCPoint m_stateForceVector{0.f, 0.f};
+    bool m_affectedByForces = false;
+    float m_somethingPlayerSpeedTime = 0.f;
+    float m_playerSpeedAC = 0.f;
+    bool m_fixRobotJump = false;
+    bool m_inputsLocked = false;
+    bool m_gv0123 = false;
+    int m_iconRequestID = 0;
+    int m_unkUnused = 0;
+    bool m_isOutOfBounds = false;
+    float m_fallStartY = 0.f;
+    bool m_disablePlayerSqueeze = false;
+    bool m_robotAnimation1Enabled = false;
+    bool m_robotAnimation2Enabled = false;
+    bool m_spiderAnimationEnabled = false;
+    bool m_ignoreDamage = false;
+    bool m_enable22Changes = false;
+
     void capture(PlayerObject* p) {
         if (!p) { valid = false; return; }
         valid = true;
 
-        // Transform
-        position = p->getPosition();
-        rotation = p->getRotation();
-        scaleX   = p->getScaleX();
-        scaleY   = p->getScaleY();
-
-        // Velocity / gravity
-        yVelocity           = p->m_yVelocity;
-        platformerXVelocity = p->m_platformerXVelocity;
-        gravity             = p->m_gravity;
-        speedMultiplier     = p->m_speedMultiplier;
-        playerSpeed         = p->m_playerSpeed;
-        gravityMod          = p->m_gravityMod;
-        yStart              = p->m_yStart;
-
-        // Gamemode
-        isShip   = p->m_isShip;
-        isBird   = p->m_isBird;
-        isBall   = p->m_isBall;
-        isDart   = p->m_isDart;
-        isRobot  = p->m_isRobot;
-        isSpider = p->m_isSpider;
-        isSwing  = p->m_isSwing;
-
-        // Orientation / contact
-        isUpsideDown = p->m_isUpsideDown;
-        isSideways   = p->m_isSideways;
-        isGoingLeft  = p->m_isGoingLeft;
-        isOnGround   = p->m_isOnGround;
-        isOnGround2  = p->m_isOnGround2;
-        isOnGround3  = p->m_isOnGround3;
-        isOnGround4  = p->m_isOnGround4;
-        isDashing    = p->m_isDashing;
-        isLocked     = p->m_isLocked;
-        isDead       = p->m_isDead;
-
-        platformerMovingLeft  = p->m_platformerMovingLeft;
-        platformerMovingRight = p->m_platformerMovingRight;
-        lastGroundedPos = p->m_lastGroundedPos;
-
-        // Slope
-        m_currentSlope = p->m_currentSlope;
-        m_currentSlope2 = p->m_currentSlope2;
-        //m_currentSlope3 = p->m_currentSlope3;
-        m_preLastGroundObject = p->m_preLastGroundObject;
-        m_maybeLastGroundObject = p->m_maybeLastGroundObject;
-        m_slopeAngle = p->m_slopeAngle;
-        m_slopeAngleRadians = p->m_slopeAngleRadians;
-        m_slopeVelocity = p->m_slopeVelocity;
-        m_slopeStartTime = p->m_slopeStartTime;
-        m_slopeRotation = p->m_slopeRotation;
-        m_currentSlopeYVelocity = p->m_currentSlopeYVelocity;
+        m_ccRotation = p->getRotation();
+        m_wasTeleported = p->m_wasTeleported;
+        m_fixGravityBug = p->m_fixGravityBug;
+        m_reverseSync = p->m_reverseSync;
         m_yVelocityBeforeSlope = p->m_yVelocityBeforeSlope;
-        m_slopeFlipGravityRelated = p->m_slopeFlipGravityRelated;
-        m_slopeSlidingMaybeRotated = p->m_slopeSlidingMaybeRotated;
-        m_isCollidingWithSlope = p->m_isCollidingWithSlope;
-        m_collidingWithSlopeId = p->m_collidingWithSlopeId;
-        m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
-        m_maybeUpsideDownSlope = p->m_maybeUpsideDownSlope;
-        m_wasOnSlope = p->m_wasOnSlope;
-
-        // Dash
         m_dashX = p->m_dashX;
         m_dashY = p->m_dashY;
         m_dashAngle = p->m_dashAngle;
         m_dashStartTime = p->m_dashStartTime;
         m_dashRing = p->m_dashRing;
-
-        // Collision
-        m_collisionLogTop = p->m_collisionLogTop;
-        m_collisionLogBottom = p->m_collisionLogBottom;
-        m_collisionLogLeft = p->m_collisionLogLeft;
-        m_collisionLogRight = p->m_collisionLogRight;
+        m_slopeStartTime = p->m_slopeStartTime;
+        m_justPlacedStreak = p->m_justPlacedStreak;
+        m_maybeLastGroundObject = p->m_maybeLastGroundObject;
         m_lastCollisionBottom = p->m_lastCollisionBottom;
         m_lastCollisionTop = p->m_lastCollisionTop;
         m_lastCollisionLeft = p->m_lastCollisionLeft;
         m_lastCollisionRight = p->m_lastCollisionRight;
         m_unk50C = p->m_unk50C;
         m_unk510 = p->m_unk510;
-        m_collidedTopMinY = p->m_collidedTopMinY;
-        m_collidedBottomMaxY = p->m_collidedBottomMaxY;
-        m_collidedLeftMaxX = p->m_collidedLeftMaxX;
-        m_collidedRightMinX = p->m_collidedRightMinX;
+        m_currentSlope2 = p->m_currentSlope2;
+        m_preLastGroundObject = p->m_preLastGroundObject;
+        m_slopeAngle = p->m_slopeAngle;
+        m_slopeSlidingMaybeRotated = p->m_slopeSlidingMaybeRotated;
+        m_quickCheckpointMode = p->m_quickCheckpointMode;
         m_collidedObject = p->m_collidedObject;
         m_lastGroundObject = p->m_lastGroundObject;
         m_collidingWithLeft = p->m_collidingWithLeft;
         m_collidingWithRight = p->m_collidingWithRight;
-
-        // Velocity / physics
+        m_maybeSavedPlayerFrame = p->m_maybeSavedPlayerFrame;
+        m_scaleXRelated2 = p->m_scaleXRelated2;
         m_groundYVelocity = p->m_groundYVelocity;
         m_yVelocityRelated = p->m_yVelocityRelated;
-        m_fallSpeed = p->m_fallSpeed;
-        m_platformerVelocityRelated = p->m_platformerVelocityRelated;
-        m_shipRotation = p->m_shipRotation;
-        m_vehicleSize = p->m_vehicleSize;
-        m_rotateSpeed = p->m_rotateSpeed;
+        m_scaleXRelated3 = p->m_scaleXRelated3;
+        m_scaleXRelated4 = p->m_scaleXRelated4;
+        m_scaleXRelated5 = p->m_scaleXRelated5;
+        m_isCollidingWithSlope = p->m_isCollidingWithSlope;
+        m_isBallRotating = p->m_isBallRotating;
+        m_unk669 = p->m_unk669;
+        m_currentPotentialSlope = p->m_currentPotentialSlope;
+        m_currentSlope = p->m_currentSlope;
+        unk_584 = p->unk_584;
+        m_collidingWithSlopeId = p->m_collidingWithSlopeId;
+        m_slopeFlipGravityRelated = p->m_slopeFlipGravityRelated;
+        m_particleSystems = p->m_particleSystems;
+        m_slopeAngleRadians = p->m_slopeAngleRadians;
         m_rotationSpeed = p->m_rotationSpeed;
-
-        // Time
-        m_totalTime = p->m_totalTime;
+        m_rotateSpeed = p->m_rotateSpeed;
+        m_isRotating = p->m_isRotating;
+        m_isBallRotating2 = p->m_isBallRotating2;
+        m_hasGlow = p->m_hasGlow;
+        m_isHidden = p->m_isHidden;
+        m_speedMultiplier = p->m_speedMultiplier;
+        m_yStart = p->m_yStart;
+        m_gravity = p->m_gravity;
+        m_trailingParticleLife = p->m_trailingParticleLife;
+        m_unk648 = p->m_unk648;
         m_gameModeChangedTime = p->m_gameModeChangedTime;
-        m_lastLandTime = p->m_lastLandTime;
-        m_lastFlipTime = p->m_lastFlipTime;
-        m_lastSpiderFlipTime = p->m_lastSpiderFlipTime;
+        m_padRingRelated = p->m_padRingRelated;
+        m_maybeReducedEffects = p->m_maybeReducedEffects;
+        m_maybeIsFalling = p->m_maybeIsFalling;
+        m_shouldTryPlacingCheckpoint = p->m_shouldTryPlacingCheckpoint;
+        m_playEffects = p->m_playEffects;
+        m_maybeCanRunIntoBlocks = p->m_maybeCanRunIntoBlocks;
+        m_hasGroundParticles = p->m_hasGroundParticles;
+        m_hasShipParticles = p->m_hasShipParticles;
+        m_isOnGround3 = p->m_isOnGround3;
+        m_checkpointTimeout = p->m_checkpointTimeout;
+        m_lastCheckpointTime = p->m_lastCheckpointTime;
         m_lastJumpTime = p->m_lastJumpTime;
-
-        // Jump buffer
+        m_lastFlipTime = p->m_lastFlipTime;
+        m_flashTime = p->m_flashTime;
+        m_flashDuration = p->m_flashDuration;
+        m_flashDelay = p->m_flashDelay;
+        m_lastSpiderFlipTime = p->m_lastSpiderFlipTime;
+        m_unkBool5 = p->m_unkBool5;
+        m_maybeIsVehicleGlowing = p->m_maybeIsVehicleGlowing;
+        m_switchWaveTrailColor = p->m_switchWaveTrailColor;
+        m_practiceDeathEffect = p->m_practiceDeathEffect;
+        m_accelerationOrSpeed = p->m_accelerationOrSpeed;
+        m_snapDistance = p->m_snapDistance;
+        m_ringJumpRelated = p->m_ringJumpRelated;
+        m_objectSnappedTo = p->m_objectSnappedTo;
+        m_pendingCheckpoint = p->m_pendingCheckpoint;
+        m_onFlyCheckpointTries = p->m_onFlyCheckpointTries;
+        m_maybeSpriteRelated = p->m_maybeSpriteRelated;
+        m_useLandParticles0 = p->m_useLandParticles0;
+        m_landParticlesAngle = p->m_landParticlesAngle;
+        m_landParticleRelatedY = p->m_landParticleRelatedY;
+        m_playerStreak = p->m_playerStreak;
+        m_streakStrokeWidth = p->m_streakStrokeWidth;
+        m_disableStreakTint = p->m_disableStreakTint;
+        m_alwaysShowStreak = p->m_alwaysShowStreak;
+        m_shipStreakType = static_cast<int>(p->m_shipStreakType);
+        m_slopeRotation = p->m_slopeRotation;
+        m_currentSlopeYVelocity = p->m_currentSlopeYVelocity;
+        m_unk3d0 = p->m_unk3d0;
+        m_blackOrbRelated = p->m_blackOrbRelated;
+        m_unk3e0 = p->m_unk3e0;
+        m_unk3e1 = p->m_unk3e1;
+        m_isAccelerating = p->m_isAccelerating;
+        m_isCurrentSlopeTop = p->m_isCurrentSlopeTop;
+        m_collidedTopMinY = p->m_collidedTopMinY;
+        m_collidedBottomMaxY = p->m_collidedBottomMaxY;
+        m_collidedLeftMaxX = p->m_collidedLeftMaxX;
+        m_collidedRightMinX = p->m_collidedRightMinX;
+        m_fadeOutStreak = p->m_fadeOutStreak;
+        m_canPlaceCheckpoint = p->m_canPlaceCheckpoint;
+        m_hasCustomGlowColor = p->m_hasCustomGlowColor;
+        m_maybeIsColliding = p->m_maybeIsColliding;
         m_jumpBuffered = p->m_jumpBuffered;
         m_stateRingJump = p->m_stateRingJump;
-        m_stateRingJump2 = p->m_stateRingJump2;
-        m_stateJumpBuffered = p->m_stateJumpBuffered;
         m_wasJumpBuffered = p->m_wasJumpBuffered;
         m_wasRobotJump = p->m_wasRobotJump;
+        m_stateJumpBuffered = p->m_stateJumpBuffered;
+        m_stateRingJump2 = p->m_stateRingJump2;
         m_touchedRing = p->m_touchedRing;
         m_touchedCustomRing = p->m_touchedCustomRing;
         m_touchedGravityPortal = p->m_touchedGravityPortal;
-        m_ringJumpRelated = p->m_ringJumpRelated;
+        m_maybeTouchedBreakableBlock = p->m_maybeTouchedBreakableBlock;
+        m_touchedPad = p->m_touchedPad;
+        m_yVelocity = p->m_yVelocity;
+        m_fallSpeed = p->m_fallSpeed;
+        m_isOnSlope = p->m_isOnSlope;
+        m_wasOnSlope = p->m_wasOnSlope;
+        m_slopeVelocity = p->m_slopeVelocity;
+        m_maybeUpsideDownSlope = p->m_maybeUpsideDownSlope;
+        m_isShip = p->m_isShip;
+        m_isBird = p->m_isBird;
+        m_isBall = p->m_isBall;
+        m_isDart = p->m_isDart;
+        m_isRobot = p->m_isRobot;
+        m_isSpider = p->m_isSpider;
+        m_isUpsideDown = p->m_isUpsideDown;
+        m_isDead = p->m_isDead;
+        m_isOnGround = p->m_isOnGround;
+        m_isGoingLeft = p->m_isGoingLeft;
+        m_isSideways = p->m_isSideways;
+        m_isSwing = p->m_isSwing;
+        m_reverseRelated = p->m_reverseRelated;
+        m_maybeReverseSpeed = p->m_maybeReverseSpeed;
+        m_maybeReverseAcceleration = p->m_maybeReverseAcceleration;
+        m_xVelocityRelated2 = p->m_xVelocityRelated2;
+        m_isDashing = p->m_isDashing;
+        m_dashFireFrame = p->m_dashFireFrame;
+        m_groundObjectMaterial = p->m_groundObjectMaterial;
+        m_vehicleSize = p->m_vehicleSize;
+        m_playerSpeed = p->m_playerSpeed;
+        m_shipRotation = p->m_shipRotation;
+        m_lastPortalPos = p->m_lastPortalPos;
+        m_unkUnused3 = p->m_unkUnused3;
+        m_isOnGround2 = p->m_isOnGround2;
+        m_lastLandTime = p->m_lastLandTime;
+        m_platformerVelocityRelated = p->m_platformerVelocityRelated;
+        m_maybeIsBoosted = p->m_maybeIsBoosted;
+        m_scaleXRelatedTime = p->m_scaleXRelatedTime;
+        m_decreaseBoostSlide = p->m_decreaseBoostSlide;
+        m_unkA29 = p->m_unkA29;
+        m_isLocked = p->m_isLocked;
+        m_controlsDisabled = p->m_controlsDisabled;
+        m_lastGroundedPos = p->m_lastGroundedPos;
 
-        // Movement
-        m_isMoving = p->m_isMoving;
-        m_isSliding = p->m_isSliding;
-        m_isSlidingRight = p->m_isSlidingRight;
-        m_isOnIce = p->m_isOnIce;
-        m_maybeGoingCorrectSlopeDirection = p->m_maybeGoingCorrectSlopeDirection;
-        m_maybeHasStopped = p->m_maybeHasStopped;
+        // Touching rings (CCArray -> vector)
+        m_touchingRingsList.clear();
+        if (p->m_touchingRings) {
+            for (unsigned int i = 0; i < p->m_touchingRings->count(); i++) {
+                m_touchingRingsList.push_back(p->m_touchingRings->objectAtIndex(i));
+            }
+        }
 
-        // Rotation
-        m_isRotating = p->m_isRotating;
-        m_isBallRotating = p->m_isBallRotating;
-        m_isBallRotating2 = p->m_isBallRotating2;
-
-        // Other
-        m_touchingRings = p->m_touchingRings;
         m_lastActivatedPortal = p->m_lastActivatedPortal;
         m_hasEverJumped = p->m_hasEverJumped;
-        m_isAccelerating = p->m_isAccelerating;
-        m_affectedByForces = p->m_affectedByForces;
+        m_hasEverHitRing = p->m_hasEverHitRing;
+        m_position = p->m_position;
+        m_isSecondPlayer = p->m_isSecondPlayer;
+        m_unkA99 = p->m_unkA99;
+        m_totalTime = p->m_totalTime;
         m_isBeingSpawnedByDualPortal = p->m_isBeingSpawnedByDualPortal;
-        m_isOutOfBounds = p->m_isOutOfBounds;
-        m_inputsLocked = p->m_inputsLocked;
-        m_controlsDisabled = p->m_controlsDisabled;
-        m_isHidden = p->m_isHidden;
+        m_audioScale = p->m_audioScale;
+        m_unkAngle1 = p->m_unkAngle1;
+        m_yVelocityRelated3 = p->m_yVelocityRelated3;
+        m_defaultMiniIcon = p->m_defaultMiniIcon;
+        m_swapColors = p->m_swapColors;
+        m_switchDashFireColor = p->m_switchDashFireColor;
+        m_followRelated = p->m_followRelated;
+        m_playerFollowFloats = p->m_playerFollowFloats;
+        m_unk838 = p->m_unk838;
+        m_stateOnGround = p->m_stateOnGround;
+        m_stateUnk = p->m_stateUnk;
+        m_stateNoStickX = p->m_stateNoStickX;
+        m_stateNoStickY = p->m_stateNoStickY;
+        m_stateUnk2 = p->m_stateUnk2;
+        m_stateBoostX = p->m_stateBoostX;
+        m_stateBoostY = p->m_stateBoostY;
+        m_maybeStateForce2 = p->m_maybeStateForce2;
+        m_stateScale = p->m_stateScale;
+        m_platformerXVelocity = p->m_platformerXVelocity;
+        m_holdingRight = p->m_holdingRight;
+        m_holdingLeft = p->m_holdingLeft;
+        m_leftPressedFirst = p->m_leftPressedFirst;
+        m_scaleXRelated = p->m_scaleXRelated;
+        m_maybeHasStopped = p->m_maybeHasStopped;
+        m_xVelocityRelated = p->m_xVelocityRelated;
+        m_maybeGoingCorrectSlopeDirection = p->m_maybeGoingCorrectSlopeDirection;
+        m_isSliding = p->m_isSliding;
+        m_maybeSlopeForce = p->m_maybeSlopeForce;
+        m_isOnIce = p->m_isOnIce;
+        m_physDeltaRelated = p->m_physDeltaRelated;
+        m_isOnGround4 = p->m_isOnGround4;
+        m_maybeSlidingTime = p->m_maybeSlidingTime;
+        m_maybeSlidingStartTime = p->m_maybeSlidingStartTime;
+        m_changedDirectionsTime = p->m_changedDirectionsTime;
+        m_slopeEndTime = p->m_slopeEndTime;
+        m_isMoving = p->m_isMoving;
+        m_platformerMovingLeft = p->m_platformerMovingLeft;
+        m_platformerMovingRight = p->m_platformerMovingRight;
+        m_isSlidingRight = p->m_isSlidingRight;
+        m_maybeChangedDirectionAngle = p->m_maybeChangedDirectionAngle;
+        m_unkUnused2 = p->m_unkUnused2;
         m_isPlatformer = p->m_isPlatformer;
-        m_quickCheckpointMode = p->m_quickCheckpointMode;
-        m_checkpointTimeout = p->m_checkpointTimeout;
-        m_lastCheckpointTime = p->m_lastCheckpointTime;
+        m_stateNoAutoJump = p->m_stateNoAutoJump;
+        m_stateDartSlide = p->m_stateDartSlide;
+        m_stateHitHead = p->m_stateHitHead;
+        m_stateFlipGravity = p->m_stateFlipGravity;
+        m_gravityMod = p->m_gravityMod;
+        m_stateForce = p->m_stateForce;
+        m_stateForceVector = p->m_stateForceVector;
+        m_affectedByForces = p->m_affectedByForces;
+        m_somethingPlayerSpeedTime = p->m_somethingPlayerSpeedTime;
+        m_playerSpeedAC = p->m_playerSpeedAC;
+        m_fixRobotJump = p->m_fixRobotJump;
+        m_inputsLocked = p->m_inputsLocked;
+        m_gv0123 = p->m_gv0123;
+        m_iconRequestID = p->m_iconRequestID;
+        m_unkUnused = p->m_unkUnused;
+        m_isOutOfBounds = p->m_isOutOfBounds;
+        m_fallStartY = p->m_fallStartY;
+        m_disablePlayerSqueeze = p->m_disablePlayerSqueeze;
+        m_robotAnimation1Enabled = p->m_robotAnimation1Enabled;
+        m_robotAnimation2Enabled = p->m_robotAnimation2Enabled;
+        m_spiderAnimationEnabled = p->m_spiderAnimationEnabled;
+        m_ignoreDamage = p->m_ignoreDamage;
+        m_enable22Changes = p->m_enable22Changes;
     }
 
-    // Push every captured field back into a live PlayerObject.
     void apply(PlayerObject* p) const {
         if (!p || !valid) return;
 
-        // Transform
-        p->setPosition(position);
-        p->setRotation(rotation);
-        p->setScaleX(scaleX);
-        p->setScaleY(scaleY);
-
-        // Velocity / gravity
-        p->m_yVelocity           = yVelocity;
-        p->m_platformerXVelocity = platformerXVelocity;
-        p->m_gravity             = gravity;
-        p->m_speedMultiplier     = speedMultiplier;
-        p->m_playerSpeed         = playerSpeed;
-        p->m_gravityMod          = gravityMod;
-        p->m_yStart              = yStart;
-
-        // Gamemode
-        p->m_isShip   = isShip;
-        p->m_isBird   = isBird;
-        p->m_isBall   = isBall;
-        p->m_isDart   = isDart;
-        p->m_isRobot  = isRobot;
-        p->m_isSpider = isSpider;
-        p->m_isSwing  = isSwing;
-
-        // Orientation / contact
-        p->m_isUpsideDown = isUpsideDown;
-        p->m_isSideways   = isSideways;
-        p->m_isGoingLeft  = isGoingLeft;
-        p->m_isOnGround   = isOnGround;
-        p->m_isOnGround2  = isOnGround2;
-        p->m_isOnGround3  = isOnGround3;
-        p->m_isOnGround4  = isOnGround4;
-        p->m_isDashing    = isDashing;
-        p->m_isLocked     = isLocked;
-        p->m_isDead       = isDead;
-
-        p->m_platformerMovingLeft  = platformerMovingLeft;
-        p->m_platformerMovingRight = platformerMovingRight;
-        p->m_lastGroundedPos = lastGroundedPos;
-
-        // Slope
-        p->m_currentSlope = m_currentSlope;
-        p->m_currentSlope2 = m_currentSlope2;
-        // p->m_currentSlope3 = m_currentSlope3;
-        p->m_preLastGroundObject = m_preLastGroundObject;
-        p->m_maybeLastGroundObject = m_maybeLastGroundObject;
-        p->m_slopeAngle = m_slopeAngle;
-        p->m_slopeAngleRadians = m_slopeAngleRadians;
-        p->m_slopeVelocity = m_slopeVelocity;
-        p->m_slopeStartTime = m_slopeStartTime;
-        p->m_slopeRotation = m_slopeRotation;
-        p->m_currentSlopeYVelocity = m_currentSlopeYVelocity;
+        p->setPosition(m_position);
+        p->setRotation(m_ccRotation);
+        p->m_wasTeleported = m_wasTeleported;
+        p->m_fixGravityBug = m_fixGravityBug;
+        p->m_reverseSync = m_reverseSync;
         p->m_yVelocityBeforeSlope = m_yVelocityBeforeSlope;
-        p->m_slopeFlipGravityRelated = m_slopeFlipGravityRelated;
-        p->m_slopeSlidingMaybeRotated = m_slopeSlidingMaybeRotated;
-        p->m_isCollidingWithSlope = m_isCollidingWithSlope;
-        p->m_collidingWithSlopeId = m_collidingWithSlopeId;
-        p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
-        p->m_maybeUpsideDownSlope = m_maybeUpsideDownSlope;
-        p->m_wasOnSlope = m_wasOnSlope;
-
-        // Dash
         p->m_dashX = m_dashX;
         p->m_dashY = m_dashY;
         p->m_dashAngle = m_dashAngle;
         p->m_dashStartTime = m_dashStartTime;
         p->m_dashRing = m_dashRing;
-
-        // Collision
-        p->m_collisionLogTop = m_collisionLogTop;
-        p->m_collisionLogBottom = m_collisionLogBottom;
-        p->m_collisionLogLeft = m_collisionLogLeft;
-        p->m_collisionLogRight = m_collisionLogRight;
+        p->m_slopeStartTime = m_slopeStartTime;
+        p->m_justPlacedStreak = m_justPlacedStreak;
+        p->m_maybeLastGroundObject = m_maybeLastGroundObject;
         p->m_lastCollisionBottom = m_lastCollisionBottom;
         p->m_lastCollisionTop = m_lastCollisionTop;
         p->m_lastCollisionLeft = m_lastCollisionLeft;
         p->m_lastCollisionRight = m_lastCollisionRight;
         p->m_unk50C = m_unk50C;
         p->m_unk510 = m_unk510;
-        p->m_collidedTopMinY = m_collidedTopMinY;
-        p->m_collidedBottomMaxY = m_collidedBottomMaxY;
-        p->m_collidedLeftMaxX = m_collidedLeftMaxX;
-        p->m_collidedRightMinX = m_collidedRightMinX;
+        p->m_currentSlope2 = m_currentSlope2;
+        p->m_preLastGroundObject = m_preLastGroundObject;
+        p->m_slopeAngle = m_slopeAngle;
+        p->m_slopeSlidingMaybeRotated = m_slopeSlidingMaybeRotated;
+        p->m_quickCheckpointMode = m_quickCheckpointMode;
         p->m_collidedObject = m_collidedObject;
         p->m_lastGroundObject = m_lastGroundObject;
         p->m_collidingWithLeft = m_collidingWithLeft;
         p->m_collidingWithRight = m_collidingWithRight;
-
-        // Velocity / physics
+        p->m_maybeSavedPlayerFrame = m_maybeSavedPlayerFrame;
+        p->m_scaleXRelated2 = m_scaleXRelated2;
         p->m_groundYVelocity = m_groundYVelocity;
         p->m_yVelocityRelated = m_yVelocityRelated;
-        p->m_fallSpeed = m_fallSpeed;
-        p->m_platformerVelocityRelated = m_platformerVelocityRelated;
-        p->m_shipRotation = m_shipRotation;
-        p->m_vehicleSize = m_vehicleSize;
-        p->m_rotateSpeed = m_rotateSpeed;
+        p->m_scaleXRelated3 = m_scaleXRelated3;
+        p->m_scaleXRelated4 = m_scaleXRelated4;
+        p->m_scaleXRelated5 = m_scaleXRelated5;
+        p->m_isCollidingWithSlope = m_isCollidingWithSlope;
+        p->m_isBallRotating = m_isBallRotating;
+        p->m_unk669 = m_unk669;
+        p->m_currentPotentialSlope = m_currentPotentialSlope;
+        p->m_currentSlope = m_currentSlope;
+        p->unk_584 = unk_584;
+        p->m_collidingWithSlopeId = m_collidingWithSlopeId;
+        p->m_slopeFlipGravityRelated = m_slopeFlipGravityRelated;
+        p->m_particleSystems = m_particleSystems;
+        p->m_slopeAngleRadians = m_slopeAngleRadians;
         p->m_rotationSpeed = m_rotationSpeed;
-
-        // Time
-        p->m_totalTime = m_totalTime;
+        p->m_rotateSpeed = m_rotateSpeed;
+        p->m_isRotating = m_isRotating;
+        p->m_isBallRotating2 = m_isBallRotating2;
+        p->m_hasGlow = m_hasGlow;
+        p->m_isHidden = m_isHidden;
+        p->m_speedMultiplier = m_speedMultiplier;
+        p->m_yStart = m_yStart;
+        p->m_gravity = m_gravity;
+        p->m_trailingParticleLife = m_trailingParticleLife;
+        p->m_unk648 = m_unk648;
         p->m_gameModeChangedTime = m_gameModeChangedTime;
-        p->m_lastLandTime = m_lastLandTime;
-        p->m_lastFlipTime = m_lastFlipTime;
-        p->m_lastSpiderFlipTime = m_lastSpiderFlipTime;
+        p->m_padRingRelated = m_padRingRelated;
+        p->m_maybeReducedEffects = m_maybeReducedEffects;
+        p->m_maybeIsFalling = m_maybeIsFalling;
+        p->m_shouldTryPlacingCheckpoint = m_shouldTryPlacingCheckpoint;
+        p->m_playEffects = m_playEffects;
+        p->m_maybeCanRunIntoBlocks = m_maybeCanRunIntoBlocks;
+        p->m_hasGroundParticles = m_hasGroundParticles;
+        p->m_hasShipParticles = m_hasShipParticles;
+        p->m_isOnGround3 = m_isOnGround3;
+        p->m_checkpointTimeout = m_checkpointTimeout;
+        p->m_lastCheckpointTime = m_lastCheckpointTime;
         p->m_lastJumpTime = m_lastJumpTime;
-
-        // Jump buffer
+        p->m_lastFlipTime = m_lastFlipTime;
+        p->m_flashTime = m_flashTime;
+        p->m_flashDuration = m_flashDuration;
+        p->m_flashDelay = m_flashDelay;
+        p->m_lastSpiderFlipTime = m_lastSpiderFlipTime;
+        p->m_unkBool5 = m_unkBool5;
+        p->m_maybeIsVehicleGlowing = m_maybeIsVehicleGlowing;
+        p->m_switchWaveTrailColor = m_switchWaveTrailColor;
+        p->m_practiceDeathEffect = m_practiceDeathEffect;
+        p->m_accelerationOrSpeed = m_accelerationOrSpeed;
+        p->m_snapDistance = m_snapDistance;
+        p->m_ringJumpRelated = m_ringJumpRelated;
+        p->m_objectSnappedTo = m_objectSnappedTo;
+        p->m_pendingCheckpoint = m_pendingCheckpoint;
+        p->m_onFlyCheckpointTries = m_onFlyCheckpointTries;
+        p->m_maybeSpriteRelated = m_maybeSpriteRelated;
+        p->m_useLandParticles0 = m_useLandParticles0;
+        p->m_landParticlesAngle = m_landParticlesAngle;
+        p->m_landParticleRelatedY = m_landParticleRelatedY;
+        p->m_playerStreak = m_playerStreak;
+        p->m_streakStrokeWidth = m_streakStrokeWidth;
+        p->m_disableStreakTint = m_disableStreakTint;
+        p->m_alwaysShowStreak = m_alwaysShowStreak;
+        p->m_shipStreakType = static_cast<ShipStreak>(m_shipStreakType);
+        p->m_slopeRotation = m_slopeRotation;
+        p->m_currentSlopeYVelocity = m_currentSlopeYVelocity;
+        p->m_unk3d0 = m_unk3d0;
+        p->m_blackOrbRelated = m_blackOrbRelated;
+        p->m_unk3e0 = m_unk3e0;
+        p->m_unk3e1 = m_unk3e1;
+        p->m_isAccelerating = m_isAccelerating;
+        p->m_isCurrentSlopeTop = m_isCurrentSlopeTop;
+        p->m_collidedTopMinY = m_collidedTopMinY;
+        p->m_collidedBottomMaxY = m_collidedBottomMaxY;
+        p->m_collidedLeftMaxX = m_collidedLeftMaxX;
+        p->m_collidedRightMinX = m_collidedRightMinX;
+        p->m_fadeOutStreak = m_fadeOutStreak;
+        p->m_canPlaceCheckpoint = m_canPlaceCheckpoint;
+        p->m_hasCustomGlowColor = m_hasCustomGlowColor;
+        p->m_maybeIsColliding = m_maybeIsColliding;
         p->m_jumpBuffered = m_jumpBuffered;
         p->m_stateRingJump = m_stateRingJump;
-        p->m_stateRingJump2 = m_stateRingJump2;
-        p->m_stateJumpBuffered = m_stateJumpBuffered;
         p->m_wasJumpBuffered = m_wasJumpBuffered;
         p->m_wasRobotJump = m_wasRobotJump;
+        p->m_stateJumpBuffered = m_stateJumpBuffered;
+        p->m_stateRingJump2 = m_stateRingJump2;
         p->m_touchedRing = m_touchedRing;
         p->m_touchedCustomRing = m_touchedCustomRing;
         p->m_touchedGravityPortal = m_touchedGravityPortal;
-        p->m_ringJumpRelated = m_ringJumpRelated;
+        p->m_maybeTouchedBreakableBlock = m_maybeTouchedBreakableBlock;
+        p->m_touchedPad = m_touchedPad;
+        p->m_yVelocity = m_yVelocity;
+        p->m_fallSpeed = m_fallSpeed;
+        p->m_isOnSlope = m_isOnSlope;
+        p->m_wasOnSlope = m_wasOnSlope;
+        p->m_slopeVelocity = m_slopeVelocity;
+        p->m_maybeUpsideDownSlope = m_maybeUpsideDownSlope;
+        p->m_isShip = m_isShip;
+        p->m_isBird = m_isBird;
+        p->m_isBall = m_isBall;
+        p->m_isDart = m_isDart;
+        p->m_isRobot = m_isRobot;
+        p->m_isSpider = m_isSpider;
+        p->m_isUpsideDown = m_isUpsideDown;
+        p->m_isDead = m_isDead;
+        p->m_isOnGround = m_isOnGround;
+        p->m_isGoingLeft = m_isGoingLeft;
+        p->m_isSideways = m_isSideways;
+        p->m_isSwing = m_isSwing;
+        p->m_reverseRelated = m_reverseRelated;
+        p->m_maybeReverseSpeed = m_maybeReverseSpeed;
+        p->m_maybeReverseAcceleration = m_maybeReverseAcceleration;
+        p->m_xVelocityRelated2 = m_xVelocityRelated2;
+        p->m_isDashing = m_isDashing;
+        p->m_dashFireFrame = m_dashFireFrame;
+        p->m_groundObjectMaterial = m_groundObjectMaterial;
+        p->m_vehicleSize = m_vehicleSize;
+        p->m_playerSpeed = m_playerSpeed;
+        p->m_shipRotation = m_shipRotation;
+        p->m_lastPortalPos = m_lastPortalPos;
+        p->m_unkUnused3 = m_unkUnused3;
+        p->m_isOnGround2 = m_isOnGround2;
+        p->m_lastLandTime = m_lastLandTime;
+        p->m_platformerVelocityRelated = m_platformerVelocityRelated;
+        p->m_maybeIsBoosted = m_maybeIsBoosted;
+        p->m_scaleXRelatedTime = m_scaleXRelatedTime;
+        p->m_decreaseBoostSlide = m_decreaseBoostSlide;
+        p->m_unkA29 = m_unkA29;
+        p->m_isLocked = m_isLocked;
+        p->m_controlsDisabled = m_controlsDisabled;
+        p->m_lastGroundedPos = m_lastGroundedPos;
 
-        // Movement
-        p->m_isMoving = m_isMoving;
-        p->m_isSliding = m_isSliding;
-        p->m_isSlidingRight = m_isSlidingRight;
-        p->m_isOnIce = m_isOnIce;
-        p->m_maybeGoingCorrectSlopeDirection = m_maybeGoingCorrectSlopeDirection;
-        p->m_maybeHasStopped = m_maybeHasStopped;
+        // Touching rings
+        p->m_touchingRings->removeAllObjects();
+        for (auto& ring : m_touchingRingsList) {
+            p->m_touchingRings->addObject(ring);
+        }
 
-        // Rotation
-        p->m_isRotating = m_isRotating;
-        p->m_isBallRotating = m_isBallRotating;
-        p->m_isBallRotating2 = m_isBallRotating2;
-
-        // Other
-        p->m_touchingRings = m_touchingRings;
         p->m_lastActivatedPortal = m_lastActivatedPortal;
         p->m_hasEverJumped = m_hasEverJumped;
-        p->m_isAccelerating = m_isAccelerating;
-        p->m_affectedByForces = m_affectedByForces;
+        p->m_hasEverHitRing = m_hasEverHitRing;
+        p->m_position = m_position;
+        p->m_isSecondPlayer = m_isSecondPlayer;
+        p->m_unkA99 = m_unkA99;
+        p->m_totalTime = m_totalTime;
         p->m_isBeingSpawnedByDualPortal = m_isBeingSpawnedByDualPortal;
-        p->m_isOutOfBounds = m_isOutOfBounds;
-        p->m_inputsLocked = m_inputsLocked;
-        p->m_controlsDisabled = m_controlsDisabled;
-        p->m_isHidden = m_isHidden;
+        p->m_audioScale = m_audioScale;
+        p->m_unkAngle1 = m_unkAngle1;
+        p->m_yVelocityRelated3 = m_yVelocityRelated3;
+        p->m_defaultMiniIcon = m_defaultMiniIcon;
+        p->m_swapColors = m_swapColors;
+        p->m_switchDashFireColor = m_switchDashFireColor;
+        p->m_followRelated = m_followRelated;
+        p->m_playerFollowFloats = m_playerFollowFloats;
+        p->m_unk838 = m_unk838;
+        p->m_stateOnGround = m_stateOnGround;
+        p->m_stateUnk = m_stateUnk;
+        p->m_stateNoStickX = m_stateNoStickX;
+        p->m_stateNoStickY = m_stateNoStickY;
+        p->m_stateUnk2 = m_stateUnk2;
+        p->m_stateBoostX = m_stateBoostX;
+        p->m_stateBoostY = m_stateBoostY;
+        p->m_maybeStateForce2 = m_maybeStateForce2;
+        p->m_stateScale = m_stateScale;
+        p->m_platformerXVelocity = m_platformerXVelocity;
+        p->m_holdingRight = m_holdingRight;
+        p->m_holdingLeft = m_holdingLeft;
+        p->m_leftPressedFirst = m_leftPressedFirst;
+        p->m_scaleXRelated = m_scaleXRelated;
+        p->m_maybeHasStopped = m_maybeHasStopped;
+        p->m_xVelocityRelated = m_xVelocityRelated;
+        p->m_maybeGoingCorrectSlopeDirection = m_maybeGoingCorrectSlopeDirection;
+        p->m_isSliding = m_isSliding;
+        p->m_maybeSlopeForce = m_maybeSlopeForce;
+        p->m_isOnIce = m_isOnIce;
+        p->m_physDeltaRelated = m_physDeltaRelated;
+        p->m_isOnGround4 = m_isOnGround4;
+        p->m_maybeSlidingTime = m_maybeSlidingTime;
+        p->m_maybeSlidingStartTime = m_maybeSlidingStartTime;
+        p->m_changedDirectionsTime = m_changedDirectionsTime;
+        p->m_slopeEndTime = m_slopeEndTime;
+        p->m_isMoving = m_isMoving;
+        p->m_platformerMovingLeft = m_platformerMovingLeft;
+        p->m_platformerMovingRight = m_platformerMovingRight;
+        p->m_isSlidingRight = m_isSlidingRight;
+        p->m_maybeChangedDirectionAngle = m_maybeChangedDirectionAngle;
+        p->m_unkUnused2 = m_unkUnused2;
         p->m_isPlatformer = m_isPlatformer;
-        p->m_quickCheckpointMode = m_quickCheckpointMode;
-        p->m_checkpointTimeout = m_checkpointTimeout;
-        p->m_lastCheckpointTime = m_lastCheckpointTime;
+        p->m_stateNoAutoJump = m_stateNoAutoJump;
+        p->m_stateDartSlide = m_stateDartSlide;
+        p->m_stateHitHead = m_stateHitHead;
+        p->m_stateFlipGravity = m_stateFlipGravity;
+        p->m_gravityMod = m_gravityMod;
+        p->m_stateForce = m_stateForce;
+        p->m_stateForceVector = m_stateForceVector;
+        p->m_affectedByForces = m_affectedByForces;
+        p->m_somethingPlayerSpeedTime = m_somethingPlayerSpeedTime;
+        p->m_playerSpeedAC = m_playerSpeedAC;
+        p->m_fixRobotJump = m_fixRobotJump;
+        p->m_inputsLocked = m_inputsLocked;
+        p->m_gv0123 = m_gv0123;
+        p->m_iconRequestID = m_iconRequestID;
+        p->m_unkUnused = m_unkUnused;
+        p->m_isOutOfBounds = m_isOutOfBounds;
+        p->m_fallStartY = m_fallStartY;
+        p->m_disablePlayerSqueeze = m_disablePlayerSqueeze;
+        p->m_robotAnimation1Enabled = m_robotAnimation1Enabled;
+        p->m_robotAnimation2Enabled = m_robotAnimation2Enabled;
+        p->m_spiderAnimationEnabled = m_spiderAnimationEnabled;
+        p->m_ignoreDamage = m_ignoreDamage;
+        p->m_enable22Changes = m_enable22Changes;
     }
 };
 
