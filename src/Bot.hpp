@@ -1375,7 +1375,7 @@ public:
                 inputWallTime
             });
 
-            ++priorityIndex;
+                ++playbackIndex;
         }
     }
     
