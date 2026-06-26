@@ -60,18 +60,10 @@ using namespace geode::prelude;
 
 class $modify(BotCCScheduler, CCScheduler) {
     static void onModify(auto& self) {
-        // Run AFTER CBF so we capture m_frameStartWall AFTER CBF sets
-        // currentFrameTime. This makes m_frameStartWall ≈ currentFrameTime,
-        // eliminating the timestamp jitter that caused random sub-step
-        // misplacement.
-        (void) self.setHookPriority("CCScheduler::update", 1000000);
+        (void) self.setHookPriority("CCScheduler::update", -1000000);
     }
 
-    void update(float dt) {
-        // By the time we get here, CBF's onFrameStart() has already run
-        // (CBF's hook chains to ours), so currentFrameTime is set.
-        // Capture m_frameStartWall NOW — it's as close to currentFrameTime
-        // as we can get without reading CBF's internal variable directly.
+       void update(float dt) {
         auto& bot = BotManager::get();
         bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
             ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;

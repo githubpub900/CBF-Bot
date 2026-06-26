@@ -1377,7 +1377,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-        void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1391,25 +1391,30 @@ public:
             frame->p1.apply(pl->m_player1);
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
 
-            // Release jump button after checkpoint load to prevent stuck
-            // inputs (xdBot does this)
+            // Release jump button after checkpoint load to prevent stuck inputs
             pl->m_player1->releaseButton(PlayerButton::Jump);
             if (pl->m_player2) pl->m_player2->releaseButton(PlayerButton::Jump);
         }
 
         if (mode == bot::Mode::Playing) {
+            // Seek the playback cursor to the checkpoint time
             seekPlaybackTo(frame->levelTime);
+
+            // CRITICAL: re-apply held state from the macro. After a checkpoint
+            // load, the player's actual held buttons might not match what the
+            // macro says should be held at this time. If we don't sync them,
+            // the next release input gets dropped (heldState thinks button
+            // isn't held, so the release looks "redundant" and is discarded),
+            // leaving the button stuck down and breaking the macro.
+            //
+            // First release everything, then re-press what the macro says
+            // should be held at this exact time.
+            releaseAll();
+            applyHeldStateAt(pl, frame->levelTime);
         } else if (mode == bot::Mode::Recording) {
-            // After applying the snapshot, sync heldState to match the
-            // actual player state. The snapshot may have restored jump-buffer
-            // state that doesn't match what buttons the player is actually
-            // holding. Without this sync, the next real input gets dropped
-            // as "redundant" or held too long.
+            // Sync heldState to actual player state after snapshot restore
             resetHeldState();
-            // Check what buttons are actually held right now
             if (pl->m_player1) {
-                // m_holdingButtons is a map<int, bool> where key=button ID,
-                // value=whether it's currently held
                 for (auto const& [btn, held] : pl->m_player1->m_holdingButtons) {
                     if (held && btn >= 1 && btn <= 3) heldState[0][btn] = true;
                 }
