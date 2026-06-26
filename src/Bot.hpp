@@ -890,7 +890,8 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
-    
+    double m_lastInputRecordTime = -1.0;
+
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
@@ -1019,7 +1020,7 @@ public:
 
     // ----- mode control ----------------------------------------------------
 
-    void startRecording(GJBaseGameLayer* gl) {
+       void startRecording(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1032,6 +1033,7 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         resetHeldState();
+        m_lastInputRecordTime = -1.0;  // ← ADD THIS
         m_lastRecordTime = macro.recordStartTime;
         log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
@@ -1163,7 +1165,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+          void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1174,8 +1176,17 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Use plain levelTime — deterministic, same every attempt
         double t = levelTime(gl);
+
+        // During death animation or checkpoint load, m_levelTime can be frozen.
+        // If we record multiple inputs at the same frozen time, they get the
+        // same timestamp. Fix: if this input is at the same time as the last
+        // one, nudge it forward by a tiny epsilon so it doesn't get collapsed
+        // or sorted out of order.
+        if (t <= m_lastInputRecordTime) {
+            t = m_lastInputRecordTime + 0.000001;  // 1 microsecond nudge
+        }
+        m_lastInputRecordTime = t;
 
         if (cbfState() == bot::CBFState::RobTop) {
             t = quantizeRobTop(t);
