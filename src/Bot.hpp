@@ -1799,6 +1799,10 @@ public:
     }
 
     void onPlayerDeath(PlayLayer* pl) {
+        // Reset audio pitch IMMEDIATELY — before GD's music system notices
+        // the m_timeWarp change. This prevents the music from jumping ahead.
+        resetAudioPitch();
+
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
@@ -1838,17 +1842,19 @@ public:
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
         if (!fae || !fae->m_system) return;
-        
+
         auto pl = PlayLayer::get();
         bool inLevel = (pl != nullptr);
         bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-        
-        // Only pitch when in level, speedhack on, and player alive.
-        // During death/respawn, reset pitch to 1.0 to avoid audio glitches.
-        float pitch = (speedhackEnabled && inLevel && !playerDead &&
+
+        // Don't change pitch during death — resetAudioPitch already set it
+        // to 1.0 in onPlayerDeath. Changing it here would cause jumps.
+        if (playerDead) return;
+
+        float pitch = (speedhackEnabled && inLevel &&
                        std::isfinite(speed) && speed > 0.0)
                       ? static_cast<float>(speedMultiplier()) : 1.0f;
-        
+
         FMOD::ChannelGroup* masterGroup = nullptr;
         if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
             masterGroup) {
