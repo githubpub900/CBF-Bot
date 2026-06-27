@@ -1622,14 +1622,20 @@ public:
 
     // Record a physics frame. Called from processCommands AFTER the original
     // runs (so position reflects the physics step that just happened).
-    void recordPhysicsFrame(double time) {
+     void recordPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl) return;
         if (pl->m_player1 && pl->m_player1->m_isDead) return;
         if (pl->m_player2 && pl->m_player2->m_isDead) return;
         
+        // Skip if this is the same time as the last frame (avoids duplicates)
         if (!macro.physicsFrames.empty() && 
-            time < macro.physicsFrames.back().time - 0.001) {
+            std::abs(time - macro.physicsFrames.back().time) < 0.0001) {
+            return;
+        }
+        
+        // Skip if time went backwards
+        if (!macro.physicsFrames.empty() && time < macro.physicsFrames.back().time - 0.001) {
             return;
         }
         
@@ -1639,18 +1645,11 @@ public:
             f.p1x = pl->m_player1->getPositionX();
             f.p1y = pl->m_player1->getPositionY();
             f.p1yVel = pl->m_player1->m_yVelocity;
-            // Capture held state from heldState tracker
-            f.p1Jump = heldState[0][1];
-            f.p1Left = heldState[0][2];
-            f.p1Right = heldState[0][3];
         }
         if (pl->m_player2) {
             f.p2x = pl->m_player2->getPositionX();
             f.p2y = pl->m_player2->getPositionY();
             f.p2yVel = pl->m_player2->m_yVelocity;
-            f.p2Jump = heldState[1][1];
-            f.p2Left = heldState[1][2];
-            f.p2Right = heldState[1][3];
         }
         macro.physicsFrames.push_back(f);
     }

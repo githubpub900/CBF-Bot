@@ -43,6 +43,7 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -125,19 +126,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // 1. Fire inputs BEFORE the step (so CBF sees them during the step)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.fireDueInputs(this, dt);
         }
-        // 2. Run the physics step
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // 3. Apply physics frame AFTER (corrects any drift from input timing)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
-        if (isPlay(this) && bot.mode == bot::Mode::Recording) {
-            bot.recordPhysicsFrame(BotManager::levelTime(this));
-        }
+        // Recording now happens in PlayerObject::update (per sub-step)
     }
     // ---- frame-rate independent speedhack --------------------------------
     //
@@ -229,6 +225,27 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
+// playerobject hook
+class $modify(BotPlayerObject, PlayerObject) {
+    static void onModify(auto& self) {
+        (void) self.setHookPriority("PlayerObject::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        // Apply physics position BEFORE the sub-step (per sub-step correction)
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+            this == this->m_gameLayer->m_player1) {
+            bot.applyPhysicsPosition(BotManager::levelTime(this->m_gameLayer));
+        }
+        PlayerObject::update(dt);
+        // Record AFTER the sub-step
+        if (bot.mode == bot::Mode::Recording && this->m_gameLayer &&
+            this == this->m_gameLayer->m_player1) {
+            bot.recordPhysicsFrame(BotManager::levelTime(this->m_gameLayer));
+        }
+    }
+};
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen
