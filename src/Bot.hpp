@@ -1180,6 +1180,7 @@ public:
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
     double m_frameStartWall = 0.0;
+    double m_frameStartLevel = 0.0;
     double m_prevFrameDelta = 0.0;
 
     // Step-start anchors for recording precision.
@@ -1485,7 +1486,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1500,26 +1501,16 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Sub-step interpolation: m_levelTime is frozen at the step boundary,
-        // but CBF fires handleButton at sub-step precision. We interpolate
-        // using the wall-clock time elapsed since the step started.
-        //
-        // preciseLevelTime = stepStartLevel + (wallNow - stepStartWall) / stepDuration * stepDelta
-        // But stepDuration ≈ stepDelta / speed, so:
-        // preciseLevelTime = stepStartLevel + (wallNow - stepStartWall) * speed
-        double wallNow = getWallTime();
-        double wallElapsed = wallNow - m_stepStartWall;
-        if (wallElapsed < 0.0) wallElapsed = 0.0;
-        if (wallElapsed > m_stepDelta) wallElapsed = m_stepDelta;  // clamp
-        double speed = speedMultiplier();
-        double levelElapsed = wallElapsed * speed;
-        double maxLevel = m_stepDelta * speed;
-        if (levelElapsed > maxLevel) levelElapsed = maxLevel;
-        double t = m_stepStartLevel + levelElapsed;
+        double t = levelTime(gl);
 
         if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
             return;
         }
+
+        InputEvent e(t, static_cast<uint8_t>(button), down, player2);
+        macro.events.emplace_back(e);
+        refreshUIProgress();
+    }
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
@@ -1645,20 +1636,61 @@ public:
         macro.physicsFrames.push_back(f);
     }
     
-    // Fire inputs from the separate event list. Called from processCommands
-    // BEFORE the physics step so CBF sees them during the step.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    void pushInputsToCBFQueue() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
+        if (cbfState() != bot::CBFState::Syzzi) return;
+
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
+
+        // CBF's frame window: [lastFrameTime, currentFrameTime]
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
+        double frameLevel = m_frameStartLevel;
+        double frameLevelAdvance = m_prevFrameDelta * speed;
+
+        // Clamp timestamps to the MIDDLE 90% of the frame window.
+        // This ensures CBF always processes them (not deferred) and
+        // places them at approximately the right sub-step.
+        double margin = m_prevFrameDelta * 0.05;
+        double safeLow = lastFrameTime + margin;
+        double safeHigh = currentFrameTime - margin;
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            double levelDelta = e.time - frameLevel;
+
+            // If beyond this frame, stop
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            // If past due, fire directly (rare)
+            if (levelDelta < -0.0001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            // Convert level time to wall-clock, clamped to safe window
+            double inputWallTime = lastFrameTime + levelDelta / speed;
+            if (inputWallTime < safeLow) inputWallTime = safeLow;
+            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
+
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,
+                inputWallTime
+            });
+
             ++playbackIndex;
         }
-        injecting = false;
     }
 
     // Apply a physics frame. Called from processCommands BEFORE the original

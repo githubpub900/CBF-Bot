@@ -46,7 +46,6 @@
 
 using namespace geode::prelude;
 
-// what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
 class $modify(BotCCScheduler, CCScheduler) {
     static void onModify(auto& self) {
         (void) self.setHookPriority("CCScheduler::update", 1000000);
@@ -57,6 +56,9 @@ class $modify(BotCCScheduler, CCScheduler) {
         bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
             ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
         bot.m_frameStartWall = BotManager::getWallTime();
+        if (auto pl = PlayLayer::get()) {
+            bot.m_frameStartLevel = BotManager::levelTime(pl);
+        }
         CCScheduler::update(dt);
     }
 };
@@ -124,19 +126,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        auto& bot = BotManager::get();
-        // Capture step start BEFORE processCommands advances m_levelTime.
-        // This gives us the anchor for sub-step interpolation during recording.
-        if (isPlay(this)) {
-            bot.m_stepStartLevel = BotManager::levelTime(this);
-            bot.m_stepStartWall = BotManager::getWallTime();
-            bot.m_stepDelta = dt;
-        }
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.fireDueInputs(this, dt);
-        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+        auto& bot = BotManager::get();
+        if (isPlay(this) && bot.mode == bot::Mode::Playing && bot.stateAlignEnabled) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
@@ -153,6 +145,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
+        // Push to CBF queue BEFORE CBF's buildStepQueue runs.
+        // Our priority is -1000000 (VeryEarly), so we run first.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushInputsToCBFQueue();
+        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
