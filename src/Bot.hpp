@@ -1318,24 +1318,7 @@ public:
         return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
-
-    // Sub-step level time for accurate input timestamps during recording.
-    // m_levelTime only updates at step boundaries, but CBF fires handleButton
-    // at sub-step precision. We interpolate using wall-clock to get the
-    // exact level time when the click happened.
-    double preciseLevelTime(GJBaseGameLayer* gl) {
-        if (!gl) return 0.0;
-        double baseLevelTime = levelTime(gl);
-        double wallNow = getWallTime();
-        double speed = speedMultiplier();
-        double wallElapsed = wallNow - m_frameStartWall;
-        if (wallElapsed < 0.0) wallElapsed = 0.0;
-        double levelElapsed = wallElapsed * speed;
-        double maxElapsed = m_prevFrameDelta * speed;
-        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
-        return baseLevelTime + levelElapsed;
-    }
-
+    
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1494,7 +1477,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1509,9 +1492,11 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Use preciseLevelTime — sub-step accuracy via wall-clock interpolation.
-        // This captures the EXACT moment of the click, not just the step boundary.
-        double t = preciseLevelTime(gl);
+        // Use levelTime DIRECTLY — no preciseLevelTime interpolation.
+        // When handleButton fires (from CBF at sub-step precision), m_levelTime
+        // reflects the exact level time CBF has processed. Adding wall-clock
+        // interpolation puts the timestamp in the FUTURE, causing playback delay.
+        double t = levelTime(gl);
 
         if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
             return;
@@ -1746,15 +1731,13 @@ public:
         if (!pl) return;
         CheckpointFrame f;
         f.eventCount    = static_cast<int>(macro.events.size());
-        f.levelTime     = levelTime(pl);
+        f.levelTime     = levelTime(pl);  // ← current level time, correct
         f.checkpointPtr = cpPtr;
         if (practiceFixEnabled) {
-            f.p1.capture(pl->m_player1);
+            f.p1.capture(pl->m_player1);  // ← captures current state, correct
             f.p2.capture(pl->m_player2);
         }
         checkpoints.push_back(f);
-        log::debug("[Bot] Checkpoint stored (events={}, t={:.4f})",
-                   f.eventCount, f.levelTime);
     }
 
     void onCheckpointRemoved() {

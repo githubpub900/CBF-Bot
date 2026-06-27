@@ -123,18 +123,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-       void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // Fire inputs BEFORE the step — let them naturally affect physics
+        // Fire inputs BEFORE the step so they're set for physics processing
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.fireDueInputs(this, dt);
         }
-        // Run the physics step — inputs naturally affect movement
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // Apply physics frame AFTER — corrects any drift from input timing.
-        // This is a CORRECTION, not a force. If inputs were accurate, the
-        // player is already close to the recorded position, so the correction
-        // is tiny/invisible. Only fires if there's actual drift.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
