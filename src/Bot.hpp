@@ -1640,6 +1640,22 @@ public:
         }
         macro.physicsFrames.push_back(f);
     }
+    
+    // Fire inputs from the separate event list. Called from processCommands
+    // BEFORE the physics step so CBF sees them during the step.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+        if (mode != bot::Mode::Playing) return;
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
+            auto const& e = macro.events[playbackIndex];
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            ++playbackIndex;
+        }
+        injecting = false;
+    }
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
