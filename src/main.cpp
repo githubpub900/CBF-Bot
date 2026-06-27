@@ -102,16 +102,17 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             if (bot.physicsMode) {
-                // Physics bot: apply frame BEFORE processCommands
+                // Apply physics frame BEFORE processCommands
                 bot.applyPhysicsFrame(BotManager::levelTime(this));
+                // Also fire any due inputs (for CPS counters, rings/pads)
+                bot.fireDueInputs(this, 0.0f);
             } else {
-                // Input bot: capture step start for sub-step interpolation
                 bot.onPhysicsStepStart(BotManager::levelTime(this), dt);
+                bot.fireDueInputs(this, dt);
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (isPlay(this) && bot.mode == bot::Mode::Recording && bot.physicsMode) {
-            // Physics bot: record frame AFTER processCommands
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
     }

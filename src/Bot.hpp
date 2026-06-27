@@ -1318,7 +1318,7 @@ public:
 
     // ----- mode control ----------------------------------------------------
 
-         void startRecording(GJBaseGameLayer* gl) {
+    void startRecording(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1332,10 +1332,9 @@ public:
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
         resetHeldState();
-        log::info("[Bot] Recording armed at t={:.6f} ({} mode)",
-                  macro.recordStartTime, physicsMode ? "physics" : "input");
-        notify(physicsMode ? "Physics recording started" : "Recording started",
-               NotificationIcon::Success);
+        log::info("[Bot] Recording armed at t={:.6f} (hybrid mode)",
+                  macro.recordStartTime);
+        notify("Recording started", NotificationIcon::Success);
         refreshUI();
     }
 
@@ -1344,32 +1343,32 @@ public:
             notifyNoCBF();
             return;
         }
+        if (physicsMode && macro.physicsFrames.empty()) {
+            notify("No physics data to play", NotificationIcon::Warning);
+            return;
+        }
+        if (!physicsMode && macro.empty()) {
+            notify("No macro to play", NotificationIcon::Warning);
+            return;
+        }
+        mode = bot::Mode::Playing;
         if (physicsMode) {
-            if (macro.physicsFrames.empty()) {
-                notify("No physics data to play", NotificationIcon::Warning);
-                return;
-            }
-            mode = bot::Mode::Playing;
             seekPhysicsPlayback(levelTime(gl));
-            log::info("[Bot] Physics playback started ({} frames)",
-                      macro.physicsFrames.size());
-            notify("Physics playback started", NotificationIcon::Success);
-            refreshUI();
+            // Also fire any held inputs from the input macro at start
+            seekPlaybackTo(levelTime(gl));
+            applyHeldStateAt(gl, levelTime(gl));
+            log::info("[Bot] Hybrid playback started ({} frames, {} inputs)",
+                      macro.physicsFrames.size(), macro.events.size());
         } else {
-            if (macro.empty()) {
-                notify("No macro to play", NotificationIcon::Warning);
-                return;
-            }
             macro.sort();
             validateAndRepair();
             warnIfWrongLevel();
-            mode = bot::Mode::Playing;
             seekPlaybackTo(levelTime(gl));
             applyHeldStateAt(gl, levelTime(gl));
-            log::info("[Bot] Playback started {}", description());
-            notify("Playback started", NotificationIcon::Success);
-            refreshUI();
+            log::info("[Bot] Input playback started {}", description());
         }
+        notify("Playback started", NotificationIcon::Success);
+        refreshUI();
     }
 
     void stop() {
@@ -1498,11 +1497,12 @@ public:
         refreshUIProgress();
     }
 
-      void syncRecordingToTime(GJBaseGameLayer* gl) {
+    void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
         double t = levelTime(gl);
         if (discardDeadInputs && t < macro.recordStartTime - 1e-4) {
             truncateAfter(t);
+            truncatePhysicsAfter(t);
             recomputeHeldState();
         }
     }
@@ -1517,6 +1517,20 @@ public:
             refreshUIProgress();
             log::info("[Bot] Re-record: discarded {} superseded input(s) after t={:.3f}",
                       dropped, t);
+        }
+    }
+
+    // Drop every physics frame whose timestamp is strictly after `t`.
+    // Called when the level clock jumps backwards (death, checkpoint load,
+    // restart) so stale frames don't interfere with re-recording.
+    void truncatePhysicsAfter(double t) {
+        size_t n = macro.physicsFrames.size();
+        while (n > 0 && macro.physicsFrames[n - 1].time > t) --n;
+        if (n < macro.physicsFrames.size()) {
+            size_t dropped = macro.physicsFrames.size() - n;
+            macro.physicsFrames.resize(n);
+            log::debug("[Bot] Dropped {} physics frame(s) after t={:.3f}",
+                       dropped, t);
         }
     }
 
@@ -1691,7 +1705,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1707,19 +1721,23 @@ public:
         }
 
         if (mode == bot::Mode::Playing) {
-            if (physicsMode) {
-                seekPhysicsPlayback(frame->levelTime);
-            } else {
-                seekPlaybackTo(frame->levelTime);
+            seekPhysicsPlayback(frame->levelTime);
+            seekPlaybackTo(frame->levelTime);
+            if (!physicsMode) {
                 releaseAll();
                 applyHeldStateAt(pl, frame->levelTime);
             }
+        } else if (mode == bot::Mode::Recording) {
+            // Discard frames/inputs after the checkpoint time
+            truncateAfter(frame->levelTime);
+            truncatePhysicsAfter(frame->levelTime);
+            recomputeHeldState();
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
-    void onRestart(PlayLayer* pl, bool fromStart) {
+        void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
@@ -1728,10 +1746,11 @@ public:
             if (pl) {
                 seekPlaybackTo(0.0);
                 seekPhysicsPlayback(0.0);
-                if (!physicsMode) applyHeldStateAt(pl, 0.0);
+                applyHeldStateAt(pl, 0.0);
             }
         } else if (mode == bot::Mode::Recording) {
             truncateAfter(0.0);
+            truncatePhysicsAfter(0.0);
             recomputeHeldState();
             resetHeldState();
         }
@@ -1751,17 +1770,23 @@ public:
         }
     }
 
-     void onPlayerDeath(PlayLayer* pl) {
+    void onPlayerDeath(PlayLayer* pl) {
         if (mode == bot::Mode::Playing && pl && !pl->m_isPracticeMode) {
-            // In normal-mode playback, death means the attempt failed.
-            // Reset playback to start so next attempt plays from beginning.
+            // Normal mode: reset playback
             releaseAll();
             playbackIndex = 0;
+            physicsPlaybackIndex = 0;
             seekPlaybackTo(0.0);
-            log::info("[Bot] Playback reset on death (normal mode)");
+            seekPhysicsPlayback(0.0);
+        } else if (mode == bot::Mode::Recording && pl && !pl->m_isPracticeMode) {
+            // Normal mode recording: truncate to current time (discard
+            // frames recorded after death)
+            double t = levelTime(pl);
+            truncateAfter(t);
+            truncatePhysicsAfter(t);
+            recomputeHeldState();
         }
-        // In practice mode, the checkpoint system handles the reset
-        // via onCheckpointLoaded, so we don't need to do anything here.
+        // Practice mode: checkpoint system handles truncation
     }
 
     // ----- speedhack -------------------------------------------------------
@@ -2001,7 +2026,7 @@ public:
         return Mod::get()->getSaveDir() / (sanitizeName(name) + ".gdpm");
     }
 
-    bool savePhysicsMacro(std::string const& name) {
+       bool savePhysicsMacro(std::string const& name) {
         auto path = physicsMacroPath(name);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) {
@@ -2012,9 +2037,10 @@ public:
             out.write(reinterpret_cast<char const*>(p), n);
         };
 
-        uint32_t magic = 0x4D504447; // 'GDPM' little-endian
-        uint32_t version = 1;
-        uint32_t count = static_cast<uint32_t>(macro.physicsFrames.size());
+        uint32_t magic = 0x4D504447; // 'GDPM'
+        uint32_t version = 2;        // v2: includes inputs
+        uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
+        uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
         std::string lname = macro.levelName.substr(0, 0xFFFF);
         uint16_t nameLen = static_cast<uint16_t>(lname.size());
@@ -2023,21 +2049,34 @@ public:
         wr(&levelID, 4);
         wr(&nameLen, 2);
         if (nameLen) wr(lname.data(), nameLen);
-        wr(&count, 4);
+        wr(&frameCount, 4);
+        wr(&inputCount, 4);
+
+        // Write physics frames
         for (auto const& f : macro.physicsFrames) {
             wr(&f.time, 8);
             wr(&f.p1x, 4); wr(&f.p1y, 4); wr(&f.p1yVel, 8);
             wr(&f.p2x, 4); wr(&f.p2y, 4); wr(&f.p2yVel, 8);
         }
+
+        // Write input events
+        for (auto const& e : macro.events) {
+            uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
+            wr(&e.time, 8);
+            wr(&e.button, 1);
+            wr(&flags, 1);
+        }
+
         out.close();
         macroName = name;
-        log::info("[Bot] Saved {} physics frames to {}", count, path.string());
-        notify(fmt::format("Saved {} physics frames", count),
+        log::info("[Bot] Saved {} frames + {} inputs to {}",
+                  frameCount, inputCount, path.string());
+        notify(fmt::format("Saved {} frames + {} inputs", frameCount, inputCount),
                NotificationIcon::Success);
         return true;
     }
 
-    bool loadPhysicsMacro(std::string const& name) {
+        bool loadPhysicsMacro(std::string const& name) {
         auto path = physicsMacroPath(name);
         std::ifstream in(path, std::ios::binary);
         if (!in) {
@@ -2048,13 +2087,14 @@ public:
             in.read(reinterpret_cast<char*>(p), n);
         };
 
-        uint32_t magic = 0, version = 0, count = 0;
+        uint32_t magic = 0, version = 0;
         rd(&magic, 4); rd(&version, 4);
         if (magic != 0x4D504447) {
             notify("Not a valid physics macro file", NotificationIcon::Error);
             return false;
         }
-        macro.physicsFrames.clear();
+
+        macro.clear();
         int32_t levelID = 0;
         uint16_t nameLen = 0;
         rd(&levelID, 4);
@@ -2065,22 +2105,45 @@ public:
             rd(buf.data(), nameLen);
             macro.levelName = buf;
         }
-        rd(&count, 4);
-        macro.physicsFrames.reserve(count);
-        for (uint32_t i = 0; i < count && in; ++i) {
+
+        uint32_t frameCount = 0, inputCount = 0;
+        rd(&frameCount, 4);
+        if (version >= 2) rd(&inputCount, 4);
+        else inputCount = 0;
+
+        // Read physics frames
+        macro.physicsFrames.reserve(frameCount);
+        for (uint32_t i = 0; i < frameCount && in; ++i) {
             PhysicsFrame f;
             rd(&f.time, 8);
             rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
             rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
             macro.physicsFrames.push_back(f);
         }
+
+        // Read input events (v2+)
+        macro.events.reserve(inputCount);
+        for (uint32_t i = 0; i < inputCount && in; ++i) {
+            InputEvent e;
+            uint8_t flags = 0;
+            rd(&e.time, 8);
+            rd(&e.button, 1);
+            rd(&flags, 1);
+            e.down = (flags & 1) != 0;
+            e.player2 = (flags & 2) != 0;
+            macro.events.push_back(e);
+        }
+
         in.close();
         macroName = name;
         physicsPlaybackIndex = 0;
-        log::info("[Bot] Loaded {} physics frames from {}",
-                  macro.physicsFrames.size(), path.string());
-        notify(fmt::format("Loaded {} physics frames",
-                          macro.physicsFrames.size()),
+        playbackIndex = 0;
+        macro.sort();
+        recomputeHeldState();
+        log::info("[Bot] Loaded {} frames + {} inputs from {}",
+                  macro.physicsFrames.size(), macro.events.size(), path.string());
+        notify(fmt::format("Loaded {} frames + {} inputs",
+                          macro.physicsFrames.size(), macro.events.size()),
                NotificationIcon::Success);
         return true;
     }
