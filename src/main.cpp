@@ -130,27 +130,27 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
-      double getModifiedDelta(float dt) {
+    double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
 
-        // Set m_timeWarp BEFORE calling the original. GD's getModifiedDelta
-        // multiplies delta by m_timeWarp internally. This is the "smooth"
-        // way to speedhack — CBF's step count calculation is designed for
-        // m_timeWarp, so it does MORE sub-steps at slow speeds (finer click
-        // precision) and the right number at high speeds.
-        if (isPlay(this) && bot.speedhackEnabled) {
+        // Only apply m_timeWarp when player is alive and gameplay is active.
+        // During death/respawn, reset to 1.0 so the respawn timer runs at
+        // normal speed (not slowed down by speedhack).
+        auto pl = PlayLayer::get();
+        bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
+        
+        if (isPlay(this) && bot.speedhackEnabled && !playerDead) {
             this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
         } else if (isPlay(this)) {
             this->m_gameState.m_timeWarp = 1.0f;
         }
 
-        // Push inputs to CBF queue (uses m_frameStartWall for timestamps)
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+        // Push inputs to CBF queue
+        if (isPlay(this) && bot.mode == bot::Mode::Playing && !playerDead) {
             bot.pushDueInputsToCBF();
         }
 
-        // Don't multiply here — GD does it via m_timeWarp
         return GJBaseGameLayer::getModifiedDelta(dt);
     }
 };
@@ -220,7 +220,10 @@ class $modify(BotPlayLayer, PlayLayer) {
     // ---- leaving the level: reset audio pitch so menu music is normal ----
     void onExit() {
         PlayLayer::onExit();
-        BotManager::get().resetAudioPitch();
+        auto& bot = BotManager::get();
+        // Reset m_timeWarp and audio pitch when leaving the level
+        this->m_gameState.m_timeWarp = 1.0f;
+        bot.resetAudioPitch();
     }
 };
 

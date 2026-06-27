@@ -1353,7 +1353,7 @@ public:
         refreshUI();
     }
 
-      void startPlayback(GJBaseGameLayer* gl) {
+    void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1367,6 +1367,13 @@ public:
         playbackStartLevelTime = levelTime(gl);
         seekPhysicsPlayback(levelTime(gl));
         seekPlaybackTo(levelTime(gl));
+        
+        // Reset m_timeWarp to current speedhack setting
+        if (gl) {
+            gl->m_gameState.m_timeWarp = speedhackEnabled 
+                ? static_cast<float>(speedMultiplier()) : 1.0f;
+        }
+        
         log::info("[Bot] Playback started ({} frames, {} inputs)",
                   macro.physicsFrames.size(), macro.events.size());
         notify("Playback started", NotificationIcon::Success);
@@ -1378,6 +1385,10 @@ public:
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
+        // Reset m_timeWarp when stopping
+        if (auto gl = GJBaseGameLayer::get()) {
+            gl->m_gameState.m_timeWarp = 1.0f;
+        }
         refreshUI();
     }
 
@@ -1846,18 +1857,23 @@ public:
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
         if (!fae || !fae->m_system) return;
-        bool inLevel = (PlayLayer::get() != nullptr);
-        // Use speedMultiplier() which now reflects m_timeWarp
-        float pitch = (speedhackEnabled && inLevel &&
+        
+        auto pl = PlayLayer::get();
+        bool inLevel = (pl != nullptr);
+        bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
+        
+        // Only pitch when in level, speedhack on, and player alive.
+        // During death/respawn, reset pitch to 1.0 to avoid audio glitches.
+        float pitch = (speedhackEnabled && inLevel && !playerDead &&
                        std::isfinite(speed) && speed > 0.0)
                       ? static_cast<float>(speedMultiplier()) : 1.0f;
+        
         FMOD::ChannelGroup* masterGroup = nullptr;
         if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
             masterGroup) {
             masterGroup->setPitch(pitch);
         }
     }
-
     // Reset the master channel group pitch to 1.0. Called from
     // PlayLayer::onExit so menu music plays at normal speed after leaving
     // a level where the speedhack was active.
