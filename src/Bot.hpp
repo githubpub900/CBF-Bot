@@ -1610,7 +1610,9 @@ public:
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-    void applyPhysicsFrame(double time) {
+       // Apply position/velocity from the physics frame. Called BEFORE
+    // processCommands so the step starts from the correct position.
+    void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1633,8 +1635,6 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
-        
-        // Apply position/velocity
         if (pl->m_player1) {
             pl->m_player1->setPosition({frame.p1x, frame.p1y});
             pl->m_player1->m_yVelocity = frame.p1yVel;
@@ -1643,10 +1643,18 @@ public:
             pl->m_player2->setPosition({frame.p2x, frame.p2y});
             pl->m_player2->m_yVelocity = frame.p2yVel;
         }
+    }
+
+    // Fire inputs from the current physics frame. Called AFTER processCommands
+    // so inputs are set for the NEXT step, not the current one. This prevents
+    // the input from desyncing with CBF's sub-step processing.
+    void firePhysicsInputs() {
+        auto pl = PlayLayer::get();
+        if (!pl || macro.physicsFrames.empty()) return;
+        if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
+
+        auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
         
-        // Physics-driven inputs: set held state to match the frame
-        // This fires handleButton for any state changes, perfectly synced
-        // to the physics frame. No timing offset, no fighting.
         injecting = true;
         // P1
         if (frame.p1Jump != m_currentHeld[0]) {
