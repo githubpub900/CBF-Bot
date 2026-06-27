@@ -43,7 +43,6 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
-#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -124,16 +123,19 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+       void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
+        // Fire inputs BEFORE the step — let them naturally affect physics
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply position BEFORE the step (sets correct starting position)
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
             bot.fireDueInputs(this, dt);
         }
+        // Run the physics step — inputs naturally affect movement
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        // Apply physics frame AFTER — corrects any drift from input timing.
+        // This is a CORRECTION, not a force. If inputs were accurate, the
+        // player is already close to the recorded position, so the correction
+        // is tiny/invisible. Only fires if there's actual drift.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply position AFTER the step (corrects any drift)
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
@@ -227,27 +229,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         // Reset m_timeWarp and audio pitch when leaving the level
         this->m_gameState.m_timeWarp = 1.0f;
         bot.resetAudioPitch();
-    }
-};
-
-// player object hook to disable physics
-class $modify(BotPlayerObject, PlayerObject) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        // During playback, SKIP GD's physics entirely. We're teleporting the
-        // player to exact recorded positions via applyPhysicsPosition, so
-        // GD's gravity/velocity integration would only fight our corrections.
-        // By not calling PlayerObject::update, we eliminate the fighting.
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
-            (this == this->m_gameLayer->m_player1 || this == this->m_gameLayer->m_player2)) {
-            // Don't call the original — no physics processing
-            return;
-        }
-        PlayerObject::update(dt);
     }
 };
 
