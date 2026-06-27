@@ -1186,6 +1186,8 @@ public:
     // is what makes re-recording from the start overwrite the whole macro instead
     // of appending to it.
     double    m_lastRecordTime = 0.0;
+    double m_frameStartLevel = 0.0;
+    double m_subStepAccumulated = 0.0;
 
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in

@@ -98,10 +98,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-            BotManager::get().fireDueInputs(this, dt);
-        }
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        // Don't fire here — PlayerObject::update handles firing with
+        // sub-step precision.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
 
@@ -111,14 +110,20 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
 
-    void update(float dt) {
+       void update(float dt) {
+        // Capture frame-start level time ONCE per frame, BEFORE processCommands
+        // advances m_levelTime. This is the anchor for sub-step accumulation.
+        if (isPlay(this)) {
+            auto& bot = BotManager::get();
+            bot.m_frameStartLevel = BotManager::levelTime(this);
+            bot.m_subStepAccumulated = 0.0;
+        }
         if (isPlay(this) && BotManager::get().guiPaused) {
             return;
         }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
             BotManager::get().syncRecordingToTime(this);
-            // No more fireDueInputs here — CBF handles playback firing now.
         }
         BotManager::get().applyMusicSpeed();
     }
@@ -232,9 +237,13 @@ class $modify(BotPlayerObject, PlayerObject) {
         auto& bot = BotManager::get();
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // Use levelTime directly — no sub-step accumulation.
-            // This was the version that worked well.
-            bot.fireDueInputs(this->m_gameLayer, 0.0f);
+            // dt is the SUB-STEP delta (level time). Accumulate it to compute
+            // the exact sub-step level time. This is speed-independent:
+            // CBF maintains ~240Hz sub-step rate, so each sub-step covers
+            // ~4ms of level time regardless of speedhack.
+            bot.m_subStepAccumulated += dt;
+            double subStepLevel = bot.m_frameStartLevel + bot.m_subStepAccumulated;
+            bot.fireDueInputsAtLevel(this->m_gameLayer, subStepLevel);
         }
         PlayerObject::update(dt);
     }
