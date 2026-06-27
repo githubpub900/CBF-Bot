@@ -1321,7 +1321,6 @@ public:
         mode = bot::Mode::Recording;
         macro.clear();
         macro.recordStartTime = levelTime(gl);
-        recordStartWallTime = getWallTime();  // capture wall-clock anchor
         macro.recordFps = currentPhysicsFps(gl);
         captureLevelInfo();
         checkpoints.clear();
