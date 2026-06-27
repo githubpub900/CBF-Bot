@@ -1179,6 +1179,8 @@ public:
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
+    double m_frameStartWall = 0.0;
+    double m_prevFrameDelta = 0.0;
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1300,6 +1302,40 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
+        static double getWallTime() {
+        #if defined(GEODE_IS_WINDOWS)
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+        #else
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
+        #endif
+    }
+
+    // Sub-step level time for accurate input timestamps during recording.
+    // m_levelTime only updates at step boundaries, but CBF fires handleButton
+    // at sub-step precision. We interpolate using wall-clock to get the
+    // exact level time when the click happened.
+    double preciseLevelTime(GJBaseGameLayer* gl) {
+        if (!gl) return 0.0;
+        double baseLevelTime = levelTime(gl);
+        double wallNow = getWallTime();
+        double speed = speedMultiplier();
+        double wallElapsed = wallNow - m_frameStartWall;
+        if (wallElapsed < 0.0) wallElapsed = 0.0;
+        double levelElapsed = wallElapsed * speed;
+        double maxElapsed = m_prevFrameDelta * speed;
+        if (levelElapsed > maxElapsed) levelElapsed = maxElapsed;
+        return baseLevelTime + levelElapsed;
+    }
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1344,10 +1380,9 @@ public:
         }
         mode = bot::Mode::Playing;
         seekPhysicsPlayback(levelTime(gl));
-        // Reset held state tracker so first frame sets everything correctly
-        m_currentHeld.fill(false);
-        log::info("[Bot] Playback started ({} frames)", 
-                  macro.physicsFrames.size());
+        seekPlaybackTo(levelTime(gl));
+        log::info("[Bot] Playback started ({} frames, {} inputs)",
+                  macro.physicsFrames.size(), macro.events.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1458,12 +1493,11 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
 
-        // Don't record during death animation (prevents stale inputs)
         auto pl = PlayLayer::get();
         if (pl) {
             if (pl->m_player1 && pl->m_player1->m_isDead) return;
@@ -1472,14 +1506,12 @@ public:
 
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
-
-        // Update held state
         heldState[pi][button] = down;
 
-        // Store exact level time
-        double t = levelTime(gl);
+        // Use preciseLevelTime — sub-step accuracy via wall-clock interpolation.
+        // This captures the EXACT moment of the click, not just the step boundary.
+        double t = preciseLevelTime(gl);
 
-        // Don't record if time went backwards (checkpoint load/death respawn)
         if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
             return;
         }
@@ -1557,7 +1589,22 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-
+    // Fire inputs from the separate event list. Uses levelTime + dt to look
+    // ahead by one step. These fire INDEPENDENTLY from physics frames —
+    // the physics frames correct position, the inputs trigger game mechanics.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+        if (mode != bot::Mode::Playing) return;
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
+            auto const& e = macro.events[playbackIndex];
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            ++playbackIndex;
+        }
+        injecting = false;
+    }
 
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {

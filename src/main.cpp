@@ -42,8 +42,24 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
+
+// what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
+class $modify(BotCCScheduler, CCScheduler) {
+    static void onModify(auto& self) {
+        (void) self.setHookPriority("CCScheduler::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        CCScheduler::update(dt);
+    }
+};
 
 // ============================================================================
 //  Small helpers
@@ -109,15 +125,15 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // 1. Apply position BEFORE the step (so step starts from correct pos)
+        // 1. Fire inputs BEFORE the step (so CBF sees them during the step)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
+            bot.fireDueInputs(this, dt);
         }
         // 2. Run the physics step
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // 3. Fire inputs AFTER the step (set for NEXT step, not current)
+        // 3. Apply physics frame AFTER (corrects any drift from input timing)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.firePhysicsInputs();
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
