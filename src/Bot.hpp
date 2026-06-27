@@ -1182,6 +1182,14 @@ public:
     double m_frameStartWall = 0.0;
     double m_prevFrameDelta = 0.0;
 
+    // Step-start anchors for recording precision.
+    // m_levelTime only updates at step boundaries, but CBF fires handleButton
+    // at sub-step precision. We capture the step start (time + wall clock),
+    // then interpolate to get the exact sub-step level time when the input fires.
+    double m_stepStartLevel = 0.0;
+    double m_stepStartWall = 0.0;
+    double m_stepDelta = 0.0;
+
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
     bool      injecting = false;
@@ -1302,7 +1310,7 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-        static double getWallTime() {
+    static double getWallTime() {
         #if defined(GEODE_IS_WINDOWS)
         static LARGE_INTEGER freq = [](){
             LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
@@ -1318,7 +1326,7 @@ public:
         return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
-
+    
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1477,7 +1485,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1492,11 +1500,22 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Use levelTime DIRECTLY — no preciseLevelTime interpolation.
-        // When handleButton fires (from CBF at sub-step precision), m_levelTime
-        // reflects the exact level time CBF has processed. Adding wall-clock
-        // interpolation puts the timestamp in the FUTURE, causing playback delay.
-        double t = levelTime(gl);
+        // Sub-step interpolation: m_levelTime is frozen at the step boundary,
+        // but CBF fires handleButton at sub-step precision. We interpolate
+        // using the wall-clock time elapsed since the step started.
+        //
+        // preciseLevelTime = stepStartLevel + (wallNow - stepStartWall) / stepDuration * stepDelta
+        // But stepDuration ≈ stepDelta / speed, so:
+        // preciseLevelTime = stepStartLevel + (wallNow - stepStartWall) * speed
+        double wallNow = getWallTime();
+        double wallElapsed = wallNow - m_stepStartWall;
+        if (wallElapsed < 0.0) wallElapsed = 0.0;
+        if (wallElapsed > m_stepDelta) wallElapsed = m_stepDelta;  // clamp
+        double speed = speedMultiplier();
+        double levelElapsed = wallElapsed * speed;
+        double maxLevel = m_stepDelta * speed;
+        if (levelElapsed > maxLevel) levelElapsed = maxLevel;
+        double t = m_stepStartLevel + levelElapsed;
 
         if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
             return;
@@ -1646,7 +1665,7 @@ public:
     // runs (so physics starts from the correct position).
        // Apply position/velocity from the physics frame. Called BEFORE
     // processCommands so the step starts from the correct position.
-       void applyPhysicsPosition(double time) {
+    void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1669,27 +1688,13 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
-        
-        // Only correct POSITION, never velocity. Overriding velocity fights
-        // the input's natural effect (e.g., jump velocity). By leaving
-        // velocity alone, the player follows a natural trajectory, and
-        // position correction keeps them on track without fighting.
-        //
-        // Only correct if drift is significant (> 0.5 units). This prevents
-        // micro-fighting when inputs are accurate.
         if (pl->m_player1) {
-            float dx = pl->m_player1->getPositionX() - frame.p1x;
-            float dy = pl->m_player1->getPositionY() - frame.p1y;
-            if (std::abs(dx) > 0.5f || std::abs(dy) > 0.5f) {
-                pl->m_player1->setPosition({frame.p1x, frame.p1y});
-            }
+            pl->m_player1->setPosition({frame.p1x, frame.p1y});
+            pl->m_player1->m_yVelocity = frame.p1yVel;
         }
         if (pl->m_player2) {
-            float dx = pl->m_player2->getPositionX() - frame.p2x;
-            float dy = pl->m_player2->getPositionY() - frame.p2y;
-            if (std::abs(dx) > 0.5f || std::abs(dy) > 0.5f) {
-                pl->m_player2->setPosition({frame.p2x, frame.p2y});
-            }
+            pl->m_player2->setPosition({frame.p2x, frame.p2y});
+            pl->m_player2->m_yVelocity = frame.p2yVel;
         }
     }
 

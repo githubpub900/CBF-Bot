@@ -125,7 +125,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // Fire inputs BEFORE the step so they're set for physics processing
+        // Capture step start BEFORE processCommands advances m_levelTime.
+        // This gives us the anchor for sub-step interpolation during recording.
+        if (isPlay(this)) {
+            bot.m_stepStartLevel = BotManager::levelTime(this);
+            bot.m_stepStartWall = BotManager::getWallTime();
+            bot.m_stepDelta = dt;
+        }
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.fireDueInputs(this, dt);
         }
