@@ -1506,16 +1506,7 @@ public:
 
     void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
-        double t = levelTime(gl);
-        // If the level clock jumped backwards, discard frames/inputs after
-        // the new current time. This handles death, checkpoint load, and
-        // restart — all of which cause the clock to jump back.
-        if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
-            truncateAfter(t);
-            truncatePhysicsAfter(t);
-            recomputeHeldState();
-        }
-        m_lastRecordTime = t;
+        m_lastRecordTime = levelTime(gl);
     }
 
     // Drop every recorded event whose timestamp is strictly after `t`.
@@ -1534,26 +1525,14 @@ public:
     // Drop every physics frame whose timestamp is strictly after `t`.
     // Called when the level clock jumps backwards (death, checkpoint load,
     // restart) so stale frames don't interfere with re-recording.
-    // Drop every physics frame whose timestamp is strictly after `t`.
     void truncatePhysicsAfter(double t) {
-        if (macro.physicsFrames.empty()) return;
-        
-        size_t oldSize = macro.physicsFrames.size();
-        size_t n = oldSize;
-        
-        // Walk back from the end while frames are after t
-        while (n > 0 && macro.physicsFrames[n - 1].time > t) {
-            --n;
-        }
-        
-        if (n < oldSize) {
-            size_t dropped = oldSize - n;
+        size_t n = macro.physicsFrames.size();
+        while (n > 0 && macro.physicsFrames[n - 1].time > t) --n;
+        if (n < macro.physicsFrames.size()) {
+            size_t dropped = macro.physicsFrames.size() - n;
             macro.physicsFrames.resize(n);
-            log::info("[Bot] truncatePhysicsAfter: dropped {} frames (t={:.6f}, kept {})",
-                      dropped, t, n);
-        } else {
-            log::debug("[Bot] truncatePhysicsAfter: nothing to drop (t={:.6f}, {} frames)", 
-                       t, n);
+            log::debug("[Bot] Dropped {} physics frame(s) after t={:.3f}",
+                       dropped, t);
         }
     }
 
@@ -1686,20 +1665,24 @@ public:
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-       void applyPhysicsFrame(double time) {
+    void applyPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
-        // If we've passed the last frame's time, stop applying frames entirely.
-        // This lets the player continue with normal physics after the macro ends.
-        if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
+        // Don't apply frames before the first recorded frame's time.
+        // This prevents the player from snapping to the first frame's
+        // position during the lead-in before recording started.
+        double firstFrameTime = macro.physicsFrames.front().time;
+        if (time < firstFrameTime) return;
 
+        // If we've passed the last frame's time, stop applying frames.
         double lastFrameTime = macro.physicsFrames.back().time;
         if (time > lastFrameTime) {
-            // Past the end — stop applying frames, let physics continue
             physicsPlaybackIndex = macro.physicsFrames.size();
             return;
         }
+
+        if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         // Advance cursor to the closest frame at or before `time`
         while (physicsPlaybackIndex + 1 < macro.physicsFrames.size() &&
@@ -1755,7 +1738,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1773,15 +1756,11 @@ public:
         if (mode == bot::Mode::Playing) {
             seekPhysicsPlayback(frame->levelTime);
             seekPlaybackTo(frame->levelTime);
-            if (!physicsMode) {
-                releaseAll();
-                applyHeldStateAt(pl, frame->levelTime);
-            }
         } else if (mode == bot::Mode::Recording) {
             truncateAfter(frame->levelTime);
             truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
-            m_lastRecordTime = frame->levelTime;  // ← ADD THIS
+            m_lastRecordTime = frame->levelTime;
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
@@ -1821,18 +1800,18 @@ public:
     }
 
     void onPlayerDeath(PlayLayer* pl) {
-        if (mode == bot::Mode::Playing && pl && !pl->m_isPracticeMode) {
+        if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
             seekPlaybackTo(0.0);
             seekPhysicsPlayback(0.0);
-        } else if (mode == bot::Mode::Recording && pl && !pl->m_isPracticeMode) {
+        } else if (mode == bot::Mode::Recording) {
             double t = levelTime(pl);
             truncateAfter(t);
             truncatePhysicsAfter(t);
             recomputeHeldState();
-            m_lastRecordTime = t;  // ← ADD THIS
+            m_lastRecordTime = t;
         }
     }
 
