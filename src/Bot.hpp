@@ -318,11 +318,12 @@ struct InputEvent {
 //  speed or timing.
 //
 struct PhysicsFrame {
-    double time = 0.0;       // level time
-    float  p1x = 0.f, p1y = 0.f;    // P1 position
-    double p1yVel = 0.0;            // P1 Y velocity
-    float  p2x = 0.f, p2y = 0.f;    // P2 position
-    double p2yVel = 0.0;            // P2 Y velocity
+    double wallTime = 0.0;   // WALL-CLOCK time (real time, not level time)
+    double levelTime = 0.0;  // level time (for reference/checkpoints)
+    float  p1x = 0.f, p1y = 0.f;
+    double p1yVel = 0.0;
+    float  p2x = 0.f, p2y = 0.f;
+    double p2yVel = 0.0;
 };
 
 // Directly set m_toggled AND button visibility. No reliance on toggle(bool),
@@ -1176,6 +1177,7 @@ public:
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
+    double recordStartWallTime = 0.0;
 
     // CBF queue playback — converts level time to wall-clock for CBF
     double playbackStartWallTime = 0.0;
@@ -1332,7 +1334,7 @@ public:
 
     // ----- mode control ----------------------------------------------------
 
-       void startRecording(GJBaseGameLayer* gl) {
+    void startRecording(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1340,15 +1342,15 @@ public:
         mode = bot::Mode::Recording;
         macro.clear();
         macro.recordStartTime = levelTime(gl);
+        recordStartWallTime = getWallTime();  // capture wall-clock anchor
         macro.recordFps = currentPhysicsFps(gl);
         captureLevelInfo();
         checkpoints.clear();
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
         resetHeldState();
-        m_lastRecordTime = macro.recordStartTime;  // ← ADD THIS
-        log::info("[Bot] Recording armed at t={:.6f} (hybrid mode)",
-                  macro.recordStartTime);
+        m_lastRecordTime = macro.recordStartTime;
+        log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1365,15 +1367,8 @@ public:
         mode = bot::Mode::Playing;
         playbackStartWallTime = getWallTime();
         playbackStartLevelTime = levelTime(gl);
-        seekPhysicsPlayback(levelTime(gl));
+        seekPhysicsPlayback(0.0);
         seekPlaybackTo(levelTime(gl));
-        
-        // Reset m_timeWarp to current speedhack setting
-        if (gl) {
-            gl->m_gameState.m_timeWarp = speedhackEnabled 
-                ? static_cast<float>(speedMultiplier()) : 1.0f;
-        }
-        
         log::info("[Bot] Playback started ({} frames, {} inputs)",
                   macro.physicsFrames.size(), macro.events.size());
         notify("Playback started", NotificationIcon::Success);
@@ -1541,14 +1536,12 @@ public:
     // Drop every physics frame whose timestamp is strictly after `t`.
     // Called when the level clock jumps backwards (death, checkpoint load,
     // restart) so stale frames don't interfere with re-recording.
-    void truncatePhysicsAfter(double t) {
+    void truncatePhysicsAfter(double levelTime) {
+        if (macro.physicsFrames.empty()) return;
         size_t n = macro.physicsFrames.size();
-        while (n > 0 && macro.physicsFrames[n - 1].time > t) --n;
+        while (n > 0 && macro.physicsFrames[n - 1].levelTime > levelTime) --n;
         if (n < macro.physicsFrames.size()) {
-            size_t dropped = macro.physicsFrames.size() - n;
             macro.physicsFrames.resize(n);
-            log::debug("[Bot] Dropped {} physics frame(s) after t={:.3f}",
-                       dropped, t);
         }
     }
 
@@ -1653,21 +1646,21 @@ public:
 
     // Record a physics frame. Called from processCommands AFTER the original
     // runs (so position reflects the physics step that just happened).
-    void recordPhysicsFrame(double time) {
+      void recordPhysicsFrame(double levelTime) {
         auto pl = PlayLayer::get();
         if (!pl) return;
-        // Don't record if player is dead — prevents stale frames during
-        // death animation from accumulating
         if (pl->m_player1 && pl->m_player1->m_isDead) return;
         if (pl->m_player2 && pl->m_player2->m_isDead) return;
         
-        // Don't record if time went backwards (checkpoint load/death respawn)
+        // Don't record if time went backwards
         if (!macro.physicsFrames.empty() && 
-            time < macro.physicsFrames.back().time - 0.001) {
+            levelTime < macro.physicsFrames.back().levelTime - 0.001) {
             return;
         }
+        
         PhysicsFrame f;
-        f.time = time;
+        f.wallTime = getWallTime();  // store wall-clock time
+        f.levelTime = levelTime;     // also store level time for reference
         if (pl->m_player1) {
             f.p1x = pl->m_player1->getPositionX();
             f.p1y = pl->m_player1->getPositionY();
@@ -1683,28 +1676,32 @@ public:
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-    void applyPhysicsFrame(double time) {
+    void applyPhysicsFrame(double currentLevelTime) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
-        // Don't apply frames before the first recorded frame's time.
-        // This prevents the player from snapping to the first frame's
-        // position during the lead-in before recording started.
-        double firstFrameTime = macro.physicsFrames.front().time;
-        if (time < firstFrameTime) return;
+        // Compute current wall-clock time relative to playback start
+        double currentWall = getWallTime();
+        double playbackWallOffset = currentWall - playbackStartWallTime;
+        double recordWallOffset = macro.physicsFrames.front().wallTime - recordStartWallTime;
+        
+        // The target wall time in the recording's frame of reference
+        double targetWall = playbackWallOffset + macro.physicsFrames.front().wallTime;
 
-        // If we've passed the last frame's time, stop applying frames.
-        double lastFrameTime = macro.physicsFrames.back().time;
-        if (time > lastFrameTime) {
+        // Don't apply before the first frame
+        if (targetWall < macro.physicsFrames.front().wallTime) return;
+
+        // If past the last frame, stop
+        if (targetWall > macro.physicsFrames.back().wallTime) {
             physicsPlaybackIndex = macro.physicsFrames.size();
             return;
         }
 
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
-        // Advance cursor to the closest frame at or before `time`
+        // Advance cursor
         while (physicsPlaybackIndex + 1 < macro.physicsFrames.size() &&
-               macro.physicsFrames[physicsPlaybackIndex + 1].time <= time) {
+               macro.physicsFrames[physicsPlaybackIndex + 1].wallTime <= targetWall) {
             ++physicsPlaybackIndex;
         }
 
@@ -1722,13 +1719,9 @@ public:
     }
 
     // Seek the physics playback cursor to the given time
-    void seekPhysicsPlayback(double time) {
+    void seekPhysicsPlayback(double levelTime) {
         physicsPlaybackIndex = 0;
-        while (physicsPlaybackIndex < macro.physicsFrames.size() &&
-               macro.physicsFrames[physicsPlaybackIndex].time < time) {
-            ++physicsPlaybackIndex;
-        }
-        if (physicsPlaybackIndex > 0) --physicsPlaybackIndex;
+        // Don't seek based on level time anymore — we use wall time
     }
 
     // ----- checkpoints / practice fix / dead-input discard -----------------
