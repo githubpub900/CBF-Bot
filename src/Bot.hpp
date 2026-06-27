@@ -1156,6 +1156,11 @@ public:
 
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
+    
+    // Our own CBF playback system — tracks sub-step level time
+    double m_stepStartLevel = 0.0;     // level time at step start
+    double m_subStepAccumulated = 0.0; // accumulated sub-step delta
+    bool m_firstSubStep = true;        // is this the first sub-step of the step?
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
