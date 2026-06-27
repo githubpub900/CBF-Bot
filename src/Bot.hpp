@@ -1534,14 +1534,26 @@ public:
     // Drop every physics frame whose timestamp is strictly after `t`.
     // Called when the level clock jumps backwards (death, checkpoint load,
     // restart) so stale frames don't interfere with re-recording.
+    // Drop every physics frame whose timestamp is strictly after `t`.
     void truncatePhysicsAfter(double t) {
-        size_t n = macro.physicsFrames.size();
-        while (n > 0 && macro.physicsFrames[n - 1].time > t) --n;
-        if (n < macro.physicsFrames.size()) {
-            size_t dropped = macro.physicsFrames.size() - n;
+        if (macro.physicsFrames.empty()) return;
+        
+        size_t oldSize = macro.physicsFrames.size();
+        size_t n = oldSize;
+        
+        // Walk back from the end while frames are after t
+        while (n > 0 && macro.physicsFrames[n - 1].time > t) {
+            --n;
+        }
+        
+        if (n < oldSize) {
+            size_t dropped = oldSize - n;
             macro.physicsFrames.resize(n);
-            log::debug("[Bot] Dropped {} physics frame(s) after t={:.3f}",
-                       dropped, t);
+            log::info("[Bot] truncatePhysicsAfter: dropped {} frames (t={:.6f}, kept {})",
+                      dropped, t, n);
+        } else {
+            log::debug("[Bot] truncatePhysicsAfter: nothing to drop (t={:.6f}, {} frames)", 
+                       t, n);
         }
     }
 
@@ -1674,19 +1686,18 @@ public:
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-    void applyPhysicsFrame(double time) {
+       void applyPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
-        // If we've reached the end of the physics data, stop applying frames
-        // and let the player continue normally. This prevents the player from
-        // being frozen in place when the macro ends prematurely.
-        if (physicsPlaybackIndex >= macro.physicsFrames.size()) {
-            // Playback complete — release all inputs and let physics run
-            if (mode == bot::Mode::Playing) {
-                // Don't auto-stop, just stop applying frames
-                // The player will continue from the last position
-            }
+        // If we've passed the last frame's time, stop applying frames entirely.
+        // This lets the player continue with normal physics after the macro ends.
+        if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
+
+        double lastFrameTime = macro.physicsFrames.back().time;
+        if (time > lastFrameTime) {
+            // Past the end — stop applying frames, let physics continue
+            physicsPlaybackIndex = macro.physicsFrames.size();
             return;
         }
 
