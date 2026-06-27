@@ -1188,6 +1188,7 @@ public:
     double    m_lastRecordTime = 0.0;
     double m_frameStartLevel = 0.0;
     double m_subStepAccumulated = 0.0;
+    double playbackStartLevelTime = 0.0;  // level time when playback started
 
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -1294,10 +1295,21 @@ public:
     void fireDueInputsAtLevel(GJBaseGameLayer* gl, double targetLevel) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
+
+        // Compute elapsed time since playback started. Events are stored as
+        // absolute level time from RECORDING, so we offset by recordStartTime
+        // to get the relative time from recording start. This makes the first
+        // input fire immediately after playback starts (no dead time).
+        double elapsedSincePlaybackStart = targetLevel - playbackStartLevelTime;
+        double recordOffset = macro.recordStartTime;
+
         injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= targetLevel) {
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
+            // Event fires when: (event.time - recordStartTime) <= elapsedSincePlaybackStart
+            // i.e., the time from recording start to this event has elapsed since playback start
+            if (e.time - recordOffset > elapsedSincePlaybackStart) break;
+
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
@@ -1325,7 +1337,7 @@ public:
         refreshUI();
     }
 
-        void startPlayback(GJBaseGameLayer* gl) {
+       void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1338,6 +1350,13 @@ public:
         validateAndRepair();
         warnIfWrongLevel();
         mode = bot::Mode::Playing;
+
+        // Capture when playback starts (level time). Events are stored as
+        // absolute level time from RECORDING. We offset by recordStartTime
+        // so events fire relative to playback start, not absolute level time.
+        // This eliminates the "dead time" before the first input.
+        playbackStartLevelTime = levelTime(gl);
+
         seekPlaybackTo(levelTime(gl));
         applyHeldStateAt(gl, levelTime(gl));
         log::info("[Bot] Playback started {}", description());
@@ -1365,9 +1384,14 @@ public:
 
     // Move the playback cursor to the first event at/after `time`.
     void seekPlaybackTo(double time) {
+        // time here is the current level time. We need to find events whose
+        // relative time (event.time - recordStartTime) <= (time - playbackStartLevelTime)
+        double elapsedSincePlaybackStart = time - playbackStartLevelTime;
+        double recordOffset = macro.recordStartTime;
+
         playbackIndex = 0;
         while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time < time) {
+               macro.events[playbackIndex].time - recordOffset <= elapsedSincePlaybackStart) {
             ++playbackIndex;
         }
     }
@@ -1560,10 +1584,14 @@ public:
     // point is honoured instead of silently dropped.
     void applyHeldStateAt(GJBaseGameLayer* gl, double time) {
         if (!gl) return;
-        std::array<std::array<int, 4>, 2> last{};   // -1 up, +1 down, 0 unknown
+        double elapsedSincePlaybackStart = time - playbackStartLevelTime;
+        double recordOffset = macro.recordStartTime;
+
+        std::array<std::array<int, 4>, 2> last{};
         for (auto& row : last) row.fill(0);
         for (auto const& e : macro.events) {
-            if (e.time >= time) break;
+            // Stop at events that haven't happened yet (relative to playback start)
+            if (e.time - recordOffset > elapsedSincePlaybackStart) break;
             int pi = e.player2 ? 1 : 0;
             if (e.button >= 1 && e.button <= 3) last[pi][e.button] = e.down ? 1 : -1;
         }
