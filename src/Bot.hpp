@@ -1330,7 +1330,7 @@ public:
         refreshUI();
     }
 
-       void startPlayback(GJBaseGameLayer* gl) {
+     void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1340,14 +1340,9 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
-
-        // Capture wall-clock / level-time pair for CBF timestamp conversion
-        playbackStartWallTime = getWallTime();
-        playbackStartLevelTime = levelTime(gl);
-
         seekPhysicsPlayback(levelTime(gl));
         seekPlaybackTo(levelTime(gl));
-        log::info("[Bot] Hybrid playback started ({} frames, {} inputs)",
+        log::info("[Bot] Playback started ({} frames, {} inputs)",
                   macro.physicsFrames.size(), macro.events.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
