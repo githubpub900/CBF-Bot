@@ -1177,6 +1177,12 @@ public:
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
 
+    // CBF queue playback — converts level time to wall-clock for CBF
+    double playbackStartWallTime = 0.0;
+    double playbackStartLevelTime = 0.0;
+    double m_frameStartWall = 0.0;
+    double m_prevFrameDelta = 0.0;
+
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
     bool      injecting = false;
@@ -1296,6 +1302,23 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
+    static double getWallTime() {
+        #if defined(GEODE_IS_WINDOWS)
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+        #else
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
+        #endif
+    }
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1330,7 +1353,7 @@ public:
         refreshUI();
     }
 
-     void startPlayback(GJBaseGameLayer* gl) {
+      void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1340,6 +1363,8 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
+        playbackStartWallTime = getWallTime();
+        playbackStartLevelTime = levelTime(gl);
         seekPhysicsPlayback(levelTime(gl));
         seekPlaybackTo(levelTime(gl));
         log::info("[Bot] Playback started ({} frames, {} inputs)",
@@ -1554,22 +1579,51 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Fire inputs directly via handleButton. Called from processCommands.
-    // Uses levelTime + dt to look ahead by one physics step — deterministic,
-    // never drops inputs. This is the version that worked well for input
-    // playback. The physics frame (applied before this) corrects any drift.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
+        if (cbfState() != bot::CBFState::Syzzi) return;
+
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
+
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
+        double currentLevel = levelTime(pl);
+        double frameLevelAdvance = m_prevFrameDelta * speed;
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            double levelDelta = e.time - currentLevel;
+
+            // If beyond this frame, stop
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            // If past due, fire directly
+            if (levelDelta < -0.0001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            // Convert level time to wall-clock
+            double inputWallTime = lastFrameTime + levelDelta / speed;
+
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,
+                inputWallTime
+            });
+
             ++playbackIndex;
         }
-        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1792,15 +1846,11 @@ public:
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
         if (!fae || !fae->m_system) return;
-
-        // Only pitch when speedhack is on AND we are actually inside a level,
-        // so menu audio returns to normal the moment we exit.
         bool inLevel = (PlayLayer::get() != nullptr);
+        // Use speedMultiplier() which now reflects m_timeWarp
         float pitch = (speedhackEnabled && inLevel &&
                        std::isfinite(speed) && speed > 0.0)
-                      ? static_cast<float>(speedMultiplier())
-                      : 1.0f;
-
+                      ? static_cast<float>(speedMultiplier()) : 1.0f;
         FMOD::ChannelGroup* masterGroup = nullptr;
         if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
             masterGroup) {

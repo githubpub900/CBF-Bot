@@ -42,9 +42,25 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
 
+// I TOLD YOU IT NEVER LEAVSE
+
+class $modify(BotCCScheduler, CCScheduler) {
+    static void onModify(auto& self) {
+        (void) self.setHookPriority("CCScheduler::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        CCScheduler::update(dt);
+    }
+};
 
 // ============================================================================
 //  Small helpers
@@ -98,16 +114,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Fire inputs BEFORE processCommands so they're set for the step
-            bot.fireDueInputs(this, dt);
-        }
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply physics frame AFTER processCommands — this corrects any
-            // drift from input timing. The frame represents the position
-            // AFTER the step, so we apply it after the step runs.
             bot.applyPhysicsFrame(BotManager::levelTime(this));
         }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
@@ -121,14 +130,28 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
-    double getModifiedDelta(float dt) {
+      double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        double modified = GJBaseGameLayer::getModifiedDelta(dt);
-        if (bot.speedhackEnabled && isPlay(this)) {
-            modified *= bot.speedMultiplier();
+
+        // Set m_timeWarp BEFORE calling the original. GD's getModifiedDelta
+        // multiplies delta by m_timeWarp internally. This is the "smooth"
+        // way to speedhack — CBF's step count calculation is designed for
+        // m_timeWarp, so it does MORE sub-steps at slow speeds (finer click
+        // precision) and the right number at high speeds.
+        if (isPlay(this) && bot.speedhackEnabled) {
+            this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
+        } else if (isPlay(this)) {
+            this->m_gameState.m_timeWarp = 1.0f;
         }
-        return modified;
+
+        // Push inputs to CBF queue (uses m_frameStartWall for timestamps)
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushDueInputsToCBF();
+        }
+
+        // Don't multiply here — GD does it via m_timeWarp
+        return GJBaseGameLayer::getModifiedDelta(dt);
     }
 };
 
