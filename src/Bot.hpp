@@ -1318,7 +1318,7 @@ public:
         return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
-    
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1646,7 +1646,7 @@ public:
     // runs (so physics starts from the correct position).
        // Apply position/velocity from the physics frame. Called BEFORE
     // processCommands so the step starts from the correct position.
-    void applyPhysicsPosition(double time) {
+       void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1669,13 +1669,27 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
+        
+        // Only correct POSITION, never velocity. Overriding velocity fights
+        // the input's natural effect (e.g., jump velocity). By leaving
+        // velocity alone, the player follows a natural trajectory, and
+        // position correction keeps them on track without fighting.
+        //
+        // Only correct if drift is significant (> 0.5 units). This prevents
+        // micro-fighting when inputs are accurate.
         if (pl->m_player1) {
-            pl->m_player1->setPosition({frame.p1x, frame.p1y});
-            pl->m_player1->m_yVelocity = frame.p1yVel;
+            float dx = pl->m_player1->getPositionX() - frame.p1x;
+            float dy = pl->m_player1->getPositionY() - frame.p1y;
+            if (std::abs(dx) > 0.5f || std::abs(dy) > 0.5f) {
+                pl->m_player1->setPosition({frame.p1x, frame.p1y});
+            }
         }
         if (pl->m_player2) {
-            pl->m_player2->setPosition({frame.p2x, frame.p2y});
-            pl->m_player2->m_yVelocity = frame.p2yVel;
+            float dx = pl->m_player2->getPositionX() - frame.p2x;
+            float dy = pl->m_player2->getPositionY() - frame.p2y;
+            if (std::abs(dx) > 0.5f || std::abs(dy) > 0.5f) {
+                pl->m_player2->setPosition({frame.p2x, frame.p2y});
+            }
         }
     }
 
