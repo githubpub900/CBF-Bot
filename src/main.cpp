@@ -53,27 +53,12 @@ class $modify(BotCCScheduler, CCScheduler) {
         (void) self.setHookPriority("CCScheduler::update", 1000000);
     }
 
-        void update(float dt) {
+    void update(float dt) {
         auto& bot = BotManager::get();
-        if (isPlay(this) && !bot.guiPaused) {
-            // Force m_timeWarp EVERY frame in update too — ensures it's
-            // correct even if GD resets it elsewhere
-            auto pl = PlayLayer::get();
-            bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-            if (bot.speedhackEnabled && !playerDead) {
-                this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
-            } else {
-                this->m_gameState.m_timeWarp = 1.0f;
-            }
-        }
-        if (isPlay(this) && bot.guiPaused) {
-            return;
-        }
-        GJBaseGameLayer::update(dt);
-        if (isPlay(this)) {
-            BotManager::get().syncRecordingToTime(this);
-        }
-        BotManager::get().applyMusicSpeed();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        CCScheduler::update(dt);
     }
 };
 
@@ -121,6 +106,29 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         }
 
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
+    }
+    
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        if (isPlay(this) && !bot.guiPaused) {
+            // Force m_timeWarp EVERY frame — ensures it's correct even if
+            // GD resets it elsewhere
+            auto pl = PlayLayer::get();
+            bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
+            if (bot.speedhackEnabled && !playerDead) {
+                this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
+            } else {
+                this->m_gameState.m_timeWarp = 1.0f;
+            }
+        }
+        if (isPlay(this) && bot.guiPaused) {
+            return;
+        }
+        GJBaseGameLayer::update(dt);
+        if (isPlay(this)) {
+            BotManager::get().syncRecordingToTime(this);
+        }
+        BotManager::get().applyMusicSpeed();
     }
 
     // ---- playback (primary, per physics step) ----------------------------
