@@ -1176,15 +1176,14 @@ public:
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
 
-    // ----- Sub-step interpolation playback system -----
-    // Tracks position within a physics step for sub-step-level accuracy.
-    // m_levelTime only updates once per step (in processCommands), but CBF
-    // splits each step into sub-steps inside PlayerObject::update. By
-    // capturing the step boundaries and accumulating sub-step deltas, we
-    // can compute the exact level time at each sub-step.
-    double m_stepStartLevel = 0.0;    // level time at step start (before processCommands)
-    double m_stepEndLevel = 0.0;      // level time at step end (after processCommands)
-    double m_subStepPos = 0.0;        // accumulated sub-step delta within current step
+    // ----- CBF queue playback anchors (for accurate input firing) -----
+    double playbackStartWallTime = 0.0;
+    double playbackStartLevelTime = 0.0;
+
+    // Frame-start wall time (captured in CCScheduler::update)
+    double m_frameStartWall = 0.0;
+    double m_prevFrameDelta = 0.0;
+    double m_lastRecordTime = 0.0;
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1210,9 +1209,9 @@ public:
     bool      autoSaveOnComplete = true;
 
     // ----- Physics bot mode -----
-    // When true, record/playback uses physics frames (position/velocity) instead
-    // of input events. Gives perfect accuracy at any speed. Enabled by default.
-    bool      physicsMode = true;
+    // Physics bot mode is always on — we always record physics frames
+    // AND inputs. Physics frames correct drift from input timing errors.
+    bool physicsMode = true;
     size_t    physicsPlaybackIndex = 0;
 
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
@@ -1304,7 +1303,24 @@ public:
     static double levelTime(GJBaseGameLayer* gl) {
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
-    
+
+    static double getWallTime() {
+        #if defined(GEODE_IS_WINDOWS)
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+        #else
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
+        #endif
+    }
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1318,7 +1334,7 @@ public:
 
     // ----- mode control ----------------------------------------------------
 
-    void startRecording(GJBaseGameLayer* gl) {
+       void startRecording(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1332,41 +1348,32 @@ public:
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
         resetHeldState();
+        m_lastRecordTime = macro.recordStartTime;  // ← ADD THIS
         log::info("[Bot] Recording armed at t={:.6f} (hybrid mode)",
                   macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
     }
 
-    void startPlayback(GJBaseGameLayer* gl) {
+       void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
         }
-        if (physicsMode && macro.physicsFrames.empty()) {
+        if (macro.physicsFrames.empty()) {
             notify("No physics data to play", NotificationIcon::Warning);
             return;
         }
-        if (!physicsMode && macro.empty()) {
-            notify("No macro to play", NotificationIcon::Warning);
-            return;
-        }
         mode = bot::Mode::Playing;
-        if (physicsMode) {
-            seekPhysicsPlayback(levelTime(gl));
-            // Also fire any held inputs from the input macro at start
-            seekPlaybackTo(levelTime(gl));
-            applyHeldStateAt(gl, levelTime(gl));
-            log::info("[Bot] Hybrid playback started ({} frames, {} inputs)",
-                      macro.physicsFrames.size(), macro.events.size());
-        } else {
-            macro.sort();
-            validateAndRepair();
-            warnIfWrongLevel();
-            seekPlaybackTo(levelTime(gl));
-            applyHeldStateAt(gl, levelTime(gl));
-            log::info("[Bot] Input playback started {}", description());
-        }
+
+        // Capture wall-clock / level-time pair for CBF timestamp conversion
+        playbackStartWallTime = getWallTime();
+        playbackStartLevelTime = levelTime(gl);
+
+        seekPhysicsPlayback(levelTime(gl));
+        seekPlaybackTo(levelTime(gl));
+        log::info("[Bot] Hybrid playback started ({} frames, {} inputs)",
+                  macro.physicsFrames.size(), macro.events.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1500,11 +1507,15 @@ public:
     void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
         double t = levelTime(gl);
-        if (discardDeadInputs && t < macro.recordStartTime - 1e-4) {
+        // If the level clock jumped backwards, discard frames/inputs after
+        // the new current time. This handles death, checkpoint load, and
+        // restart — all of which cause the clock to jump back.
+        if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
             truncateAfter(t);
             truncatePhysicsAfter(t);
             recomputeHeldState();
         }
+        m_lastRecordTime = t;
     }
 
     // Drop every recorded event whose timestamp is strictly after `t`.
@@ -1581,50 +1592,59 @@ public:
         m_subStepPos = 0.0;
     }
 
-        // Called from PlayerObject::update (per CBF sub-step). Fires inputs due
-    // at the exact sub-step level time, computed by interpolating between
-    // step start and step end using the accumulated sub-step delta.
-    //
-    // This gives sub-step accuracy (~1ms at 240Hz) without the hold bug,
-    // because we fire directly via handleButton (no CBF queue deferral).
-    void fireDueInputsSubStep(GJBaseGameLayer* gl, float subStepDelta) {
+    // Push due inputs to CBF's m_queuedButtons queue. Uses frame-start
+    // anchors for timestamp alignment. CBF's buildStepQueue places each
+    // input at the exact sub-step.
+    // Any drift from the CBF queue's one-step delay is corrected by the
+    // physics frame applied in processCommands.
+    void pushDueInputsToCBF() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        // Advance our position within the step
-        m_subStepPos += static_cast<double>(subStepDelta);
+        auto pl = PlayLayer::get();
+        if (!pl) return;
 
-        // Compute exact sub-step level time
-        double subStepLevel = m_stepStartLevel + m_subStepPos;
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
 
-        // Clamp to step end to avoid overshooting (handles rounding)
-        if (subStepLevel > m_stepEndLevel) subStepLevel = m_stepEndLevel;
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
+        double frameLevel = levelTime(pl);
+        double frameLevelAdvance = m_prevFrameDelta * speed;
 
-        // Fire inputs due at this sub-step level time
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= subStepLevel) {
+        double safetyMargin = m_prevFrameDelta * 0.02;
+        double safeLow  = lastFrameTime + safetyMargin;
+        double safeHigh = currentFrameTime - safetyMargin;
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            double levelDelta = e.time - frameLevel;
+
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            if (levelDelta < -0.0001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            double inputWallTime = lastFrameTime + levelDelta / speed;
+            if (inputWallTime < safeLow)  inputWallTime = safeLow;
+            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
+
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,
+                inputWallTime
+            });
+
             ++playbackIndex;
         }
-        injecting = false;
-    }
-
-    // Fire inputs directly via handleButton. Used as a backstop in
-    // processCommands and for firing inputs in hybrid (physics + input) mode.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
-        if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
-            auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-            ++playbackIndex;
-        }
-        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1666,6 +1686,18 @@ public:
     void applyPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
+
+        // If we've reached the end of the physics data, stop applying frames
+        // and let the player continue normally. This prevents the player from
+        // being frozen in place when the macro ends prematurely.
+        if (physicsPlaybackIndex >= macro.physicsFrames.size()) {
+            // Playback complete — release all inputs and let physics run
+            if (mode == bot::Mode::Playing) {
+                // Don't auto-stop, just stop applying frames
+                // The player will continue from the last position
+            }
+            return;
+        }
 
         // Advance cursor to the closest frame at or before `time`
         while (physicsPlaybackIndex + 1 < macro.physicsFrames.size() &&
@@ -1744,10 +1776,10 @@ public:
                 applyHeldStateAt(pl, frame->levelTime);
             }
         } else if (mode == bot::Mode::Recording) {
-            // Discard frames/inputs after the checkpoint time
             truncateAfter(frame->levelTime);
             truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
+            m_lastRecordTime = frame->levelTime;  // ← ADD THIS
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
@@ -1788,21 +1820,18 @@ public:
 
     void onPlayerDeath(PlayLayer* pl) {
         if (mode == bot::Mode::Playing && pl && !pl->m_isPracticeMode) {
-            // Normal mode: reset playback
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
             seekPlaybackTo(0.0);
             seekPhysicsPlayback(0.0);
         } else if (mode == bot::Mode::Recording && pl && !pl->m_isPracticeMode) {
-            // Normal mode recording: truncate to current time (discard
-            // frames recorded after death)
             double t = levelTime(pl);
             truncateAfter(t);
             truncatePhysicsAfter(t);
             recomputeHeldState();
+            m_lastRecordTime = t;  // ← ADD THIS
         }
-        // Practice mode: checkpoint system handles truncation
     }
 
     // ----- speedhack -------------------------------------------------------
@@ -1869,7 +1898,6 @@ public:
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
         m->setSavedValue<bool>("state-align", stateAlignEnabled);
-        m->setSavedValue<bool>("physics-mode", physicsMode);
     }
 
     void setSpeedFromString(std::string const& s) {
@@ -2356,7 +2384,6 @@ protected:
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     CCMenuItemToggler*    m_stateAlignToggle = nullptr;
-    CCMenuItemToggler* m_physicsToggle = nullptr;
     bool                  m_visible      = false;
 
     // Drag state for the panel title bar.
@@ -2649,7 +2676,6 @@ public:
         forceTogglerState(m_deadToggle,     bot.discardDeadInputs);
         forceTogglerState(m_autoSaveToggle, bot.autoSaveOnComplete);
         forceTogglerState(m_stateAlignToggle, bot.stateAlignEnabled);
-        forceTogglerState(m_physicsToggle, bot.physicsMode);
     }
 
     void syncModeToggles() {
@@ -2789,9 +2815,6 @@ private:
         m_stateAlignToggle = makeToggle(menu, { 200.f, yOpt2 },
             menu_selector(BotUILayer::onStateAlign), "State align",
             bot.stateAlignEnabled);
-        m_physicsToggle = makeToggle(menu, { 40.f, yOpt2 - 56.f },
-            menu_selector(BotUILayer::onPhysicsMode), "Physics bot",
-            bot.physicsMode);
 
         // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
@@ -2890,12 +2913,6 @@ private:
     void onStateAlign(CCObject*) {
         auto& bot = BotManager::get();
         bot.stateAlignEnabled = !bot.stateAlignEnabled;
-        bot.persist();
-        refreshAll();
-    }
-    void onPhysicsMode(CCObject*) {
-        auto& bot = BotManager::get();
-        bot.physicsMode = !bot.physicsMode;
         bot.persist();
         refreshAll();
     }
