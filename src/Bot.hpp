@@ -1380,9 +1380,10 @@ public:
         }
         mode = bot::Mode::Playing;
         seekPhysicsPlayback(levelTime(gl));
-        seekPlaybackTo(levelTime(gl));
-        log::info("[Bot] Playback started ({} frames, {} inputs)",
-                  macro.physicsFrames.size(), macro.events.size());
+        // Reset held state tracker so first frame sets everything correctly
+        m_currentHeld.fill(false);
+        log::info("[Bot] Playback started ({} frames)", 
+                  macro.physicsFrames.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1589,22 +1590,7 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Fire inputs from the separate event list. Uses levelTime + dt to look
-    // ahead by one step. These fire INDEPENDENTLY from physics frames —
-    // the physics frames correct position, the inputs trigger game mechanics.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
-        if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
-            auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-            ++playbackIndex;
-        }
-        injecting = false;
-    }
+
 
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
@@ -1622,20 +1608,14 @@ public:
 
     // Record a physics frame. Called from processCommands AFTER the original
     // runs (so position reflects the physics step that just happened).
-     void recordPhysicsFrame(double time) {
+    void recordPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl) return;
         if (pl->m_player1 && pl->m_player1->m_isDead) return;
         if (pl->m_player2 && pl->m_player2->m_isDead) return;
         
-        // Skip if this is the same time as the last frame (avoids duplicates)
         if (!macro.physicsFrames.empty() && 
-            std::abs(time - macro.physicsFrames.back().time) < 0.0001) {
-            return;
-        }
-        
-        // Skip if time went backwards
-        if (!macro.physicsFrames.empty() && time < macro.physicsFrames.back().time - 0.001) {
+            time < macro.physicsFrames.back().time - 0.001) {
             return;
         }
         
@@ -1645,11 +1625,18 @@ public:
             f.p1x = pl->m_player1->getPositionX();
             f.p1y = pl->m_player1->getPositionY();
             f.p1yVel = pl->m_player1->m_yVelocity;
+            // Capture held state from heldState tracker
+            f.p1Jump = heldState[0][1];
+            f.p1Left = heldState[0][2];
+            f.p1Right = heldState[0][3];
         }
         if (pl->m_player2) {
             f.p2x = pl->m_player2->getPositionX();
             f.p2y = pl->m_player2->getPositionY();
             f.p2yVel = pl->m_player2->m_yVelocity;
+            f.p2Jump = heldState[1][1];
+            f.p2Left = heldState[1][2];
+            f.p2Right = heldState[1][3];
         }
         macro.physicsFrames.push_back(f);
     }

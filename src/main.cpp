@@ -127,13 +127,18 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            // Apply position BEFORE the step (sets correct starting position)
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
             bot.fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            // Apply position AFTER the step (corrects any drift)
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
-        // Recording now happens in PlayerObject::update (per sub-step)
+        if (isPlay(this) && bot.mode == bot::Mode::Recording) {
+            bot.recordPhysicsFrame(BotManager::levelTime(this));
+        }
     }
     // ---- frame-rate independent speedhack --------------------------------
     //
@@ -225,25 +230,24 @@ class $modify(BotPlayLayer, PlayLayer) {
     }
 };
 
-// playerobject hook
+// player object hook to disable physics
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        (void) self.setHookPriority("PlayerObject::update", 1000000);
+        (void) self.setHookPriority("PlayerObject::update", -1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Apply physics position BEFORE the sub-step (per sub-step correction)
+        // During playback, SKIP GD's physics entirely. We're teleporting the
+        // player to exact recorded positions via applyPhysicsPosition, so
+        // GD's gravity/velocity integration would only fight our corrections.
+        // By not calling PlayerObject::update, we eliminate the fighting.
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
-            this == this->m_gameLayer->m_player1) {
-            bot.applyPhysicsPosition(BotManager::levelTime(this->m_gameLayer));
+            (this == this->m_gameLayer->m_player1 || this == this->m_gameLayer->m_player2)) {
+            // Don't call the original — no physics processing
+            return;
         }
         PlayerObject::update(dt);
-        // Record AFTER the sub-step
-        if (bot.mode == bot::Mode::Recording && this->m_gameLayer &&
-            this == this->m_gameLayer->m_player1) {
-            bot.recordPhysicsFrame(BotManager::levelTime(this->m_gameLayer));
-        }
     }
 };
 
