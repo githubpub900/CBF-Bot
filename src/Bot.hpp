@@ -1535,10 +1535,10 @@ public:
     // Drop every physics frame whose timestamp is strictly after `t`.
     // Called when the level clock jumps backwards (death, checkpoint load,
     // restart) so stale frames don't interfere with re-recording.
-    void truncatePhysicsAfter(double levelTime) {
+    void truncatePhysicsAfter(double t) {
         if (macro.physicsFrames.empty()) return;
         size_t n = macro.physicsFrames.size();
-        while (n > 0 && macro.physicsFrames[n - 1].levelTime > levelTime) --n;
+        while (n > 0 && macro.physicsFrames[n - 1].time > t) --n;
         if (n < macro.physicsFrames.size()) {
             macro.physicsFrames.resize(n);
         }
@@ -1645,21 +1645,19 @@ public:
 
     // Record a physics frame. Called from processCommands AFTER the original
     // runs (so position reflects the physics step that just happened).
-      void recordPhysicsFrame(double levelTime) {
+    void recordPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl) return;
         if (pl->m_player1 && pl->m_player1->m_isDead) return;
         if (pl->m_player2 && pl->m_player2->m_isDead) return;
         
-        // Don't record if time went backwards
         if (!macro.physicsFrames.empty() && 
-            levelTime < macro.physicsFrames.back().levelTime - 0.001) {
+            time < macro.physicsFrames.back().time - 0.001) {
             return;
         }
         
         PhysicsFrame f;
-        f.wallTime = getWallTime();  // store wall-clock time
-        f.levelTime = levelTime;     // also store level time for reference
+        f.time = time;
         if (pl->m_player1) {
             f.p1x = pl->m_player1->getPositionX();
             f.p1y = pl->m_player1->getPositionY();
@@ -2065,7 +2063,7 @@ public:
         };
 
         uint32_t magic = 0x4D504447; // 'GDPM'
-        uint32_t version = 3;  // v3: wallTime + levelTime
+        uint32_t version = 2;  // v2: level time only
         uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
         uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
@@ -2079,10 +2077,8 @@ public:
         wr(&frameCount, 4);
         wr(&inputCount, 4);
 
-        // Write physics frames
         for (auto const& f : macro.physicsFrames) {
-            wr(&f.wallTime, 8);
-            wr(&f.levelTime, 8);
+            wr(&f.time, 8);
             wr(&f.p1x, 4); wr(&f.p1y, 4); wr(&f.p1yVel, 8);
             wr(&f.p2x, 4); wr(&f.p2y, 4); wr(&f.p2yVel, 8);
         }
@@ -2104,7 +2100,7 @@ public:
         return true;
     }
 
-        bool loadPhysicsMacro(std::string const& name) {
+     bool loadPhysicsMacro(std::string const& name) {
         auto path = physicsMacroPath(name);
         std::ifstream in(path, std::ios::binary);
         if (!in) {
@@ -2143,14 +2139,7 @@ public:
         macro.physicsFrames.reserve(frameCount);
         for (uint32_t i = 0; i < frameCount && in; ++i) {
             PhysicsFrame f;
-            if (version >= 3) {
-                rd(&f.wallTime, 8);
-                rd(&f.levelTime, 8);
-            } else {
-                // v2 backwards compatibility: old format only had one time field
-                rd(&f.levelTime, 8);
-                f.wallTime = f.levelTime;
-            }
+            rd(&f.time, 8);
             rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
             rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
             macro.physicsFrames.push_back(f);
@@ -2635,7 +2624,7 @@ public:
                 fmt::format("{} frames  |  {:.2f}s",
                     BotManager::get().macro.physicsFrames.size(),
                     BotManager::get().macro.physicsFrames.empty() ? 0.0 :
-                    BotManager::get().macro.physicsFrames.back().levelTime).c_str());
+                    BotManager::get().macro.physicsFrames.back().time).c_str());
         }
         if (m_statsLabel) {
             auto s = BotManager::get().computeStats();
