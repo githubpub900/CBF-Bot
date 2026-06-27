@@ -1583,15 +1583,6 @@ public:
 
     // ----- playback --------------------------------------------------------
 
- // Called from processCommands BEFORE the original advances m_levelTime.
-    // Captures the step boundaries so we can interpolate within the step
-    // during PlayerObject::update sub-steps.
-    void onPhysicsStepStart(double currentLevelTime, float stepDelta) {
-        m_stepStartLevel = currentLevelTime;
-        m_stepEndLevel = currentLevelTime + static_cast<double>(stepDelta);
-        m_subStepPos = 0.0;
-    }
-
     // Push due inputs to CBF's m_queuedButtons queue. Uses frame-start
     // anchors for timestamp alignment. CBF's buildStepQueue places each
     // input at the exact sub-step.
