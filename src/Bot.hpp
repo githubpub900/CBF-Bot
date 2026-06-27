@@ -1156,11 +1156,16 @@ public:
 
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
-    
-    // Our own CBF playback system — tracks sub-step level time
-    double m_stepStartLevel = 0.0;     // level time at step start
-    double m_subStepAccumulated = 0.0; // accumulated sub-step delta
-    bool m_firstSubStep = true;        // is this the first sub-step of the step?
+
+    // ----- Sub-step interpolation playback system -----
+    // Tracks position within a physics step for sub-step-level accuracy.
+    // m_levelTime only updates once per step (in processCommands), but CBF
+    // splits each step into sub-steps inside PlayerObject::update. By
+    // capturing the step boundaries and accumulating sub-step deltas, we
+    // can compute the exact level time at each sub-step.
+    double m_stepStartLevel = 0.0;    // level time at step start (before processCommands)
+    double m_stepEndLevel = 0.0;      // level time at step end (after processCommands)
+    double m_subStepPos = 0.0;        // accumulated sub-step delta within current step
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1267,6 +1272,7 @@ public:
     }
 
 
+
     // ----- time helpers ----------------------------------------------------
 
     // Read the authoritative, frame-rate independent level clock.
@@ -1345,8 +1351,11 @@ public:
 
     // Move the playback cursor to the first event at/after `time`.
     void seekPlaybackTo(double time) {
-        // time is unused for wall-clock approach — just reset to start
         playbackIndex = 0;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time < time) {
+            ++playbackIndex;
+        }
     }
 
     // Stamp the current level's identity into the macro so we can later detect a
@@ -1427,7 +1436,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1438,8 +1447,9 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Full double precision — ~17 significant digits.
-        // A timestamp like 5.120831899534820 is stored exactly.
+        // Store EXACT level time — full double precision (~17 significant digits).
+        // CBF keeps m_levelTime sub-step accurate during recording, so this
+        // captures the precise moment of the click.
         double t = levelTime(gl);
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
@@ -1507,28 +1517,35 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Called from processCommands — captures the step's level time range
-    // BEFORE m_levelTime advances. This lets us compute sub-step level times.
-    void onStepStart(GJBaseGameLayer* gl, float stepDelta) {
-        if (mode != bot::Mode::Playing) return;
-        m_stepStartLevel = levelTime(gl);
-        m_subStepAccumulated = 0.0;
-        m_firstSubStep = true;
+ // Called from processCommands BEFORE the original advances m_levelTime.
+    // Captures the step boundaries so we can interpolate within the step
+    // during PlayerObject::update sub-steps.
+    void onPhysicsStepStart(double currentLevelTime, float stepDelta) {
+        m_stepStartLevel = currentLevelTime;
+        m_stepEndLevel = currentLevelTime + static_cast<double>(stepDelta);
+        m_subStepPos = 0.0;
     }
 
-    // Called from PlayerObject::update — fires inputs at the exact sub-step.
-    // dt is the SUB-STEP delta. We accumulate it to compute the sub-step's
-    // level time: subStepLevel = m_stepStartLevel + accumulated.
-    void fireDueInputsSubStep(GJBaseGameLayer* gl, float dt) {
+        // Called from PlayerObject::update (per CBF sub-step). Fires inputs due
+    // at the exact sub-step level time, computed by interpolating between
+    // step start and step end using the accumulated sub-step delta.
+    //
+    // This gives sub-step accuracy (~1ms at 240Hz) without the hold bug,
+    // because we fire directly via handleButton (no CBF queue deferral).
+    void fireDueInputsSubStep(GJBaseGameLayer* gl, float subStepDelta) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
 
-        // Accumulate the sub-step delta
-        m_subStepAccumulated += dt;
-        
-        // Compute the exact sub-step level time
-        double subStepLevel = m_stepStartLevel + m_subStepAccumulated;
-        
+        // Advance our position within the step
+        m_subStepPos += static_cast<double>(subStepDelta);
+
+        // Compute exact sub-step level time
+        double subStepLevel = m_stepStartLevel + m_subStepPos;
+
+        // Clamp to step end to avoid overshooting (handles rounding)
+        if (subStepLevel > m_stepEndLevel) subStepLevel = m_stepEndLevel;
+
+        // Fire inputs due at this sub-step level time
         injecting = true;
         while (playbackIndex < macro.events.size() &&
                macro.events[playbackIndex].time <= subStepLevel) {
@@ -1537,8 +1554,6 @@ public:
             ++playbackIndex;
         }
         injecting = false;
-        
-        m_firstSubStep = false;
     }
     
     // Force-release every button (used when stopping playback abruptly).
@@ -1553,6 +1568,22 @@ public:
         injecting = false;
     }
 
+    // Backstop: fire any inputs that are past due. Called from processCommands
+    // as a safety net in case PlayerObject::update didn't fire them.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+        if (mode != bot::Mode::Playing) return;
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
+            auto const& e = macro.events[playbackIndex];
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            ++playbackIndex;
+        }
+        injecting = false;
+    }
+    
     // ----- checkpoints / practice fix / dead-input discard -----------------
 
     void onCheckpointStored(PlayLayer* pl, void* cpPtr) {
