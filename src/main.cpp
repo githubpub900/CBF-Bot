@@ -42,25 +42,8 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
-
-// I TOLD YOU IT NEVER LEAVSE
-
-class $modify(BotCCScheduler, CCScheduler) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("CCScheduler::update", 1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
-            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
-        bot.m_frameStartWall = BotManager::getWallTime();
-        CCScheduler::update(dt);
-    }
-};
 
 // ============================================================================
 //  Small helpers
@@ -109,19 +92,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     }
     
     void update(float dt) {
-        auto& bot = BotManager::get();
-        if (isPlay(this) && !bot.guiPaused) {
-            // Force m_timeWarp EVERY frame — ensures it's correct even if
-            // GD resets it elsewhere
-            auto pl = PlayLayer::get();
-            bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-            if (bot.speedhackEnabled && !playerDead) {
-                this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
-            } else {
-                this->m_gameState.m_timeWarp = 1.0f;
-            }
-        }
-        if (isPlay(this) && bot.guiPaused) {
+        if (isPlay(this) && BotManager::get().guiPaused) {
             return;
         }
         GJBaseGameLayer::update(dt);
@@ -140,6 +111,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            // applyPhysicsFrame now handles BOTH position AND inputs
             bot.applyPhysicsFrame(BotManager::levelTime(this));
         }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
@@ -153,28 +125,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
-       double getModifiedDelta(float dt) {
+    double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-
-        auto pl = PlayLayer::get();
-        bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-
-        // ALWAYS set m_timeWarp based on CURRENT speedhack setting.
-        // This ensures playback runs at the current speed, not the
-        // recording speed. When speedhack is off, m_timeWarp = 1.0
-        // regardless of what was used during recording.
-        if (isPlay(this) && bot.speedhackEnabled && !playerDead) {
-            this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
-        } else if (isPlay(this)) {
-            this->m_gameState.m_timeWarp = 1.0f;
+        double modified = GJBaseGameLayer::getModifiedDelta(dt);
+        if (bot.speedhackEnabled && isPlay(this)) {
+            modified *= bot.speedMultiplier();
         }
-
-        if (isPlay(this) && bot.mode == bot::Mode::Playing && !playerDead) {
-            bot.pushDueInputsToCBF();
-        }
-
-        return GJBaseGameLayer::getModifiedDelta(dt);
+        return modified;
     }
 };
 

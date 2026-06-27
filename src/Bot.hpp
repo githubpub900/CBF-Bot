@@ -318,11 +318,14 @@ struct InputEvent {
 //  speed or timing.
 //
 struct PhysicsFrame {
-    double time = 0.0;  // LEVEL TIME
+    double time = 0.0;
     float  p1x = 0.f, p1y = 0.f;
     double p1yVel = 0.0;
     float  p2x = 0.f, p2y = 0.f;
     double p2yVel = 0.0;
+    // Held button state at this frame (for physics-driven input playback)
+    bool p1Jump = false, p1Left = false, p1Right = false;
+    bool p2Jump = false, p2Left = false, p2Right = false;
 };
 
 // Directly set m_toggled AND button visibility. No reliance on toggle(bool),
@@ -1176,13 +1179,6 @@ public:
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
-    double recordStartWallTime = 0.0;
-
-    // CBF queue playback — converts level time to wall-clock for CBF
-    double playbackStartWallTime = 0.0;
-    double playbackStartLevelTime = 0.0;
-    double m_frameStartWall = 0.0;
-    double m_prevFrameDelta = 0.0;
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1217,6 +1213,7 @@ public:
     // incrementally while recording so we can collapse redundant transitions in
     // O(1) instead of rescanning the whole event list per input.
     std::array<std::array<bool, 4>, 2> heldState{};
+    std::array<bool, 6> m_currentHeld{}; // [p1Jump, p1Left, p1Right, p2Jump, p2Left, p2Right]
 
     // Our parallel checkpoint stack, kept in lock-step with m_checkpointArray.
     std::vector<CheckpointFrame> checkpoints;
@@ -1303,23 +1300,6 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-    static double getWallTime() {
-        #if defined(GEODE_IS_WINDOWS)
-        static LARGE_INTEGER freq = [](){
-            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
-        }();
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-        #else
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
-        #endif
-    }
-
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1364,12 +1344,11 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
-        playbackStartWallTime = getWallTime();
-        playbackStartLevelTime = levelTime(gl);
-        seekPhysicsPlayback(0.0);
-        seekPlaybackTo(levelTime(gl));
-        log::info("[Bot] Playback started ({} frames, {} inputs)",
-                  macro.physicsFrames.size(), macro.events.size());
+        seekPhysicsPlayback(levelTime(gl));
+        // Reset held state tracker so first frame sets everything correctly
+        m_currentHeld.fill(false);
+        log::info("[Bot] Playback started ({} frames)", 
+                  macro.physicsFrames.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1379,10 +1358,7 @@ public:
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
-        // Reset m_timeWarp when stopping
-        if (auto gl = GJBaseGameLayer::get()) {
-            gl->m_gameState.m_timeWarp = 1.0f;
-        }
+        m_currentHeld.fill(false);
         refreshUI();
     }
 
@@ -1582,52 +1558,7 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    void pushDueInputsToCBF() {
-        if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-        double currentLevel = levelTime(pl);
-        double frameLevelAdvance = m_prevFrameDelta * speed;
-
-        while (playbackIndex < macro.events.size()) {
-            auto const& e = macro.events[playbackIndex];
-
-            double levelDelta = e.time - currentLevel;
-
-            // If beyond this frame, stop
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            // If past due, fire directly
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            // Convert level time to wall-clock
-            double inputWallTime = lastFrameTime + levelDelta / speed;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
-            ++playbackIndex;
-        }
-    }
 
     // Force-release every button (used when stopping playback abruptly).
     void releaseAll() {
@@ -1662,18 +1593,25 @@ public:
             f.p1x = pl->m_player1->getPositionX();
             f.p1y = pl->m_player1->getPositionY();
             f.p1yVel = pl->m_player1->m_yVelocity;
+            // Capture held state from heldState tracker
+            f.p1Jump = heldState[0][1];
+            f.p1Left = heldState[0][2];
+            f.p1Right = heldState[0][3];
         }
         if (pl->m_player2) {
             f.p2x = pl->m_player2->getPositionX();
             f.p2y = pl->m_player2->getPositionY();
             f.p2yVel = pl->m_player2->m_yVelocity;
+            f.p2Jump = heldState[1][1];
+            f.p2Left = heldState[1][2];
+            f.p2Right = heldState[1][3];
         }
         macro.physicsFrames.push_back(f);
     }
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-        void applyPhysicsFrame(double time) {
+    void applyPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1696,6 +1634,8 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
+        
+        // Apply position/velocity
         if (pl->m_player1) {
             pl->m_player1->setPosition({frame.p1x, frame.p1y});
             pl->m_player1->m_yVelocity = frame.p1yVel;
@@ -1704,6 +1644,38 @@ public:
             pl->m_player2->setPosition({frame.p2x, frame.p2y});
             pl->m_player2->m_yVelocity = frame.p2yVel;
         }
+        
+        // Physics-driven inputs: set held state to match the frame
+        // This fires handleButton for any state changes, perfectly synced
+        // to the physics frame. No timing offset, no fighting.
+        injecting = true;
+        // P1
+        if (frame.p1Jump != m_currentHeld[0]) {
+            pl->handleButton(frame.p1Jump, 1, true);
+            m_currentHeld[0] = frame.p1Jump;
+        }
+        if (frame.p1Left != m_currentHeld[1]) {
+            pl->handleButton(frame.p1Left, 2, true);
+            m_currentHeld[1] = frame.p1Left;
+        }
+        if (frame.p1Right != m_currentHeld[2]) {
+            pl->handleButton(frame.p1Right, 3, true);
+            m_currentHeld[2] = frame.p1Right;
+        }
+        // P2
+        if (frame.p2Jump != m_currentHeld[3]) {
+            pl->handleButton(frame.p2Jump, 1, false);
+            m_currentHeld[3] = frame.p2Jump;
+        }
+        if (frame.p2Left != m_currentHeld[4]) {
+            pl->handleButton(frame.p2Left, 2, false);
+            m_currentHeld[4] = frame.p2Left;
+        }
+        if (frame.p2Right != m_currentHeld[5]) {
+            pl->handleButton(frame.p2Right, 3, false);
+            m_currentHeld[5] = frame.p2Right;
+        }
+        injecting = false;
     }
 
     // Seek the physics playback cursor to the given time
@@ -1799,10 +1771,6 @@ public:
     }
 
     void onPlayerDeath(PlayLayer* pl) {
-        // Reset audio pitch IMMEDIATELY — before GD's music system notices
-        // the m_timeWarp change. This prevents the music from jumping ahead.
-        resetAudioPitch();
-
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
@@ -1842,19 +1810,10 @@ public:
     void applyMusicSpeed() {
         auto fae = FMODAudioEngine::sharedEngine();
         if (!fae || !fae->m_system) return;
-
-        auto pl = PlayLayer::get();
-        bool inLevel = (pl != nullptr);
-        bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-
-        // Don't change pitch during death — resetAudioPitch already set it
-        // to 1.0 in onPlayerDeath. Changing it here would cause jumps.
-        if (playerDead) return;
-
+        bool inLevel = (PlayLayer::get() != nullptr);
         float pitch = (speedhackEnabled && inLevel &&
                        std::isfinite(speed) && speed > 0.0)
                       ? static_cast<float>(speedMultiplier()) : 1.0f;
-
         FMOD::ChannelGroup* masterGroup = nullptr;
         if (fae->m_system->getMasterChannelGroup(&masterGroup) == FMOD_OK &&
             masterGroup) {
@@ -2087,6 +2046,14 @@ public:
             wr(&f.time, 8);
             wr(&f.p1x, 4); wr(&f.p1y, 4); wr(&f.p1yVel, 8);
             wr(&f.p2x, 4); wr(&f.p2y, 4); wr(&f.p2yVel, 8);
+            uint8_t held = 0;
+            if (f.p1Jump)  held |= 1;
+            if (f.p1Left)  held |= 2;
+            if (f.p1Right) held |= 4;
+            if (f.p2Jump)  held |= 8;
+            if (f.p2Left)  held |= 16;
+            if (f.p2Right) held |= 32;
+            wr(&held, 1);
         }
 
         // Write input events
@@ -2153,15 +2120,20 @@ public:
 
         // Read input events (v2+)
         macro.events.reserve(inputCount);
-        for (uint32_t i = 0; i < inputCount && in; ++i) {
-            InputEvent e;
-            uint8_t flags = 0;
-            rd(&e.time, 8);
-            rd(&e.button, 1);
-            rd(&flags, 1);
-            e.down = (flags & 1) != 0;
-            e.player2 = (flags & 2) != 0;
-            macro.events.push_back(e);
+        for (uint32_t i = 0; i < frameCount && in; ++i) {
+            PhysicsFrame f;
+            rd(&f.time, 8);
+            rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
+            rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
+            uint8_t held = 0;
+            rd(&held, 1);
+            f.p1Jump  = (held & 1) != 0;
+            f.p1Left  = (held & 2) != 0;
+            f.p1Right = (held & 4) != 0;
+            f.p2Jump  = (held & 8) != 0;
+            f.p2Left  = (held & 16) != 0;
+            f.p2Right = (held & 32) != 0;
+            macro.physicsFrames.push_back(f);
         }
 
         in.close();
