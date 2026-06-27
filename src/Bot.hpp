@@ -1293,7 +1293,7 @@ public:
         double scale = std::pow(10.0, std::min(bot::TEXT_TIME_DECIMALS, 15));
         return std::round(t * scale) / scale;
     }
-    
+
     // Get wall-clock time in the same format CBF uses for its timestamps.
     // This is critical — CBF compares m_timestamp against its own
     // currentFrameTime, so we MUST use the same timer.
@@ -1305,11 +1305,8 @@ public:
         LARGE_INTEGER t;
         QueryPerformanceCounter(&t);
         return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-
         #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
         return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-
         #else
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1318,29 +1315,66 @@ public:
     }
 
 
-    // Fire inputs due at a SPECIFIC level time (used for sub-step accuracy)
-    void fireDueInputsAtLevel(GJBaseGameLayer* gl, double targetLevel) {
+        // Push due inputs to CBF's m_queuedButtons queue. Events are stored as
+    // exact level time. We convert to wall-clock using the playback anchors,
+    // then push to CBF's queue. CBF's buildStepQueue places each input at
+    // the exact sub-step.
+    //
+    // HYBRID: Releases fire DIRECTLY (prevents hold bug from CBF's one-step
+    // delay). Presses go through CBF queue (sub-step accuracy).
+    void pushCBFInputs() {
         if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        // Compute elapsed time since playback started. Events are stored as
-        // absolute level time from RECORDING, so we offset by recordStartTime
-        // to get the relative time from recording start. This makes the first
-        // input fire immediately after playback starts (no dead time).
-        double elapsedSincePlaybackStart = targetLevel - playbackStartLevelTime;
-        double recordOffset = macro.recordStartTime;
+        auto pl = PlayLayer::get();
+        if (!pl) return;
 
-        injecting = true;
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
+
+        double currentWall = getWallTime();
+        double currentLevel = levelTime(pl);
+
+        // Look ahead by one frame so CBF can place inputs in sub-steps
+        double lookahead = 0.02;
+
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            // Event fires when: (event.time - recordStartTime) <= elapsedSincePlaybackStart
-            // i.e., the time from recording start to this event has elapsed since playback start
-            if (e.time - recordOffset > elapsedSincePlaybackStart) break;
 
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            // Convert exact level time to wall-clock time
+            double inputWallTime = playbackStartWallTime +
+                (e.time - playbackStartLevelTime) / speed;
+
+            // If beyond lookahead, stop — next frame will push it
+            if (inputWallTime > currentWall + lookahead) break;
+
+            // If past due, fire directly
+            if (inputWallTime < currentWall - 0.001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            // RELEASES: fire directly to prevent hold bug
+            // PRESSES: push to CBF queue for sub-step accuracy
+            if (!e.down) {
+                injecting = true;
+                pl->handleButton(false, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+            } else {
+                pl->m_queuedButtons.push_back({
+                    static_cast<PlayerButton>(e.button),
+                    e.down,
+                    e.player2,
+                    0,
+                    inputWallTime
+                });
+            }
+
             ++playbackIndex;
         }
-        injecting = false;
     }
 
     // ----- mode control ----------------------------------------------------
@@ -1364,7 +1398,7 @@ public:
         refreshUI();
     }
 
-          void startPlayback(GJBaseGameLayer* gl) {
+    void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1378,13 +1412,14 @@ public:
         warnIfWrongLevel();
         mode = bot::Mode::Playing;
 
-        // Capture playback start wall time. Events are stored as wall-clock
-        // from RECORDING. We offset by (playbackStart - recordStart) so
-        // events fire at the same relative wall-clock intervals.
+        // Capture wall-clock / level-time pair. Events are stored as exact
+        // level time. We convert to wall-clock for CBF's queue using:
+        //   inputWall = playbackStartWall + (inputLevel - playbackStartLevel) / speed
         playbackStartWallTime = getWallTime();
+        playbackStartLevelTime = levelTime(gl);
 
-        seekPlaybackTo(0.0);
-        applyHeldStateAt(gl, 0.0);
+        seekPlaybackTo(levelTime(gl));
+        applyHeldStateAt(gl, levelTime(gl));
         log::info("[Bot] Playback started {}", description());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
@@ -1503,8 +1538,12 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Store WALL-CLOCK time — same format CBF uses for its timestamps
-        double t = getWallTime();
+        // Store EXACT level time with full double precision (~15-17 significant
+        // digits). No rounding, no snapping. This captures the precise moment
+        // the input happened, like:
+        //   click:   5.120831899534820
+        //   release: 5.723490823094820
+        double t = levelTime(gl);
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);

@@ -100,7 +100,6 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
-
     // ---- playback (backstop, per frame) ----------------------------------
     //
     // In the rare case a CBF build does not route through processCommands every
@@ -133,10 +132,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
 
-    double getModifiedDelta(float dt) {
+       double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs
+        // Push to CBF queue BEFORE CBF's buildStepQueue runs
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.pushCBFInputs();
         }
