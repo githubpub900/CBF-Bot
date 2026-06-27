@@ -1293,6 +1293,29 @@ public:
         double scale = std::pow(10.0, std::min(bot::TEXT_TIME_DECIMALS, 15));
         return std::round(t * scale) / scale;
     }
+    
+    // Get wall-clock time in the same format CBF uses for its timestamps.
+    // This is critical — CBF compares m_timestamp against its own
+    // currentFrameTime, so we MUST use the same timer.
+    static double getWallTime() {
+        #if defined(GEODE_IS_WINDOWS)
+        static LARGE_INTEGER freq = [](){
+            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
+
+        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
+        // CBF uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW) on macOS/iOS
+        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
+
+        #else
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
+        #endif
+    }
 
 
     // Fire inputs due at a SPECIFIC level time (used for sub-step accuracy)
