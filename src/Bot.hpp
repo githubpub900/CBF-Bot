@@ -308,6 +308,23 @@ struct InputEvent {
     }
 };
 
+// ============================================================================
+//  PhysicsFrame  --  one snapshot of player position/velocity per physics step.
+// ============================================================================
+//
+//  Used by the physics bot mode. Records the exact player state at each
+//  physics step (240Hz with CBF). During playback, the player is teleported
+//  to the recorded position/velocity, giving perfect accuracy regardless of
+//  speed or timing.
+//
+struct PhysicsFrame {
+    double time = 0.0;       // level time
+    float  p1x = 0.f, p1y = 0.f;    // P1 position
+    double p1yVel = 0.0;            // P1 Y velocity
+    float  p2x = 0.f, p2y = 0.f;    // P2 position
+    double p2yVel = 0.0;            // P2 Y velocity
+};
+
 // Directly set m_toggled AND button visibility. No reliance on toggle(bool),
 // which doesn't work reliably on some Geode v5 builds. The binding shows
 // the field is `m_toggled` and the buttons are `m_onButton`/`m_offButton`.
@@ -1103,6 +1120,7 @@ struct CheckpointFrame {
 
 struct Macro {
     std::vector<InputEvent> events;
+    std::vector<PhysicsFrame> physicsFrames;  // for physics bot mode
     double recordStartTime = 0.0; // level time the recording was armed at
     double recordFps       = 240.0; // informational: physics fps used to record
     bool   normalized      = false; // were events shifted so the first is at 0?
@@ -1114,6 +1132,7 @@ struct Macro {
     void clear() {
         events.clear();
         recordStartTime = 0.0;
+        physicsFrames.clear();
         normalized = false;
         // levelID / levelName are intentionally preserved across a clear so that
         // re-recording on the same level keeps its identity.
@@ -1189,6 +1208,12 @@ public:
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
     bool      autoSaveOnComplete = true;
+
+    // ----- Physics bot mode -----
+    // When true, record/playback uses physics frames (position/velocity) instead
+    // of input events. Gives perfect accuracy at any speed. Enabled by default.
+    bool      physicsMode = true;
+    size_t    physicsPlaybackIndex = 0;
 
     // Held-button state, indexed [player2 ? 1 : 0][button]. Maintained
     // incrementally while recording so we can collapse redundant transitions in
@@ -1293,7 +1318,7 @@ public:
 
     // ----- mode control ----------------------------------------------------
 
-       void startRecording(GJBaseGameLayer* gl) {
+         void startRecording(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1305,9 +1330,12 @@ public:
         captureLevelInfo();
         checkpoints.clear();
         playbackIndex = 0;
+        physicsPlaybackIndex = 0;
         resetHeldState();
-        log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
-        notify("Recording started", NotificationIcon::Success);
+        log::info("[Bot] Recording armed at t={:.6f} ({} mode)",
+                  macro.recordStartTime, physicsMode ? "physics" : "input");
+        notify(physicsMode ? "Physics recording started" : "Recording started",
+               NotificationIcon::Success);
         refreshUI();
     }
 
@@ -1316,26 +1344,39 @@ public:
             notifyNoCBF();
             return;
         }
-        if (macro.empty()) {
-            notify("No macro to play", NotificationIcon::Warning);
-            return;
+        if (physicsMode) {
+            if (macro.physicsFrames.empty()) {
+                notify("No physics data to play", NotificationIcon::Warning);
+                return;
+            }
+            mode = bot::Mode::Playing;
+            seekPhysicsPlayback(levelTime(gl));
+            log::info("[Bot] Physics playback started ({} frames)",
+                      macro.physicsFrames.size());
+            notify("Physics playback started", NotificationIcon::Success);
+            refreshUI();
+        } else {
+            if (macro.empty()) {
+                notify("No macro to play", NotificationIcon::Warning);
+                return;
+            }
+            macro.sort();
+            validateAndRepair();
+            warnIfWrongLevel();
+            mode = bot::Mode::Playing;
+            seekPlaybackTo(levelTime(gl));
+            applyHeldStateAt(gl, levelTime(gl));
+            log::info("[Bot] Playback started {}", description());
+            notify("Playback started", NotificationIcon::Success);
+            refreshUI();
         }
-        macro.sort();
-        validateAndRepair();
-        warnIfWrongLevel();
-        mode = bot::Mode::Playing;
-        seekPlaybackTo(levelTime(gl));
-        applyHeldStateAt(gl, levelTime(gl));
-        log::info("[Bot] Playback started {}", description());
-        notify("Playback started", NotificationIcon::Success);
-        refreshUI();
     }
 
     void stop() {
-        // Make sure we leave no buttons stuck down.
         if (mode == bot::Mode::Playing) releaseAll();
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
+        physicsPlaybackIndex = 0;
         refreshUI();
     }
 
@@ -1568,22 +1609,63 @@ public:
         injecting = false;
     }
 
-    // Backstop: fire any inputs that are past due. Called from processCommands
-    // as a safety net in case PlayerObject::update didn't fire them.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
-        if (mode != bot::Mode::Playing) return;
-        if (!gl) return;
-        double now = levelTime(gl) + dt;
-        injecting = true;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
-            auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-            ++playbackIndex;
+    // ----- Physics bot: record and apply -----
+
+    // Record a physics frame. Called from processCommands AFTER the original
+    // runs (so position reflects the physics step that just happened).
+    void recordPhysicsFrame(double time) {
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+        PhysicsFrame f;
+        f.time = time;
+        if (pl->m_player1) {
+            f.p1x = pl->m_player1->getPositionX();
+            f.p1y = pl->m_player1->getPositionY();
+            f.p1yVel = pl->m_player1->m_yVelocity;
         }
-        injecting = false;
+        if (pl->m_player2) {
+            f.p2x = pl->m_player2->getPositionX();
+            f.p2y = pl->m_player2->getPositionY();
+            f.p2yVel = pl->m_player2->m_yVelocity;
+        }
+        macro.physicsFrames.push_back(f);
     }
-    
+
+    // Apply a physics frame. Called from processCommands BEFORE the original
+    // runs (so physics starts from the correct position).
+    void applyPhysicsFrame(double time) {
+        auto pl = PlayLayer::get();
+        if (!pl || macro.physicsFrames.empty()) return;
+
+        // Advance cursor to the closest frame at or before `time`
+        while (physicsPlaybackIndex + 1 < macro.physicsFrames.size() &&
+               macro.physicsFrames[physicsPlaybackIndex + 1].time <= time) {
+            ++physicsPlaybackIndex;
+        }
+
+        if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
+
+        auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
+        if (pl->m_player1) {
+            pl->m_player1->setPosition({frame.p1x, frame.p1y});
+            pl->m_player1->m_yVelocity = frame.p1yVel;
+        }
+        if (pl->m_player2) {
+            pl->m_player2->setPosition({frame.p2x, frame.p2y});
+            pl->m_player2->m_yVelocity = frame.p2yVel;
+        }
+    }
+
+    // Seek the physics playback cursor to the given time
+    void seekPhysicsPlayback(double time) {
+        physicsPlaybackIndex = 0;
+        while (physicsPlaybackIndex < macro.physicsFrames.size() &&
+               macro.physicsFrames[physicsPlaybackIndex].time < time) {
+            ++physicsPlaybackIndex;
+        }
+        if (physicsPlaybackIndex > 0) --physicsPlaybackIndex;
+    }
+
     // ----- checkpoints / practice fix / dead-input discard -----------------
 
     void onCheckpointStored(PlayLayer* pl, void* cpPtr) {
@@ -1622,46 +1704,32 @@ public:
         if (practiceFixEnabled) {
             frame->p1.apply(pl->m_player1);
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
-
-            // Release jump button after checkpoint load to prevent stuck inputs
-            pl->m_player1->releaseButton(PlayerButton::Jump);
-            if (pl->m_player2) pl->m_player2->releaseButton(PlayerButton::Jump);
         }
 
         if (mode == bot::Mode::Playing) {
-            seekPlaybackTo(frame->levelTime);
-            releaseAll();
-            applyHeldStateAt(pl, frame->levelTime);
-        } else if (mode == bot::Mode::Recording) {
-            // Sync heldState to actual player state after snapshot restore
-            resetHeldState();
-            if (pl->m_player1) {
-                for (auto const& [btn, held] : pl->m_player1->m_holdingButtons) {
-                    if (held && btn >= 1 && btn <= 3) heldState[0][btn] = true;
-                }
-            }
-            if (pl->m_player2) {
-                for (auto const& [btn, held] : pl->m_player2->m_holdingButtons) {
-                    if (held && btn >= 1 && btn <= 3) heldState[1][btn] = true;
-                }
+            if (physicsMode) {
+                seekPhysicsPlayback(frame->levelTime);
+            } else {
+                seekPlaybackTo(frame->levelTime);
+                releaseAll();
+                applyHeldStateAt(pl, frame->levelTime);
             }
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
-       void onRestart(PlayLayer* pl, bool fromStart) {
+    void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
-            // Full reset: release all buttons, cursor to start
             releaseAll();
             playbackIndex = 0;
+            physicsPlaybackIndex = 0;
             if (pl) {
                 seekPlaybackTo(0.0);
-                // Re-apply held state from the beginning of the macro
-                applyHeldStateAt(pl, 0.0);
+                seekPhysicsPlayback(0.0);
+                if (!physicsMode) applyHeldStateAt(pl, 0.0);
             }
-            log::info("[Bot] Playback reset on restart");
         } else if (mode == bot::Mode::Recording) {
             truncateAfter(0.0);
             recomputeHeldState();
@@ -1671,13 +1739,15 @@ public:
     }
 
     // Fresh level / resetLevel: reset transient state but keep the macro.
-        void onLevelReset(PlayLayer* pl) {
+    void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
+            physicsPlaybackIndex = 0;
             seekPlaybackTo(0.0);
-            if (pl) applyHeldStateAt(pl, 0.0);
+            seekPhysicsPlayback(0.0);
+            if (pl && !physicsMode) applyHeldStateAt(pl, 0.0);
         }
     }
 
@@ -1758,6 +1828,7 @@ public:
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
         m->setSavedValue<bool>("state-align", stateAlignEnabled);
+        m->setSavedValue<bool>("physics-mode", physicsMode);
     }
 
     void setSpeedFromString(std::string const& s) {
@@ -1921,6 +1992,96 @@ public:
         notify(fmt::format("Loaded {} inputs", macro.events.size()),
                NotificationIcon::Success);
         refreshUIProgress();
+        return true;
+    }
+
+        // ----- Physics macro file IO -----
+
+    std::filesystem::path physicsMacroPath(std::string const& name) const {
+        return Mod::get()->getSaveDir() / (sanitizeName(name) + ".gdpm");
+    }
+
+    bool savePhysicsMacro(std::string const& name) {
+        auto path = physicsMacroPath(name);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            notify("Could not open file for writing", NotificationIcon::Error);
+            return false;
+        }
+        auto wr = [&](void const* p, size_t n){
+            out.write(reinterpret_cast<char const*>(p), n);
+        };
+
+        uint32_t magic = 0x4D504447; // 'GDPM' little-endian
+        uint32_t version = 1;
+        uint32_t count = static_cast<uint32_t>(macro.physicsFrames.size());
+        int32_t levelID = macro.levelID;
+        std::string lname = macro.levelName.substr(0, 0xFFFF);
+        uint16_t nameLen = static_cast<uint16_t>(lname.size());
+
+        wr(&magic, 4); wr(&version, 4);
+        wr(&levelID, 4);
+        wr(&nameLen, 2);
+        if (nameLen) wr(lname.data(), nameLen);
+        wr(&count, 4);
+        for (auto const& f : macro.physicsFrames) {
+            wr(&f.time, 8);
+            wr(&f.p1x, 4); wr(&f.p1y, 4); wr(&f.p1yVel, 8);
+            wr(&f.p2x, 4); wr(&f.p2y, 4); wr(&f.p2yVel, 8);
+        }
+        out.close();
+        macroName = name;
+        log::info("[Bot] Saved {} physics frames to {}", count, path.string());
+        notify(fmt::format("Saved {} physics frames", count),
+               NotificationIcon::Success);
+        return true;
+    }
+
+    bool loadPhysicsMacro(std::string const& name) {
+        auto path = physicsMacroPath(name);
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            notify("Physics macro file not found", NotificationIcon::Error);
+            return false;
+        }
+        auto rd = [&](void* p, size_t n){
+            in.read(reinterpret_cast<char*>(p), n);
+        };
+
+        uint32_t magic = 0, version = 0, count = 0;
+        rd(&magic, 4); rd(&version, 4);
+        if (magic != 0x4D504447) {
+            notify("Not a valid physics macro file", NotificationIcon::Error);
+            return false;
+        }
+        macro.physicsFrames.clear();
+        int32_t levelID = 0;
+        uint16_t nameLen = 0;
+        rd(&levelID, 4);
+        rd(&nameLen, 2);
+        macro.levelID = levelID;
+        if (nameLen) {
+            std::string buf(nameLen, '\0');
+            rd(buf.data(), nameLen);
+            macro.levelName = buf;
+        }
+        rd(&count, 4);
+        macro.physicsFrames.reserve(count);
+        for (uint32_t i = 0; i < count && in; ++i) {
+            PhysicsFrame f;
+            rd(&f.time, 8);
+            rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
+            rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
+            macro.physicsFrames.push_back(f);
+        }
+        in.close();
+        macroName = name;
+        physicsPlaybackIndex = 0;
+        log::info("[Bot] Loaded {} physics frames from {}",
+                  macro.physicsFrames.size(), path.string());
+        notify(fmt::format("Loaded {} physics frames",
+                          macro.physicsFrames.size()),
+               NotificationIcon::Success);
         return true;
     }
 
@@ -2116,6 +2277,7 @@ protected:
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     CCMenuItemToggler*    m_stateAlignToggle = nullptr;
+    CCMenuItemToggler* m_physicsToggle = nullptr;
     bool                  m_visible      = false;
 
     // Drag state for the panel title bar.
@@ -2371,16 +2533,29 @@ public:
     }
 
     void refreshProgress() {
+        auto& bot = BotManager::get();
         if (m_progressLabel) {
-            auto& m = BotManager::get().macro;
-            m_progressLabel->setString(
-                fmt::format("{} inputs  |  {:.2f}s", m.size(), m.duration()).c_str());
+            if (bot.physicsMode) {
+                m_progressLabel->setString(
+                    fmt::format("{} frames  |  {:.2f}s",
+                        bot.macro.physicsFrames.size(),
+                        bot.macro.physicsFrames.empty() ? 0.0 :
+                        bot.macro.physicsFrames.back().time).c_str());
+            } else {
+                auto& m = bot.macro;
+                m_progressLabel->setString(
+                    fmt::format("{} inputs  |  {:.2f}s", m.size(), m.duration()).c_str());
+            }
         }
         if (m_statsLabel) {
-            auto s = BotManager::get().computeStats();
-            m_statsLabel->setString(
-                fmt::format("press {}  rel {}  p1 {}  p2 {}",
-                            s.presses, s.releases, s.p1, s.p2).c_str());
+            if (bot.physicsMode) {
+                m_statsLabel->setString("physics mode");
+            } else {
+                auto s = bot.computeStats();
+                m_statsLabel->setString(
+                    fmt::format("press {}  rel {}  p1 {}  p2 {}",
+                                s.presses, s.releases, s.p1, s.p2).c_str());
+            }
         }
     }
 
@@ -2395,6 +2570,7 @@ public:
         forceTogglerState(m_deadToggle,     bot.discardDeadInputs);
         forceTogglerState(m_autoSaveToggle, bot.autoSaveOnComplete);
         forceTogglerState(m_stateAlignToggle, bot.stateAlignEnabled);
+        forceTogglerState(m_physicsToggle, bot.physicsMode);
     }
 
     void syncModeToggles() {
@@ -2534,6 +2710,9 @@ private:
         m_stateAlignToggle = makeToggle(menu, { 200.f, yOpt2 },
             menu_selector(BotUILayer::onStateAlign), "State align",
             bot.stateAlignEnabled);
+        m_physicsToggle = makeToggle(menu, { 40.f, yOpt2 - 56.f },
+            menu_selector(BotUILayer::onPhysicsMode), "Physics bot",
+            bot.physicsMode);
 
         // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
@@ -2593,11 +2772,13 @@ private:
         // or toggle(bool) — set m_toggled + visibility directly.
         syncModeToggles();
         refreshProgress();
+        refreshAll();
     }
     void onPlay(CCObject*) {
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
         syncModeToggles();
         refreshProgress();
+        refreshAll();
     }
        // Each callback: activate() has ALREADY flipped the visual. We just flip
     // our bool to match and persist. We do NOT call toggle() here -- doing so
@@ -2608,11 +2789,13 @@ private:
         bot.speedhackEnabled = !bot.speedhackEnabled;
         bot.persist();
         bot.applyMusicSpeed();
+        refreshAll();
     }
     void onPracticeFix(CCObject*) {
         auto& bot = BotManager::get();
         bot.practiceFixEnabled = !bot.practiceFixEnabled;
         bot.persist();
+        refreshAll();
     }
     void onDeadInputs(CCObject*) {
         auto& bot = BotManager::get();
@@ -2623,17 +2806,29 @@ private:
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
         bot.persist();
+        refreshAll();
     }
     void onStateAlign(CCObject*) {
         auto& bot = BotManager::get();
         bot.stateAlignEnabled = !bot.stateAlignEnabled;
         bot.persist();
+        refreshAll();
+    }
+    void onPhysicsMode(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.physicsMode = !bot.physicsMode;
+        bot.persist();
+        refreshAll();
     }
     void onSave(CCObject*) {
-        BotManager::get().saveMacro(BotManager::get().macroName);
+        auto& bot = BotManager::get();
+        if (bot.physicsMode) bot.savePhysicsMacro(bot.macroName);
+        else bot.saveMacro(bot.macroName);
     }
     void onLoad(CCObject*) {
-        BotManager::get().loadMacro(BotManager::get().macroName);
+        auto& bot = BotManager::get();
+        if (bot.physicsMode) bot.loadPhysicsMacro(bot.macroName);
+        else bot.loadMacro(bot.macroName);
         refreshAll();
     }
     void onExport(CCObject*) {

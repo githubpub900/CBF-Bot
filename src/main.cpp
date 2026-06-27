@@ -100,13 +100,20 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // Capture step boundaries BEFORE the original advances m_levelTime.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.onPhysicsStepStart(BotManager::levelTime(this), dt);
+            if (bot.physicsMode) {
+                // Physics bot: apply frame BEFORE processCommands
+                bot.applyPhysicsFrame(BotManager::levelTime(this));
+            } else {
+                // Input bot: capture step start for sub-step interpolation
+                bot.onPhysicsStepStart(BotManager::levelTime(this), dt);
+            }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // NO backstop — PlayerObject::update handles all firing per sub-step.
-        // The backstop was firing everything at step END, causing "too early".
+        if (isPlay(this) && bot.mode == bot::Mode::Recording && bot.physicsMode) {
+            // Physics bot: record frame AFTER processCommands
+            bot.recordPhysicsFrame(BotManager::levelTime(this));
+        }
     }
     // ---- frame-rate independent speedhack --------------------------------
     //
@@ -212,18 +219,15 @@ class $modify(BotPlayLayer, PlayLayer) {
 //
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        // Run AFTER CBF. CBF splits the step into sub-steps, then calls
-        // PlayerObject::update(subDt) for each sub-step. With this priority,
-        // our hook is called PER SUB-STEP with the sub-step delta.
         (void) self.setHookPriority("PlayerObject::update", 1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+        // Only use sub-step firing for input bot mode (not physics mode)
+        if (!bot.physicsMode && bot.mode == bot::Mode::Playing &&
+            this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // dt is now the SUB-STEP delta (CBF already split the step).
-            // Fire inputs at the exact sub-step level time.
             bot.fireDueInputsSubStep(this->m_gameLayer, dt);
         }
         PlayerObject::update(dt);
@@ -348,6 +352,7 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", true);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
     bot.stateAlignEnabled  = Mod::get()->getSavedValue<bool>("state-align", false);
+    bot.physicsMode = Mod::get()->getSavedValue<bool>("physics-mode", true);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
