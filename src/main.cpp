@@ -110,14 +110,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // step, this per-frame backstop guarantees forward progress. The playback
     // cursor is monotonic, so an input can never be fired twice.
 
-       void update(float dt) {
-        // Capture frame-start level time ONCE per frame, BEFORE processCommands
-        // advances m_levelTime. This is the anchor for sub-step accumulation.
-        if (isPlay(this)) {
-            auto& bot = BotManager::get();
-            bot.m_frameStartLevel = BotManager::levelTime(this);
-            bot.m_subStepAccumulated = 0.0;
-        }
+    void update(float dt) {
         if (isPlay(this) && BotManager::get().guiPaused) {
             return;
         }

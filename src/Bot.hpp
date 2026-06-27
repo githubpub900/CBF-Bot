@@ -1295,7 +1295,6 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         resetHeldState();
-        m_lastRecordTime = macro.recordStartTime;
         log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
@@ -1444,62 +1443,13 @@ public:
         refreshUIProgress();
     }
 
-    // Called every frame while recording. If the level clock has gone backwards
-    // since last frame, the player restarted / respawned / loaded a checkpoint, so
-    // every input recorded *after* the new current time belongs to a dead attempt
-    // and is discarded. Restarting from the very start therefore overwrites the
-    // whole macro rather than appending a second attempt's clicks to it.
-    void syncRecordingToTime(GJBaseGameLayer* gl) {
+      void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
         double t = levelTime(gl);
-        if (discardDeadInputs && t < m_lastRecordTime - 1e-4) {
+        if (discardDeadInputs && t < macro.recordStartTime - 1e-4) {
             truncateAfter(t);
             recomputeHeldState();
-
-            // CRITICAL FIX: After truncating, the player might still be
-            // physically holding buttons (e.g., placed a checkpoint while
-            // holding jump, then died). GD won't re-fire handleButton for
-            // buttons that are already down, so the press event is missing
-            // from the macro. We need to record synthetic press events for
-            // any buttons the player is currently holding but that aren't
-            // in heldState.
-            if (auto pl = PlayLayer::get()) {
-                double pressTime = t;
-
-                // RobTop's CBS snap (if applicable)
-                if (cbfState() == bot::CBFState::RobTop) {
-                    pressTime = quantizeRobTop(pressTime);
-                }
-
-                // Check P1
-                if (pl->m_player1) {
-                    for (auto const& [btn, held] : pl->m_player1->m_holdingButtons) {
-                        if (held && btn >= 1 && btn <= 3 && !heldState[0][btn]) {
-                            // Player is holding this button but our macro
-                            // doesn't have a press for it. Record one now.
-                            heldState[0][btn] = true;
-                            macro.events.emplace_back(pressTime,
-                                static_cast<uint8_t>(btn), true, false);
-                            log::debug("[Bot] Synthetic press recorded after "
-                                       "checkpoint: btn={} at t={:.6f}", btn, pressTime);
-                        }
-                    }
-                }
-                // Check P2
-                if (pl->m_player2) {
-                    for (auto const& [btn, held] : pl->m_player2->m_holdingButtons) {
-                        if (held && btn >= 1 && btn <= 3 && !heldState[1][btn]) {
-                            heldState[1][btn] = true;
-                            macro.events.emplace_back(pressTime,
-                                static_cast<uint8_t>(btn), true, true);
-                            log::debug("[Bot] Synthetic P2 press recorded after "
-                                       "checkpoint: btn={} at t={:.6f}", btn, pressTime);
-                        }
-                    }
-                }
-            }
         }
-        m_lastRecordTime = t;
     }
 
     // Drop every recorded event whose timestamp is strictly after `t`.
@@ -1535,14 +1485,10 @@ public:
     // point is honoured instead of silently dropped.
     void applyHeldStateAt(GJBaseGameLayer* gl, double time) {
         if (!gl) return;
-        double offset = playbackStartWallTime - recordStartWallTime;
-        double currentWall = getWallTime();
-
         std::array<std::array<int, 4>, 2> last{};
         for (auto& row : last) row.fill(0);
         for (auto const& e : macro.events) {
-            double dueWallTime = e.time + offset;
-            if (dueWallTime > currentWall) break;
+            if (e.time >= time) break;
             int pi = e.player2 ? 1 : 0;
             if (e.button >= 1 && e.button <= 3) last[pi][e.button] = e.down ? 1 : -1;
         }
