@@ -130,23 +130,23 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // by m_gameState.m_levelTime (which advances by this very delta) and not by
     // the render frame-rate, you can crank the speed arbitrarily high without the
     // bot desyncing or "lagging behind" -- the clock and the inputs scale together.
-    double getModifiedDelta(float dt) {
+       double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
 
-        // Only apply m_timeWarp when player is alive and gameplay is active.
-        // During death/respawn, reset to 1.0 so the respawn timer runs at
-        // normal speed (not slowed down by speedhack).
         auto pl = PlayLayer::get();
         bool playerDead = pl && pl->m_player1 && pl->m_player1->m_isDead;
-        
+
+        // ALWAYS set m_timeWarp based on CURRENT speedhack setting.
+        // This ensures playback runs at the current speed, not the
+        // recording speed. When speedhack is off, m_timeWarp = 1.0
+        // regardless of what was used during recording.
         if (isPlay(this) && bot.speedhackEnabled && !playerDead) {
             this->m_gameState.m_timeWarp = static_cast<float>(bot.speedMultiplier());
         } else if (isPlay(this)) {
             this->m_gameState.m_timeWarp = 1.0f;
         }
 
-        // Push inputs to CBF queue
         if (isPlay(this) && bot.mode == bot::Mode::Playing && !playerDead) {
             bot.pushDueInputsToCBF();
         }

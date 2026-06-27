@@ -318,8 +318,7 @@ struct InputEvent {
 //  speed or timing.
 //
 struct PhysicsFrame {
-    double wallTime = 0.0;   // WALL-CLOCK time (real time, not level time)
-    double levelTime = 0.0;  // level time (for reference/checkpoints)
+    double time = 0.0;  // LEVEL TIME
     float  p1x = 0.f, p1y = 0.f;
     double p1yVel = 0.0;
     float  p2x = 0.f, p2y = 0.f;
@@ -1676,32 +1675,23 @@ public:
 
     // Apply a physics frame. Called from processCommands BEFORE the original
     // runs (so physics starts from the correct position).
-    void applyPhysicsFrame(double currentLevelTime) {
+        void applyPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
-        // Compute current wall-clock time relative to playback start
-        double currentWall = getWallTime();
-        double playbackWallOffset = currentWall - playbackStartWallTime;
-        double recordWallOffset = macro.physicsFrames.front().wallTime - recordStartWallTime;
-        
-        // The target wall time in the recording's frame of reference
-        double targetWall = playbackWallOffset + macro.physicsFrames.front().wallTime;
+        double firstFrameTime = macro.physicsFrames.front().time;
+        if (time < firstFrameTime) return;
 
-        // Don't apply before the first frame
-        if (targetWall < macro.physicsFrames.front().wallTime) return;
-
-        // If past the last frame, stop
-        if (targetWall > macro.physicsFrames.back().wallTime) {
+        double lastFrameTime = macro.physicsFrames.back().time;
+        if (time > lastFrameTime) {
             physicsPlaybackIndex = macro.physicsFrames.size();
             return;
         }
 
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
-        // Advance cursor
         while (physicsPlaybackIndex + 1 < macro.physicsFrames.size() &&
-               macro.physicsFrames[physicsPlaybackIndex + 1].wallTime <= targetWall) {
+               macro.physicsFrames[physicsPlaybackIndex + 1].time <= time) {
             ++physicsPlaybackIndex;
         }
 
