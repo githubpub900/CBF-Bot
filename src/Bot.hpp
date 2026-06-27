@@ -1300,7 +1300,7 @@ public:
         refreshUI();
     }
 
-     void startPlayback(GJBaseGameLayer* gl) {
+    void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1422,7 +1422,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-      void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1433,9 +1433,8 @@ public:
         if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
-        // Store EXACT level time — full double precision, no rounding.
-        // CBF keeps m_levelTime sub-step accurate, so this captures the
-        // precise moment of the click.
+        // Full double precision — ~17 significant digits.
+        // A timestamp like 5.120831899534820 is stored exactly.
         double t = levelTime(gl);
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
@@ -1503,25 +1502,38 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-       // Fire inputs directly via handleButton. Called from PlayerObject::update
-    // (which CBF splits into sub-steps) and processCommands (backstop).
-    // Uses level time — deterministic, no wall-clock conversion.
-    //
-    // CBF maintains ~240Hz step rate regardless of speedhack, so each step
-    // covers ~4ms of level time. This gives ~4ms accuracy at ANY speed.
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    // Called from processCommands — captures the step's level time range
+    // BEFORE m_levelTime advances. This lets us compute sub-step level times.
+    void onStepStart(GJBaseGameLayer* gl, float stepDelta) {
+        if (mode != bot::Mode::Playing) return;
+        m_stepStartLevel = levelTime(gl);
+        m_subStepAccumulated = 0.0;
+        m_firstSubStep = true;
+    }
+
+    // Called from PlayerObject::update — fires inputs at the exact sub-step.
+    // dt is the SUB-STEP delta. We accumulate it to compute the sub-step's
+    // level time: subStepLevel = m_stepStartLevel + accumulated.
+    void fireDueInputsSubStep(GJBaseGameLayer* gl, float dt) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
 
-        double now = levelTime(gl) + dt;
+        // Accumulate the sub-step delta
+        m_subStepAccumulated += dt;
+        
+        // Compute the exact sub-step level time
+        double subStepLevel = m_stepStartLevel + m_subStepAccumulated;
+        
         injecting = true;
         while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].time <= now) {
+               macro.events[playbackIndex].time <= subStepLevel) {
             auto const& e = macro.events[playbackIndex];
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
         injecting = false;
+        
+        m_firstSubStep = false;
     }
     
     // Force-release every button (used when stopping playback abruptly).

@@ -99,8 +99,9 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        // Capture step start BEFORE m_levelTime advances
         if (isPlay(this) && BotManager::get().mode == bot::Mode::Playing) {
-            BotManager::get().fireDueInputs(this, dt);
+            BotManager::get().onStepStart(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
     }
@@ -224,6 +225,7 @@ class $modify(BotPlayLayer, PlayLayer) {
 //  point) but fire our inputs directly via handleButton, bypassing CBF's
 //  queue entirely.
 //
+
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
         // VeryEarly = run BEFORE CBF's hook
@@ -234,10 +236,9 @@ class $modify(BotPlayerObject, PlayerObject) {
         auto& bot = BotManager::get();
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // Fire inputs due at the current level time.
-            // dt = the step delta (level time). We don't need to look ahead
-            // because m_levelTime has already been advanced by processCommands.
-            bot.fireDueInputs(this->m_gameLayer, 0.0f);
+            // dt is the sub-step delta. Fire inputs at the exact sub-step
+            // level time (m_stepStartLevel + accumulated).
+            bot.fireDueInputsSubStep(this->m_gameLayer, dt);
         }
         PlayerObject::update(dt);
     }
