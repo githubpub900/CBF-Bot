@@ -101,16 +101,12 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         // Capture step boundaries BEFORE the original advances m_levelTime.
-        // This lets us interpolate within the step during sub-steps.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.onPhysicsStepStart(BotManager::levelTime(this), dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // After this, m_levelTime = stepStart + dt (step END)
-        // Backstop: fire any inputs that should have fired this step
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.fireDueInputs(this, 0.0f);
-        }
+        // NO backstop — PlayerObject::update handles all firing per sub-step.
+        // The backstop was firing everything at step END, causing "too early".
     }
     // ---- frame-rate independent speedhack --------------------------------
     //
@@ -216,16 +212,18 @@ class $modify(BotPlayLayer, PlayLayer) {
 //
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        // VeryEarly = run BEFORE CBF's hook
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
+        // Run AFTER CBF. CBF splits the step into sub-steps, then calls
+        // PlayerObject::update(subDt) for each sub-step. With this priority,
+        // our hook is called PER SUB-STEP with the sub-step delta.
+        (void) self.setHookPriority("PlayerObject::update", 1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Only fire from P1's update (P2 runs in parallel, same sub-steps)
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // dt = sub-step delta. Fire inputs at the exact sub-step level time.
+            // dt is now the SUB-STEP delta (CBF already split the step).
+            // Fire inputs at the exact sub-step level time.
             bot.fireDueInputsSubStep(this->m_gameLayer, dt);
         }
         PlayerObject::update(dt);
