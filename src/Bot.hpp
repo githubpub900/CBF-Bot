@@ -1175,14 +1175,6 @@ public:
 
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
-
-    // ----- CBF queue playback anchors (for accurate input firing) -----
-    double playbackStartWallTime = 0.0;
-    double playbackStartLevelTime = 0.0;
-
-    // Frame-start wall time (captured in CCScheduler::update)
-    double m_frameStartWall = 0.0;
-    double m_prevFrameDelta = 0.0;
     double m_lastRecordTime = 0.0;
 
     // Set true while we are injecting our own inputs, so the handleButton hook
@@ -1302,23 +1294,6 @@ public:
     // Read the authoritative, frame-rate independent level clock.
     static double levelTime(GJBaseGameLayer* gl) {
         return gl ? gl->m_gameState.m_levelTime : 0.0;
-    }
-
-    static double getWallTime() {
-        #if defined(GEODE_IS_WINDOWS)
-        static LARGE_INTEGER freq = [](){
-            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
-        }();
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-        #else
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
-        #endif
     }
 
     // Round a timestamp the way a text export wants it: clamp to a sane number
@@ -1483,21 +1458,31 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
 
+        // Don't record during death animation (prevents stale inputs)
+        auto pl = PlayLayer::get();
+        if (pl) {
+            if (pl->m_player1 && pl->m_player1->m_isDead) return;
+            if (pl->m_player2 && pl->m_player2->m_isDead) return;
+        }
+
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
 
-        if (heldState[pi][button] == down) return;
+        // Update held state
         heldState[pi][button] = down;
 
-        // Store EXACT level time — full double precision (~17 significant digits).
-        // CBF keeps m_levelTime sub-step accurate during recording, so this
-        // captures the precise moment of the click.
+        // Store exact level time
         double t = levelTime(gl);
+
+        // Don't record if time went backwards (checkpoint load/death respawn)
+        if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
+            return;
+        }
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
@@ -1574,59 +1559,22 @@ public:
 
     // ----- playback --------------------------------------------------------
 
-    // Push due inputs to CBF's m_queuedButtons queue. Uses frame-start
-    // anchors for timestamp alignment. CBF's buildStepQueue places each
-    // input at the exact sub-step.
-    // Any drift from the CBF queue's one-step delay is corrected by the
-    // physics frame applied in processCommands.
-    void pushDueInputsToCBF() {
+    // Fire inputs directly via handleButton. Called from processCommands.
+    // Uses levelTime + dt to look ahead by one physics step — deterministic,
+    // never drops inputs. This is the version that worked well for input
+    // playback. The physics frame (applied before this) corrects any drift.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
-
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-        double frameLevel = levelTime(pl);
-        double frameLevelAdvance = m_prevFrameDelta * speed;
-
-        double safetyMargin = m_prevFrameDelta * 0.02;
-        double safeLow  = lastFrameTime + safetyMargin;
-        double safeHigh = currentFrameTime - safetyMargin;
-
-        while (playbackIndex < macro.events.size()) {
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
-
-            double levelDelta = e.time - frameLevel;
-
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            double inputWallTime = lastFrameTime + levelDelta / speed;
-            if (inputWallTime < safeLow)  inputWallTime = safeLow;
-            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
+        injecting = false;
     }
 
     // Force-release every button (used when stopping playback abruptly).
@@ -1648,7 +1596,16 @@ public:
     void recordPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl) return;
-        if (pl->m_player1 && pl->m_player1->m_isDead) return;  // Don't record during death
+        // Don't record if player is dead — prevents stale frames during
+        // death animation from accumulating
+        if (pl->m_player1 && pl->m_player1->m_isDead) return;
+        if (pl->m_player2 && pl->m_player2->m_isDead) return;
+        
+        // Don't record if time went backwards (checkpoint load/death respawn)
+        if (!macro.physicsFrames.empty() && 
+            time < macro.physicsFrames.back().time - 0.001) {
+            return;
+        }
         PhysicsFrame f;
         f.time = time;
         if (pl->m_player1) {

@@ -42,24 +42,9 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
 
-// HAHA THE CC SCHEDULAR HOOK IS BACCKK IT ALWAYS RETURNS
-class $modify(BotCCScheduler, CCScheduler) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("CCScheduler::update", 1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
-            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
-        bot.m_frameStartWall = BotManager::getWallTime();
-        CCScheduler::update(dt);
-    }
-};
 
 // ============================================================================
 //  Small helpers
@@ -112,17 +97,15 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+      void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply physics frame BEFORE processCommands (corrects any drift
-            // from the CBF queue's input timing)
+            // Apply physics frame + fire inputs BEFORE processCommands
             bot.applyPhysicsFrame(BotManager::levelTime(this));
+            bot.fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
-            // Record physics frame AFTER processCommands (captures the state
-            // resulting from this physics step)
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
     }
@@ -136,10 +119,6 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        // Push inputs to CBF queue BEFORE CBF's buildStepQueue runs
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushDueInputsToCBF();
-        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
