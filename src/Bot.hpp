@@ -1648,6 +1648,7 @@ public:
     void recordPhysicsFrame(double time) {
         auto pl = PlayLayer::get();
         if (!pl) return;
+        if (pl->m_player1 && pl->m_player1->m_isDead) return;  // Don't record during death
         PhysicsFrame f;
         f.time = time;
         if (pl->m_player1) {
