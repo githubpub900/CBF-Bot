@@ -1512,15 +1512,11 @@ public:
         refreshUIProgress();
     }
 
-        InputEvent e(t, static_cast<uint8_t>(button), down, player2);
-        macro.events.emplace_back(e);
-        refreshUIProgress();
-    }
-
     void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
         m_lastRecordTime = levelTime(gl);
     }
+
 
     // Drop every recorded event whose timestamp is strictly after `t`.
     void truncateAfter(double t) {
