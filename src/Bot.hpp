@@ -2075,14 +2075,14 @@ public:
         };
 
         uint32_t magic = 0x4D504447; // 'GDPM'
-        uint32_t version = 2;        // v2: includes inputs
+        uint32_t version = 3;  // v3: wallTime + levelTime
         uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
         uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
         std::string lname = macro.levelName.substr(0, 0xFFFF);
         uint16_t nameLen = static_cast<uint16_t>(lname.size());
 
-        wr(&magic, 4); wr(&version, 4);
+        wr(&magic, 4); wr(&version, 3);
         wr(&levelID, 4);
         wr(&nameLen, 2);
         if (nameLen) wr(lname.data(), nameLen);
@@ -2091,7 +2091,8 @@ public:
 
         // Write physics frames
         for (auto const& f : macro.physicsFrames) {
-            wr(&f.time, 8);
+            wr(&f.wallTime, 8);
+            wr(&f.levelTime, 8);
             wr(&f.p1x, 4); wr(&f.p1y, 4); wr(&f.p1yVel, 8);
             wr(&f.p2x, 4); wr(&f.p2y, 4); wr(&f.p2yVel, 8);
         }
@@ -2152,7 +2153,14 @@ public:
         macro.physicsFrames.reserve(frameCount);
         for (uint32_t i = 0; i < frameCount && in; ++i) {
             PhysicsFrame f;
-            rd(&f.time, 8);
+            if (version >= 3) {
+                rd(&f.wallTime, 8);
+                rd(&f.levelTime, 8);
+            } else {
+                // v2 backwards compatibility: old format only had one time field
+                rd(&f.levelTime, 8);
+                f.wallTime = f.levelTime;
+            }
             rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
             rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
             macro.physicsFrames.push_back(f);
@@ -2632,29 +2640,18 @@ public:
     }
 
     void refreshProgress() {
-        auto& bot = BotManager::get();
         if (m_progressLabel) {
-            if (bot.physicsMode) {
-                m_progressLabel->setString(
-                    fmt::format("{} frames  |  {:.2f}s",
-                        bot.macro.physicsFrames.size(),
-                        bot.macro.physicsFrames.empty() ? 0.0 :
-                        bot.macro.physicsFrames.back().time).c_str());
-            } else {
-                auto& m = bot.macro;
-                m_progressLabel->setString(
-                    fmt::format("{} inputs  |  {:.2f}s", m.size(), m.duration()).c_str());
-            }
+            m_progressLabel->setString(
+                fmt::format("{} frames  |  {:.2f}s",
+                    BotManager::get().macro.physicsFrames.size(),
+                    BotManager::get().macro.physicsFrames.empty() ? 0.0 :
+                    BotManager::get().macro.physicsFrames.back().levelTime).c_str());
         }
         if (m_statsLabel) {
-            if (bot.physicsMode) {
-                m_statsLabel->setString("physics mode");
-            } else {
-                auto s = bot.computeStats();
-                m_statsLabel->setString(
-                    fmt::format("press {}  rel {}  p1 {}  p2 {}",
-                                s.presses, s.releases, s.p1, s.p2).c_str());
-            }
+            auto s = BotManager::get().computeStats();
+            m_statsLabel->setString(
+                fmt::format("press {}  rel {}  p1 {}  p2 {}",
+                            s.presses, s.releases, s.p1, s.p2).c_str());
         }
     }
 
