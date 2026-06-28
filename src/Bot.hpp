@@ -338,8 +338,8 @@ static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     // m_offButton holds the CHECKED sprite — the opposite of what the names
     // imply. GD's own toggle(bool) uses setVisible(!toggled) / setVisible(toggled)
     // respectively. We mirror that exactly.
-    if (t->m_onButton)  t->m_onButton->setVisible(!on);
-    if (t->m_offButton) t->m_offButton->setVisible(on);
+    if (t->m_onButton)  t->m_onButton->setVisible(on);
+    if (t->m_offButton) t->m_offButton->setVisible(!on);
 }
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
@@ -1735,10 +1735,13 @@ public:
         injecting = false;
     }
 
-    // Seek the physics playback cursor to the given time
-    void seekPhysicsPlayback(double levelTime) {
+    // Seek the physics playback cursor to the first frame at or after `time`.
+    void seekPhysicsPlayback(double time) {
         physicsPlaybackIndex = 0;
-        // Don't seek based on level time anymore — we use wall time
+        while (physicsPlaybackIndex < macro.physicsFrames.size() &&
+               macro.physicsFrames[physicsPlaybackIndex].time < time) {
+            ++physicsPlaybackIndex;
+        }
     }
 
     // ----- checkpoints / practice fix / dead-input discard -----------------
@@ -2873,34 +2876,35 @@ private:
     // ----- button callbacks -----------------------------------------------
     void onRecord(CCObject*) {
         BotManager::get().toggleRecording(GJBaseGameLayer::get());
-        // Force the visual to match the actual mode. Don't rely on activate()
-        // or toggle(bool) — set m_toggled + visibility directly.
-        syncModeToggles();
         refreshProgress();
-        refreshAll();
+        // Defer the visual correction to the next scheduler tick.
+        // activate() calls us BEFORE flipping its own visual, so any
+        // syncModeToggles() we call here gets overwritten the moment our
+        // callback returns. scheduleOnce(0) runs after activate() is done.
+        this->scheduleOnce([this](float) { syncModeToggles(); }, 0.f, "syncRec");
     }
     void onPlay(CCObject*) {
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
-        syncModeToggles();
         refreshProgress();
-        refreshAll();
+        this->scheduleOnce([this](float) { syncModeToggles(); }, 0.f, "syncPlay");
     }
        // Each callback: activate() has ALREADY flipped the visual. We just flip
     // our bool to match and persist. We do NOT call toggle() here -- doing so
     // can double-flip on some Geode versions where toggle() doesn't have an
     // early-return guard. syncToggles() on next panel open will fix any drift.
-    void onSpeedToggle(CCObject*) {
+   void onSpeedToggle(CCObject*) {
         auto& bot = BotManager::get();
         bot.speedhackEnabled = !bot.speedhackEnabled;
         bot.persist();
         bot.applyMusicSpeed();
-        refreshAll();
+        // No refreshAll() — activate() flips the visual correctly after this
+        // callback returns. Calling syncToggles() here would be undone by
+        // activate()'s own flip the moment our callback exits.
     }
     void onPracticeFix(CCObject*) {
         auto& bot = BotManager::get();
         bot.practiceFixEnabled = !bot.practiceFixEnabled;
         bot.persist();
-        refreshAll();
     }
     void onDeadInputs(CCObject*) {
         auto& bot = BotManager::get();
@@ -2911,7 +2915,6 @@ private:
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
         bot.persist();
-        refreshAll();
     }
     void onSave(CCObject*) {
         auto& bot = BotManager::get();

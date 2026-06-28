@@ -129,12 +129,23 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // continuous collision detection and causes the engine to register deaths
     // whenever consecutive recorded positions straddle a hazard. Pure input
     // replay lets physics (and collision) run naturally from replayed button state.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+   void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.fireDueInputs(this, dt);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            // Apply position/velocity correction AFTER the physics step, never before.
+            // Applying it before means the step starts from a teleported position —
+            // GD's collision sweep then detects the gap between consecutive recorded
+            // frames as a hazard crossing and kills the player. Applying it only after
+            // lets physics (and collision) run naturally from wherever the player is,
+            // then snaps position onto the recorded path as the starting point for the
+            // next step. Since consecutive recorded frames were from a clean run,
+            // the snap is always to a safe position.
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
+        }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
