@@ -125,31 +125,24 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-    //
-    // We fire inputs BEFORE the original so CBF sees them during this sub-step.
-    // We do NOT teleport the player — position teleportation fights GD's own
-    // continuous collision detection and causes the engine to register deaths
-    // whenever consecutive recorded positions straddle a hazard. Pure input
-    // replay lets physics (and collision) run naturally from replayed button state.
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+      void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         // Increment the simulation tick FIRST. Every processCommands call
-        // is one deterministic physics step. This tick is the SOLE source
-        // of truth for input timing — no level time, no wall-clock, no dt.
+        // is one deterministic physics step.
         if (isPlay(this)) {
             bot.simulationTick++;
         }
         // Replay inputs scheduled for this tick BEFORE the physics step.
-        // Integer comparison: if event.tick == simulationTick, fire it.
-        // This is perfectly deterministic — the same tick always fires
-        // the same inputs, regardless of frame timing or speedhack.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.replayInputsForTick(bot.simulationTick);
         }
-        // Run the physics step. CBF's sub-step processing happens inside
-        // here — any handleButton calls from CBF will record with the
-        // current simulationTick (already incremented above).
+        // Run the physics step.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        // Apply physics frame AFTER the step (corrects position drift).
+        // This is what was missing — physics frames weren't being applied.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
+        }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
