@@ -43,6 +43,7 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
+#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -92,18 +93,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
     }
 
-    // ---- input capture (recording) ---------------------------------------
+   // ---- input capture (recording) ---------------------------------------
     void handleButton(bool down, int button, bool isPlayer1) {
-        auto& bot = BotManager::get();
-
-        // Record the *transition* (press/release) tagged with the current level
-        // time. We deliberately do this before calling the original so the
-        // timestamp matches the exact moment the engine is about to react to the
-        // input -- and we skip anything we injected ourselves during playback.
-        if (!bot.injecting && isPlay(this)) {
-            bot.recordInput(this, down, button, isPlayer1);
-        }
-
+        // We no longer record here because UI-level clicks lack CBF sub-frame timestamps.
+        // Recording is now handled with perfect sub-frame accuracy in the PlayerObject hooks below.
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
     
@@ -340,6 +333,43 @@ class $modify(BotMenuLayer, MenuLayer) {
             }
         }
         return true;
+    }
+};
+
+// ============================================================================
+//  Ultra-Accurate Physics-Level Recording Hooks (CBF Compatible)
+// ============================================================================
+
+class $modify(BotPlayerObject, PlayerObject) {
+    void pushButton(PlayerButton button) {
+        // 1. Let the original physics engine/CBF process the jump first
+        PlayerObject::pushButton(button);
+        
+        auto& bot = BotManager::get();
+        // 2. Catch the input at the exact micro-tick processed by the physics loop
+        if (bot.mode == bot::Mode::Recording && !bot.injecting) {
+            if (auto pl = PlayLayer::get()) {
+                // Determine if this specific player object is Player 1 or Player 2
+                bool isPlayer1 = (this == pl->m_player1);
+                
+                // Pass it to your existing recording system
+                bot.recordInput(pl, true, static_cast<int>(button), isPlayer1);
+            }
+        }
+    }
+
+    void releaseButton(PlayerButton button) {
+        // 1. Let the engine process the release first
+        PlayerObject::releaseButton(button);
+        
+        auto& bot = BotManager::get();
+        // 2. Catch the release at the exact micro-tick
+        if (bot.mode == bot::Mode::Recording && !bot.injecting) {
+            if (auto pl = PlayLayer::get()) {
+                bool isPlayer1 = (this == pl->m_player1);
+                bot.recordInput(pl, false, static_cast<int>(button), isPlayer1);
+            }
+        }
     }
 };
 
