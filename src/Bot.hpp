@@ -1694,7 +1694,18 @@ public:
             }
 
             // Convert level time to wall-clock within CBF's frame window
-            double inputWallTime = lastFrameTime + levelDelta / speed;
+            // Compensate for step-end delay: m_levelTime is at step-END when
+            // handleButton fires during recording, but the input actually
+            // fired mid-step. Subtract one physics step (~1/240s) to shift
+            // the timestamp back to when the input actually happened.
+            //
+            // Without this, every input is delayed by ~1 step (~4ms).
+            double stepDelta = 1.0 / 240.0;  // GD physics rate
+            double adjustedLevelDelta = levelDelta - stepDelta;
+            if (adjustedLevelDelta < 0) adjustedLevelDelta = 0;
+
+            // Convert to wall-clock
+            double inputWallTime = lastFrameTime + adjustedLevelDelta / speed;
             if (inputWallTime < safeLow)  inputWallTime = safeLow;
             if (inputWallTime > safeHigh) inputWallTime = safeHigh;
 
