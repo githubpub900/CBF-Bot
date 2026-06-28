@@ -334,10 +334,10 @@ struct PhysicsFrame {
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
     t->m_toggled = on;
-    // GD's CCMenuItemToggler::toggle(bool) uses:
-    //   m_onButton->setVisible(!toggled)   <- the UNCHECKED / "click to enable" sprite
-    //   m_offButton->setVisible(toggled)   <- the CHECKED  / "click to disable" sprite
-    // We mirror that exactly so our forced state always matches GD's own visual logic.
+    // In GD's CCMenuItemToggler, m_onButton holds the UNCHECKED sprite and
+    // m_offButton holds the CHECKED sprite — the opposite of what the names
+    // imply. GD's own toggle(bool) uses setVisible(!toggled) / setVisible(toggled)
+    // respectively. We mirror that exactly.
     if (t->m_onButton)  t->m_onButton->setVisible(!on);
     if (t->m_offButton) t->m_offButton->setVisible(on);
 }
@@ -2091,7 +2091,7 @@ public:
         std::string lname = macro.levelName.substr(0, 0xFFFF);
         uint16_t nameLen = static_cast<uint16_t>(lname.size());
 
-        wr(&magic, 4); wr(&version, 3);
+        wr(&magic, 4); wr(&version, 4);
         wr(&levelID, 4);
         wr(&nameLen, 2);
         if (nameLen) wr(lname.data(), nameLen);
@@ -2171,25 +2171,30 @@ public:
             rd(&f.time, 8);
             rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
             rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
+            uint8_t held = 0;
+            rd(&held, 1);
+            f.p1Jump  = (held & 1)  != 0;
+            f.p1Left  = (held & 2)  != 0;
+            f.p1Right = (held & 4)  != 0;
+            f.p2Jump  = (held & 8)  != 0;
+            f.p2Left  = (held & 16) != 0;
+            f.p2Right = (held & 32) != 0;
             macro.physicsFrames.push_back(f);
         }
 
         // Read input events (v2+)
-        macro.events.reserve(inputCount);
-        for (uint32_t i = 0; i < frameCount && in; ++i) {
-            PhysicsFrame f;
-            rd(&f.time, 8);
-            rd(&f.p1x, 4); rd(&f.p1y, 4); rd(&f.p1yVel, 8);
-            rd(&f.p2x, 4); rd(&f.p2y, 4); rd(&f.p2yVel, 8);
-            uint8_t held = 0;
-            rd(&held, 1);
-            f.p1Jump  = (held & 1) != 0;
-            f.p1Left  = (held & 2) != 0;
-            f.p1Right = (held & 4) != 0;
-            f.p2Jump  = (held & 8) != 0;
-            f.p2Left  = (held & 16) != 0;
-            f.p2Right = (held & 32) != 0;
-            macro.physicsFrames.push_back(f);
+        if (version >= 2) {
+            macro.events.reserve(inputCount);
+            for (uint32_t i = 0; i < inputCount && in; ++i) {
+                InputEvent e;
+                uint8_t flags = 0;
+                rd(&e.time, 8);
+                rd(&e.button, 1);
+                rd(&flags, 1);
+                e.down    = (flags & 1) != 0;
+                e.player2 = (flags & 2) != 0;
+                macro.events.push_back(e);
+            }
         }
 
         in.close();
