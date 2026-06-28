@@ -1654,7 +1654,21 @@ public:
     // frame window [lastFrameTime, currentFrameTime].
     void pushInputsToCBFQueue() {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
+        if (cbfState() != bot::CBFState::Syzzi) {
+            // No CBF — just fire directly
+            auto gl = GJBaseGameLayer::get();
+            if (!gl) return;
+            double now = levelTime(gl);
+            injecting = true;
+            while (playbackIndex < macro.events.size() &&
+                   macro.events[playbackIndex].time <= now) {
+                auto const& e = macro.events[playbackIndex];
+                gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                ++playbackIndex;
+            }
+            injecting = false;
+            return;
+        }
 
         auto pl = PlayLayer::get();
         if (!pl) return;
@@ -1662,16 +1676,11 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // CBF's frame window — captured by CCScheduler hook
         double currentFrameTime = m_frameStartWall;
         double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameStartLevel = levelTime(pl);
         double frameLevelAdvance = m_prevFrameDelta * speed;
 
-        // Safety margin: keep timestamps in the middle 80% of the window
-        // so CBF ALWAYS processes them (not deferred to next frame).
-        // This was the fix for the "hold bug" — timestamps at frame
-        // boundaries caused CBF to defer them.
         double margin = m_prevFrameDelta * 0.1;
         double safeLow  = lastFrameTime + margin;
         double safeHigh = currentFrameTime - margin;
@@ -1681,31 +1690,35 @@ public:
 
             double levelDelta = e.time - frameStartLevel;
 
-            // If beyond this frame, stop — next frame will push it
             if (levelDelta > frameLevelAdvance + 0.0001) break;
 
-            // If past due, fire directly (rare edge case after checkpoint load)
+            // FIRE DIRECTLY — eliminates the one-sub-step delay from CBF's
+            // popStepQueue. The input state is set immediately, so game
+            // mechanics (rings, pads, CPS counter) respond with no delay.
+            injecting = true;
+            pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+            injecting = false;
+
+            // ALSO push to CBF's queue — CBF's buildStepQueue will see the
+            // state is already set and the physics will process correctly.
+            // The queue entry ensures CBF's sub-step splitting accounts for
+            // the input, giving sub-step precision for physics.
             if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
+                // Past due — already fired directly, skip queue
                 ++playbackIndex;
                 continue;
             }
 
-            // Convert level time to wall-clock within CBF's frame window
             double inputWallTime = lastFrameTime + levelDelta / speed;
             if (inputWallTime < safeLow)  inputWallTime = safeLow;
             if (inputWallTime > safeHigh) inputWallTime = safeHigh;
 
-            // Push to CBF's queue — CBF's buildStepQueue will place this
-            // at the exact substep and fire handleButton via popStepQueue.
             pl->m_queuedButtons.push_back({
                 static_cast<PlayerButton>(e.button),
                 e.down,
                 e.player2,
-                0,                // m_step (unused by CBF)
-                inputWallTime     // wall-clock timestamp
+                0,
+                inputWallTime
             });
 
             ++playbackIndex;
