@@ -49,7 +49,6 @@ using namespace geode::prelude;
 // what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
 class $modify(BotCCScheduler, CCScheduler) {
     static void onModify(auto& self) {
-        // Run AFTER CBF so m_frameStartWall ≈ CBF's currentFrameTime
         (void) self.setHookPriority("CCScheduler::update", 1000000);
     }
 
@@ -86,9 +85,10 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     static void onModify(auto& self) {
-        // getModifiedDelta: VeryEarly so we push to m_queuedButtons BEFORE CBF
+        // CBF uses "VeryEarly" priority. We need to run BEFORE CBF so our
+        // inputs are in m_queuedButtons before CBF's buildStepQueue() reads them.
+        // In Geode, LOWER priority number = runs EARLIER in the hook chain.
         (void) self.setHookPriority("GJBaseGameLayer::getModifiedDelta", -1000000);
-        // handleButton: VeryEarly so we record before CBF processes
         (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
     }
 
@@ -132,6 +132,7 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         // No fireDueInputs here — inputs are pushed to CBF's queue from
         // getModifiedDelta (before CBF's buildStepQueue processes them).
+        // This gives sub-step precision instead of 240Hz step precision.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {

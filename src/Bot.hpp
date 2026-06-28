@@ -1305,7 +1305,7 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-    static double getWallTime() {
+        static double getWallTime() {
         #if defined(GEODE_IS_WINDOWS)
         static LARGE_INTEGER freq = [](){
             LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
@@ -1644,15 +1644,14 @@ public:
     
     // Push due inputs to CBF's m_queuedButtons queue. CBF's buildStepQueue
     // will read them and place each at the exact substep based on the
-    // timestamp. This uses CBF's OWN processing for both recording and
-    // playback, so the one-step delay from popStepQueue is consistent —
-    // it cancels out.
+    // wall-clock timestamp. This gives TRUE sub-step precision — not 240Hz
+    // step boundary precision like fireDueInputs.
     //
     // The timestamp is converted from level time to wall-clock using:
-    //   inputWall = lastFrameTime + (eventLevelTime - frameStartLevel) / speed
+    //   inputWall = lastFrameTime + (eventLevel - frameStartLevel) / speed
     //
-    // This places the input at the correct position within CBF's frame
-    // window [lastFrameTime, currentFrameTime].
+    // This maps the input's level time to a wall time within CBF's current
+    // frame window [lastFrameTime, currentFrameTime].
     void pushInputsToCBFQueue() {
         if (mode != bot::Mode::Playing) return;
         if (cbfState() != bot::CBFState::Syzzi) return;
@@ -1663,14 +1662,16 @@ public:
         double speed = speedMultiplier();
         if (speed <= 0.0) return;
 
-        // CBF's frame window
+        // CBF's frame window — captured by CCScheduler hook
         double currentFrameTime = m_frameStartWall;
         double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
         double frameStartLevel = levelTime(pl);
         double frameLevelAdvance = m_prevFrameDelta * speed;
 
         // Safety margin: keep timestamps in the middle 80% of the window
-        // so CBF always processes them (not deferred to next frame)
+        // so CBF ALWAYS processes them (not deferred to next frame).
+        // This was the fix for the "hold bug" — timestamps at frame
+        // boundaries caused CBF to defer them.
         double margin = m_prevFrameDelta * 0.1;
         double safeLow  = lastFrameTime + margin;
         double safeHigh = currentFrameTime - margin;
@@ -1680,10 +1681,10 @@ public:
 
             double levelDelta = e.time - frameStartLevel;
 
-            // If beyond this frame, stop
+            // If beyond this frame, stop — next frame will push it
             if (levelDelta > frameLevelAdvance + 0.0001) break;
 
-            // If past due, fire directly (rare edge case)
+            // If past due, fire directly (rare edge case after checkpoint load)
             if (levelDelta < -0.0001) {
                 injecting = true;
                 pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
