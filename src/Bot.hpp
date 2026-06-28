@@ -2877,13 +2877,16 @@ private:
     void onRecord(CCObject*) {
         BotManager::get().toggleRecording(GJBaseGameLayer::get());
         refreshProgress();
-        // Schedule a single execution (0 repeats) on the next frame loop
-        this->schedule([this](float) { syncModeToggles(); }, 0.f, 0, 0.f, "syncRec");
+        geode::queueInMainThread([this]() {
+        syncModeToggles();
+        });
     }
     void onPlay(CCObject*) {
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
         refreshProgress();
-        this->schedule([this](float) { syncModeToggles(); }, 0.f, 0, 0.f, "syncPlay");
+        geode::queueInMainThread([this]() {
+         syncModeToggles();
+        });
     }
        // Each callback: activate() has ALREADY flipped the visual. We just flip
     // our bool to match and persist. We do NOT call toggle() here -- doing so
