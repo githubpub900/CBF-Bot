@@ -109,21 +109,33 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
-      void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // Increment the simulation tick FIRST. Every processCommands call
-        // is one deterministic physics step.
+        
+        // Only increment tick when the level is ACTUALLY running (level time
+        // advancing). This prevents tick from running ahead during pauses,
+        // loading screens, or frame hitches — which was causing the CPS
+        // counter to spike (all backlogged inputs firing at once).
         if (isPlay(this)) {
-            bot.simulationTick++;
+            double currentLevelTime = BotManager::levelTime(this);
+            if (currentLevelTime < bot.m_lastTickLevelTime) {
+                // Level restarted (time went backwards) — reset tick
+                bot.simulationTick = 0;
+            } else if (currentLevelTime > bot.m_lastTickLevelTime) {
+                // Level is running — increment tick
+                bot.simulationTick++;
+            }
+            // If equal, level is frozen (paused) — don't increment
+            bot.m_lastTickLevelTime = currentLevelTime;
         }
+        
         // Replay inputs scheduled for this tick BEFORE the physics step.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.replayInputsForTick(bot.simulationTick);
         }
         // Run the physics step.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // Apply physics frame AFTER the step (corrects position drift).
-        // This is what was missing — physics frames weren't being applied.
+        // Apply physics frame AFTER the step.
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }

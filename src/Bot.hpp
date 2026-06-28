@@ -1196,7 +1196,8 @@ public:
     double m_lastRecordTime = 0.0;  // kept for physics frame truncation only
     double m_frameStartWall = 0.0;
     double m_prevFrameDelta = 0.0;
-    
+    double m_lastTickLevelTime = -1.0;  // tracks level time to detect pauses/restarts
+
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
     bool      injecting = false;
@@ -1375,15 +1376,18 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
-        simulationTick = 0;       // reset tick counter for new recording
+        // DON'T reset simulationTick — events are tagged with the absolute
+        // tick from level start. This way, recording at 50% produces events
+        // at tick N, and playback from 50% fires them at tick N.
         resetHeldState();
         m_lastRecordTime = macro.recordStartTime;
-        log::info("[Bot] Recording armed at t={:.6f}, tick=0", macro.recordStartTime);
+        log::info("[Bot] Recording armed at t={:.6f}, tick={}",
+                  macro.recordStartTime, simulationTick);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
     }
 
-       void startPlayback(GJBaseGameLayer* gl) {
+    void startPlayback(GJBaseGameLayer* gl) {
         if (!cbfAvailable()) {
             notifyNoCBF();
             return;
@@ -1393,13 +1397,16 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
-        simulationTick = 0;       // start from the beginning of the recording
-        playbackIndex = 0;        // cursor at first event
+        // DON'T reset simulationTick — it reflects the current level position.
+        // Seek the cursor to the current tick so playback starts from here.
+        // This means if you recorded at 50% and play from 50%, inputs fire
+        // immediately. If you play from 0%, inputs fire at the right position.
+        seekPlaybackTo(simulationTick);
         seekPhysicsPlayback(levelTime(gl));
         m_currentHeld.fill(false);
-        log::info("[Bot] Playback started ({} events, {} frames, lastTick={})",
+        log::info("[Bot] Playback started ({} events, {} frames, startTick={})",
                   macro.events.size(), macro.physicsFrames.size(),
-                  macro.lastTick());
+                  simulationTick);
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1409,7 +1416,7 @@ public:
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
-        simulationTick = 0;
+        // DON'T reset simulationTick — keep it at current level position
         m_currentHeld.fill(false);
         refreshUI();
     }
@@ -1842,13 +1849,14 @@ public:
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
-      void onRestart(PlayLayer* pl, bool fromStart) {
+    void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
             simulationTick = 0;
+            m_lastTickLevelTime = -1.0;
             if (pl) {
                 seekPlaybackTo(0);
                 seekPhysicsPlayback(0.0);
@@ -1856,6 +1864,7 @@ public:
             }
         } else if (mode == bot::Mode::Recording) {
             simulationTick = 0;
+            m_lastTickLevelTime = -1.0;
             truncateAfter(0);
             truncatePhysicsAfter(0.0);
             recomputeHeldState();
@@ -1871,12 +1880,14 @@ public:
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
-            simulationTick = 0;
+            simulationTick = 0;           // level restarted → tick = 0
+            m_lastTickLevelTime = -1.0;   // reset tracker
             seekPlaybackTo(0);
             seekPhysicsPlayback(0.0);
             if (pl) applyHeldStateAt(pl, 0);
         } else if (mode == bot::Mode::Recording) {
             simulationTick = 0;
+            m_lastTickLevelTime = -1.0;
         }
     }
 
