@@ -43,7 +43,6 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/CCScheduler.hpp>
-#include <Geode/modify/PlayerObject.hpp>
 
 using namespace geode::prelude;
 
@@ -93,10 +92,18 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
     }
 
-   // ---- input capture (recording) ---------------------------------------
+    // ---- input capture (recording) ---------------------------------------
     void handleButton(bool down, int button, bool isPlayer1) {
-        // We no longer record here because UI-level clicks lack CBF sub-frame timestamps.
-        // Recording is now handled with perfect sub-frame accuracy in the PlayerObject hooks below.
+        auto& bot = BotManager::get();
+
+        // Record the *transition* (press/release) tagged with the current level
+        // time. We deliberately do this before calling the original so the
+        // timestamp matches the exact moment the engine is about to react to the
+        // input -- and we skip anything we injected ourselves during playback.
+        if (!bot.injecting && isPlay(this)) {
+            bot.recordInput(this, down, button, isPlayer1);
+        }
+
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
     
@@ -105,6 +112,8 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             return;
         }
         GJBaseGameLayer::update(dt);
+        // syncRecordingToTime is no longer needed for inputs (ticks are
+        // deterministic). Keep it for physics frame truncation compatibility.
         if (isPlay(this)) {
             BotManager::get().syncRecordingToTime(this);
         }
@@ -122,23 +131,25 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // continuous collision detection and causes the engine to register deaths
     // whenever consecutive recorded positions straddle a hazard. Pure input
     // replay lets physics (and collision) run naturally from replayed button state.
-   void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.fireDueInputs(this, dt);
+        // Increment the simulation tick FIRST. Every processCommands call
+        // is one deterministic physics step. This tick is the SOLE source
+        // of truth for input timing — no level time, no wall-clock, no dt.
+        if (isPlay(this)) {
+            bot.simulationTick++;
         }
+        // Replay inputs scheduled for this tick BEFORE the physics step.
+        // Integer comparison: if event.tick == simulationTick, fire it.
+        // This is perfectly deterministic — the same tick always fires
+        // the same inputs, regardless of frame timing or speedhack.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.replayInputsForTick(bot.simulationTick);
+        }
+        // Run the physics step. CBF's sub-step processing happens inside
+        // here — any handleButton calls from CBF will record with the
+        // current simulationTick (already incremented above).
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply position/velocity correction AFTER the physics step, never before.
-            // Applying it before means the step starts from a teleported position —
-            // GD's collision sweep then detects the gap between consecutive recorded
-            // frames as a hazard crossing and kills the player. Applying it only after
-            // lets physics (and collision) run naturally from wherever the player is,
-            // then snaps position onto the recorded path as the starting point for the
-            // next step. Since consecutive recorded frames were from a clean run,
-            // the snap is always to a safe position.
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
-        }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
@@ -232,6 +243,7 @@ class $modify(BotPlayLayer, PlayLayer) {
         bot.resetAudioPitch();
     }
 };
+
 
 // ============================================================================
 //  CCKeyboardDispatcher hook  --  catch K / V / B / N on EVERY screen
@@ -333,43 +345,6 @@ class $modify(BotMenuLayer, MenuLayer) {
             }
         }
         return true;
-    }
-};
-
-// ============================================================================
-//  Ultra-Accurate Physics-Level Recording Hooks (CBF Compatible)
-// ============================================================================
-
-class $modify(BotPlayerObject, PlayerObject) {
-    void pushButton(PlayerButton button) {
-        // 1. Let the original physics engine/CBF process the jump first
-        PlayerObject::pushButton(button);
-        
-        auto& bot = BotManager::get();
-        // 2. Catch the input at the exact micro-tick processed by the physics loop
-        if (bot.mode == bot::Mode::Recording && !bot.injecting) {
-            if (auto pl = PlayLayer::get()) {
-                // Determine if this specific player object is Player 1 or Player 2
-                bool isPlayer1 = (this == pl->m_player1);
-                
-                // Pass it to your existing recording system
-                bot.recordInput(pl, true, static_cast<int>(button), isPlayer1);
-            }
-        }
-    }
-
-    void releaseButton(PlayerButton button) {
-        // 1. Let the engine process the release first
-        PlayerObject::releaseButton(button);
-        
-        auto& bot = BotManager::get();
-        // 2. Catch the release at the exact micro-tick
-        if (bot.mode == bot::Mode::Recording && !bot.injecting) {
-            if (auto pl = PlayLayer::get()) {
-                bool isPlayer1 = (this == pl->m_player1);
-                bot.recordInput(pl, false, static_cast<int>(button), isPlayer1);
-            }
-        }
     }
 };
 
