@@ -2877,16 +2877,13 @@ private:
     void onRecord(CCObject*) {
         BotManager::get().toggleRecording(GJBaseGameLayer::get());
         refreshProgress();
-        // Defer the visual correction to the next scheduler tick.
-        // activate() calls us BEFORE flipping its own visual, so any
-        // syncModeToggles() we call here gets overwritten the moment our
-        // callback returns. scheduleOnce(0) runs after activate() is done.
-        this->scheduleOnce([this](float) { syncModeToggles(); }, 0.f, "syncRec");
+        // Schedule a single execution (0 repeats) on the next frame loop
+        this->schedule([this](float) { syncModeToggles(); }, 0.f, 0, 0.f, "syncRec");
     }
     void onPlay(CCObject*) {
         BotManager::get().togglePlayback(GJBaseGameLayer::get());
         refreshProgress();
-        this->scheduleOnce([this](float) { syncModeToggles(); }, 0.f, "syncPlay");
+        this->schedule([this](float) { syncModeToggles(); }, 0.f, 0, 0.f, "syncPlay");
     }
        // Each callback: activate() has ALREADY flipped the visual. We just flip
     // our bool to match and persist. We do NOT call toggle() here -- doing so
