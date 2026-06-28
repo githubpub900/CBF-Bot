@@ -1528,21 +1528,12 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Tag this input with the current simulation tick. This is the
-        // ONLY timing information stored — no level time, no wall-clock,
-        // no interpolation. The tick is deterministic: the same physics
-        // step always produces the same tick, so playback is exact.
-        //
-        // Note: simulationTick was incremented at the start of this
-        // processCommands call, so it reflects the CURRENT physics step.
-        // When handleButton fires from CBF's sub-step processing inside
-        // processCommands, the tick is already correct.
+        // Tag with current simulation tick. NO backwards-tick guard —
+        // checkpoint loads and restarts explicitly truncate events,
+        // so we don't need to block here. The old guard was preventing
+        // inputs from being recorded after a respawn/reset because
+        // simulationTick reset to 0 while old events had higher ticks.
         uint64_t tick = simulationTick;
-
-        // Don't record if the tick went backwards (shouldn't happen, but guard)
-        if (!macro.events.empty() && tick < macro.events.back().tick) {
-            return;
-        }
 
         InputEvent e(tick, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
