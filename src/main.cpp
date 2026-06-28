@@ -42,24 +42,8 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
-
-// what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
-class $modify(BotCCScheduler, CCScheduler) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("CCScheduler::update", 1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
-            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
-        bot.m_frameStartWall = BotManager::getWallTime();
-        CCScheduler::update(dt);
-    }
-};
 
 // ============================================================================
 //  Small helpers

@@ -1692,8 +1692,13 @@ public:
         if (!gl) return;
 
         injecting = true;
+        // Use <= instead of ==. If the tick counter is AHEAD of an event's
+        // tick (e.g., we're at tick 6 but an event was at tick 5), we still
+        // fire it — catching up. This prevents the cursor from getting stuck
+        // if processCommands is called a different number of times during
+        // playback vs recording.
         while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].tick == tick) {
+               macro.events[playbackIndex].tick <= tick) {
             auto const& e = macro.events[playbackIndex];
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
