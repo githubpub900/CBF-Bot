@@ -46,6 +46,7 @@
 
 using namespace geode::prelude;
 
+// what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
 class $modify(BotCCScheduler, CCScheduler) {
     static void onModify(auto& self) {
         (void) self.setHookPriority("CCScheduler::update", 1000000);
@@ -56,9 +57,6 @@ class $modify(BotCCScheduler, CCScheduler) {
         bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
             ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
         bot.m_frameStartWall = BotManager::getWallTime();
-        if (auto pl = PlayLayer::get()) {
-            bot.m_frameStartLevel = BotManager::levelTime(pl);
-        }
         CCScheduler::update(dt);
     }
 };
@@ -120,17 +118,23 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         BotManager::get().applyMusicSpeed();
     }
 
-    // ---- playback (primary, per physics step) ----------------------------
+// ---- playback (primary, per physics step) ----------------------------
     // processCommands runs once per physics step. With Syzzi's CBF active there
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
+    //
+    // We fire inputs BEFORE the original so CBF sees them during this sub-step.
+    // We do NOT teleport the player — position teleportation fights GD's own
+    // continuous collision detection and causes the engine to register deaths
+    // whenever consecutive recorded positions straddle a hazard. Pure input
+    // replay lets physics (and collision) run naturally from replayed button state.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
-        if (isPlay(this) && bot.mode == bot::Mode::Playing && bot.stateAlignEnabled) {
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.fireDueInputs(this, dt);
         }
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
@@ -145,11 +149,6 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        // Push to CBF queue BEFORE CBF's buildStepQueue runs.
-        // Our priority is -1000000 (VeryEarly), so we run first.
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.pushInputsToCBFQueue();
-        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
@@ -347,7 +346,6 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.discardDeadInputs    = Mod::get()->getSavedValue<bool>("discard-dead", true);
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", true);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
-    bot.stateAlignEnabled  = Mod::get()->getSavedValue<bool>("state-align", false);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:

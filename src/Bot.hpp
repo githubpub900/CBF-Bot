@@ -334,8 +334,12 @@ struct PhysicsFrame {
 static inline void forceTogglerState(CCMenuItemToggler* t, bool on) {
     if (!t) return;
     t->m_toggled = on;
-    if (t->m_onButton)  t->m_onButton->setVisible(on);
-    if (t->m_offButton) t->m_offButton->setVisible(!on);
+    // GD's CCMenuItemToggler::toggle(bool) uses:
+    //   m_onButton->setVisible(!toggled)   <- the UNCHECKED / "click to enable" sprite
+    //   m_offButton->setVisible(toggled)   <- the CHECKED  / "click to disable" sprite
+    // We mirror that exactly so our forced state always matches GD's own visual logic.
+    if (t->m_onButton)  t->m_onButton->setVisible(!on);
+    if (t->m_offButton) t->m_offButton->setVisible(on);
 }
 // ============================================================================
 //  PlayerSnapshot  --  full physics state of one PlayerObject.
@@ -1180,16 +1184,7 @@ public:
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
     double m_frameStartWall = 0.0;
-    double m_frameStartLevel = 0.0;
     double m_prevFrameDelta = 0.0;
-
-    // Step-start anchors for recording precision.
-    // m_levelTime only updates at step boundaries, but CBF fires handleButton
-    // at sub-step precision. We capture the step start (time + wall clock),
-    // then interpolate to get the exact sub-step level time when the input fires.
-    double m_stepStartLevel = 0.0;
-    double m_stepStartWall = 0.0;
-    double m_stepDelta = 0.0;
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1208,7 +1203,6 @@ public:
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
     bool      normalizeRecording = false; // shift events so the first one is t=0
-    bool      stateAlignEnabled = false; // snap player to recorded position on playback
 
     // Automatically save the macro to disk when a level is completed while
     // recording -- handy so a clean practice run is never lost.
@@ -1311,7 +1305,7 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-    static double getWallTime() {
+        static double getWallTime() {
         #if defined(GEODE_IS_WINDOWS)
         static LARGE_INTEGER freq = [](){
             LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
@@ -1327,7 +1321,23 @@ public:
         return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
         #endif
     }
-    
+
+    // Sub-step level time for accurate input timestamps during recording.
+    //
+    // The wall-clock interpolation that used to live here was measuring time
+    // since the START of CCScheduler::update (i.e. the whole rendered frame),
+    // not time since the current sub-step started. That delta grows monotonically
+    // across all sub-steps in a frame and has no reliable mapping to a specific
+    // sub-step's fraction — it adds measurement noise rather than precision.
+    //
+    // With Syzzi's CBF, m_levelTime is already advanced once per physics
+    // sub-step *before* handleButton is called, so it IS sub-frame accurate.
+    // With RobTop's CBS it's similarly correct per step. Just read it directly.
+    double preciseLevelTime(GJBaseGameLayer* gl) {
+        if (!gl) return 0.0;
+        return levelTime(gl);
+    }
+
     // Round a timestamp the way a text export wants it: clamp to a sane number
     // of decimals (the request's 50-decimal cap) and round.
     static double roundTimeForText(double t) {
@@ -1366,13 +1376,12 @@ public:
             notifyNoCBF();
             return;
         }
-        if (macro.physicsFrames.empty()) {
-            notify("No physics data to play", NotificationIcon::Warning);
+        if (macro.events.empty()) {
+            notify("No inputs to play back", NotificationIcon::Warning);
             return;
         }
         mode = bot::Mode::Playing;
-        seekPhysicsPlayback(levelTime(gl));
-        // Reset held state tracker so first frame sets everything correctly
+        seekPlaybackTo(levelTime(gl));
         m_currentHeld.fill(false);
         log::info("[Bot] Playback started ({} frames)", 
                   macro.physicsFrames.size());
@@ -1486,7 +1495,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1501,7 +1510,9 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        double t = levelTime(gl);
+        // Use preciseLevelTime — sub-step accuracy via wall-clock interpolation.
+        // This captures the EXACT moment of the click, not just the step boundary.
+        double t = preciseLevelTime(gl);
 
         if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
             return;
@@ -1516,7 +1527,6 @@ public:
         if (mode != bot::Mode::Recording) return;
         m_lastRecordTime = levelTime(gl);
     }
-
 
     // Drop every recorded event whose timestamp is strictly after `t`.
     void truncateAfter(double t) {
@@ -1632,61 +1642,20 @@ public:
         macro.physicsFrames.push_back(f);
     }
     
-    void pushInputsToCBFQueue() {
+    // Fire inputs from the separate event list. Called from processCommands
+    // BEFORE the physics step so CBF sees them during the step.
+    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
         if (mode != bot::Mode::Playing) return;
-        if (cbfState() != bot::CBFState::Syzzi) return;
-
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        double speed = speedMultiplier();
-        if (speed <= 0.0) return;
-
-        // CBF's frame window: [lastFrameTime, currentFrameTime]
-        double currentFrameTime = m_frameStartWall;
-        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
-        double frameLevel = m_frameStartLevel;
-        double frameLevelAdvance = m_prevFrameDelta * speed;
-
-        // Clamp timestamps to the MIDDLE 90% of the frame window.
-        // This ensures CBF always processes them (not deferred) and
-        // places them at approximately the right sub-step.
-        double margin = m_prevFrameDelta * 0.05;
-        double safeLow = lastFrameTime + margin;
-        double safeHigh = currentFrameTime - margin;
-
-        while (playbackIndex < macro.events.size()) {
+        if (!gl) return;
+        double now = levelTime(gl) + dt;
+        injecting = true;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= now) {
             auto const& e = macro.events[playbackIndex];
-
-            double levelDelta = e.time - frameLevel;
-
-            // If beyond this frame, stop
-            if (levelDelta > frameLevelAdvance + 0.0001) break;
-
-            // If past due, fire directly (rare)
-            if (levelDelta < -0.0001) {
-                injecting = true;
-                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-                injecting = false;
-                ++playbackIndex;
-                continue;
-            }
-
-            // Convert level time to wall-clock, clamped to safe window
-            double inputWallTime = lastFrameTime + levelDelta / speed;
-            if (inputWallTime < safeLow) inputWallTime = safeLow;
-            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
-
-            pl->m_queuedButtons.push_back({
-                static_cast<PlayerButton>(e.button),
-                e.down,
-                e.player2,
-                0,
-                inputWallTime
-            });
-
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
+        injecting = false;
     }
 
     // Apply a physics frame. Called from processCommands BEFORE the original
@@ -1778,13 +1747,15 @@ public:
         if (!pl) return;
         CheckpointFrame f;
         f.eventCount    = static_cast<int>(macro.events.size());
-        f.levelTime     = levelTime(pl);  // ← current level time, correct
+        f.levelTime     = levelTime(pl);
         f.checkpointPtr = cpPtr;
         if (practiceFixEnabled) {
-            f.p1.capture(pl->m_player1);  // ← captures current state, correct
+            f.p1.capture(pl->m_player1);
             f.p2.capture(pl->m_player2);
         }
         checkpoints.push_back(f);
+        log::debug("[Bot] Checkpoint stored (events={}, t={:.4f})",
+                   f.eventCount, f.levelTime);
     }
 
     void onCheckpointRemoved() {
@@ -1929,7 +1900,6 @@ public:
         m->setSavedValue<bool>("discard-dead", discardDeadInputs);
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
-        m->setSavedValue<bool>("state-align", stateAlignEnabled);
     }
 
     void setSpeedFromString(std::string const& s) {
@@ -2427,7 +2397,6 @@ protected:
     CCMenuItemToggler*    m_practiceToggle = nullptr;
     CCMenuItemToggler*    m_deadToggle   = nullptr;
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
-    CCMenuItemToggler*    m_stateAlignToggle = nullptr;
     bool                  m_visible      = false;
 
     // Drag state for the panel title bar.
@@ -2708,7 +2677,6 @@ public:
         forceTogglerState(m_practiceToggle, bot.practiceFixEnabled);
         forceTogglerState(m_deadToggle,     bot.discardDeadInputs);
         forceTogglerState(m_autoSaveToggle, bot.autoSaveOnComplete);
-        forceTogglerState(m_stateAlignToggle, bot.stateAlignEnabled);
     }
 
     void syncModeToggles() {
@@ -2845,9 +2813,6 @@ private:
         m_autoSaveToggle = makeToggle(menu, { 40.f, yOpt2 },
             menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
-        m_stateAlignToggle = makeToggle(menu, { 200.f, yOpt2 },
-            menu_selector(BotUILayer::onStateAlign), "State align",
-            bot.stateAlignEnabled);
 
         // File row 1: binary save / load + text export / import.
         float yFile1 = yOpt2 - 34.f;
@@ -2940,12 +2905,6 @@ private:
     void onAutoSave(CCObject*) {
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
-        bot.persist();
-        refreshAll();
-    }
-    void onStateAlign(CCObject*) {
-        auto& bot = BotManager::get();
-        bot.stateAlignEnabled = !bot.stateAlignEnabled;
         bot.persist();
         refreshAll();
     }
