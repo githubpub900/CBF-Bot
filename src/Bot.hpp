@@ -248,7 +248,7 @@ namespace bot {
 
     // The magic + version stamped at the top of a saved macro file.
     static constexpr uint32_t MACRO_MAGIC   = 0x4D544447; // 'G''D''T''M' little-endian
-    static constexpr uint32_t MACRO_VERSION = 4;  // v4: tick-based inputs
+    static constexpr uint32_t MACRO_VERSION = 3;
 
     // Default toggle key for the GUI.
     static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_K;
@@ -292,18 +292,17 @@ namespace bot {
 //  next up event for the same button.
 //
 struct InputEvent {
-    uint64_t tick     = 0;    // deterministic simulation tick (NOT level time)
-    uint8_t  button   = 1;
-    bool     down     = true;
-    bool     player2  = false;
+    double  time     = 0.0;   // EXACT level time (full double precision)
+    uint8_t button   = 1;
+    bool    down     = true;
+    bool    player2  = false;
 
     InputEvent() = default;
-    InputEvent(uint64_t t, uint8_t b, bool d, bool p2)
-        : tick(t), button(b), down(d), player2(p2) {}
+    InputEvent(double t, uint8_t b, bool d, bool p2)
+        : time(t), button(b), down(d), player2(p2) {}
 
-    // Sort by tick, then presses before releases on the same tick
     bool operator<(InputEvent const& o) const {
-        if (tick != o.tick) return tick < o.tick;
+        if (time != o.time) return time < o.time;
         if (down != o.down) return down && !o.down;
         return button < o.button;
     }
@@ -1116,8 +1115,7 @@ struct PlayerSnapshot {
 //
 struct CheckpointFrame {
     int            eventCount = 0;     // size of the event list when set
-    double         levelTime  = 0.0;   // level time when set (for physics frames)
-    uint64_t       tick       = 0;     // simulation tick when set (for inputs)
+    double         levelTime  = 0.0;   // level time when set
     PlayerSnapshot p1;
     PlayerSnapshot p2;
     void*          checkpointPtr = nullptr; // identity of the CheckpointObject
@@ -1150,13 +1148,10 @@ struct Macro {
     size_t size() const { return events.size(); }
     bool empty() const { return events.empty(); }
 
-    // Returns the last input's tick (for display). Actual level-time duration
-    // comes from the physics frames.
-    uint64_t lastTick() const {
-        return events.empty() ? 0 : events.back().tick;
-    }
+    // The level time of the final input -- used for the progress readout.
+    // Since timestamps are now wall-clock, this returns wall-clock duration.
     double duration() const {
-        return physicsFrames.empty() ? 0.0 : physicsFrames.back().time;
+        return events.empty() ? 0.0 : events.back().time;
     }
 
     // Keep the list ordered. We almost always append in order while recording,
@@ -1187,16 +1182,9 @@ public:
 
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
-    // The deterministic simulation tick. Incremented once per processCommands
-    // call (once per physics step, including CBF substeps). This is the
-    // SOLE source of truth for input timing — no floating-point, no level
-    // time, no wall-clock. Every input is tagged with the tick during which
-    // it occurred, and playback fires inputs by matching tick exactly.
-    uint64_t  simulationTick = 0;
-    double m_lastRecordTime = 0.0;  // kept for physics frame truncation only
+    double m_lastRecordTime = 0.0;
     double m_frameStartWall = 0.0;
     double m_prevFrameDelta = 0.0;
-    double m_lastTickLevelTime = -1.0;  // tracks level time to detect pauses/restarts
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1317,7 +1305,7 @@ public:
         return gl ? gl->m_gameState.m_levelTime : 0.0;
     }
 
-        static double getWallTime() {
+    static double getWallTime() {
         #if defined(GEODE_IS_WINDOWS)
         static LARGE_INTEGER freq = [](){
             LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
@@ -1376,13 +1364,9 @@ public:
         checkpoints.clear();
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
-        // DON'T reset simulationTick — events are tagged with the absolute
-        // tick from level start. This way, recording at 50% produces events
-        // at tick N, and playback from 50% fires them at tick N.
         resetHeldState();
         m_lastRecordTime = macro.recordStartTime;
-        log::info("[Bot] Recording armed at t={:.6f}, tick={}",
-                  macro.recordStartTime, simulationTick);
+        log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1397,16 +1381,10 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
-        // DON'T reset simulationTick — it reflects the current level position.
-        // Seek the cursor to the current tick so playback starts from here.
-        // This means if you recorded at 50% and play from 50%, inputs fire
-        // immediately. If you play from 0%, inputs fire at the right position.
-        seekPlaybackTo(simulationTick);
-        seekPhysicsPlayback(levelTime(gl));
+        seekPlaybackTo(levelTime(gl));
         m_currentHeld.fill(false);
-        log::info("[Bot] Playback started ({} events, {} frames, startTick={})",
-                  macro.events.size(), macro.physicsFrames.size(),
-                  simulationTick);
+        log::info("[Bot] Playback started ({} frames)", 
+                  macro.physicsFrames.size());
         notify("Playback started", NotificationIcon::Success);
         refreshUI();
     }
@@ -1416,7 +1394,6 @@ public:
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
-        // DON'T reset simulationTick — keep it at current level position
         m_currentHeld.fill(false);
         refreshUI();
     }
@@ -1431,12 +1408,11 @@ public:
         else startPlayback(gl);
     }
 
-    // Move the playback cursor to the first event whose tick >= `tick`.
-    // Integer comparison — exact, no epsilon, no drift.
-    void seekPlaybackTo(uint64_t tick) {
+    // Move the playback cursor to the first event at/after `time`.
+    void seekPlaybackTo(double time) {
         playbackIndex = 0;
         while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].tick < tick) {
+               macro.events[playbackIndex].time < time) {
             ++playbackIndex;
         }
     }
@@ -1471,18 +1447,17 @@ public:
     void validateAndRepair() {
         std::array<std::array<bool, 4>, 2> held{};
         for (auto& row : held) row.fill(false);
-        uint64_t lastTick = 0;
+        double lastTime = 0.0;
         for (auto const& e : macro.events) {
             if (e.button >= 1 && e.button <= 3)
                 held[e.player2 ? 1 : 0][e.button] = e.down;
-            lastTick = std::max(lastTick, e.tick);
+            lastTime = std::max(lastTime, e.time);
         }
         int repaired = 0;
         for (int pi = 0; pi < 2; ++pi) {
             for (int b = 1; b <= 3; ++b) {
                 if (held[pi][b]) {
-                    // Synthetic release one tick after the last event
-                    macro.events.emplace_back(lastTick + 1,
+                    macro.events.emplace_back(lastTime + 1e-6,
                         static_cast<uint8_t>(b), false, pi == 1);
                     ++repaired;
                 }
@@ -1520,7 +1495,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1535,37 +1510,34 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Tag with current simulation tick. NO backwards-tick guard —
-        // checkpoint loads and restarts explicitly truncate events,
-        // so we don't need to block here. The old guard was preventing
-        // inputs from being recorded after a respawn/reset because
-        // simulationTick reset to 0 while old events had higher ticks.
-        uint64_t tick = simulationTick;
+        // Use preciseLevelTime — sub-step accuracy via wall-clock interpolation.
+        // This captures the EXACT moment of the click, not just the step boundary.
+        double t = preciseLevelTime(gl);
 
-        InputEvent e(tick, static_cast<uint8_t>(button), down, player2);
+        if (!macro.events.empty() && t < macro.events.back().time - 0.001) {
+            return;
+        }
+
+        InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
         refreshUIProgress();
     }
 
-    // With tick-based inputs, we no longer need to detect backwards time
-    // jumps for input truncation — checkpoint loads and deaths explicitly
-    // set the tick and truncate. This is kept only for physics frame
-    // truncation (which still uses level time).
     void syncRecordingToTime(GJBaseGameLayer* gl) {
         if (mode != bot::Mode::Recording) return;
         m_lastRecordTime = levelTime(gl);
     }
 
-    // Drop every recorded event whose tick is strictly after `tick`.
-    void truncateAfter(uint64_t tick) {
+    // Drop every recorded event whose timestamp is strictly after `t`.
+    void truncateAfter(double t) {
         size_t n = macro.events.size();
-        while (n > 0 && macro.events[n - 1].tick > tick) --n;
+        while (n > 0 && macro.events[n - 1].time > t) --n;
         if (n < macro.events.size()) {
             size_t dropped = macro.events.size() - n;
             macro.events.resize(n);
             refreshUIProgress();
-            log::info("[Bot] Re-record: discarded {} superseded input(s) after tick={}",
-                      dropped, tick);
+            log::info("[Bot] Re-record: discarded {} superseded input(s) after t={:.3f}",
+                      dropped, t);
         }
     }
 
@@ -1597,14 +1569,14 @@ public:
     }
 
     // At playback start / checkpoint-resume, re-press any button whose last
-    // transition before `tick` was a press, so a hold that spans the resume
+    // transition before `time` was a press, so a hold that spans the resume
     // point is honoured instead of silently dropped.
-    void applyHeldStateAt(GJBaseGameLayer* gl, uint64_t tick) {
+    void applyHeldStateAt(GJBaseGameLayer* gl, double time) {
         if (!gl) return;
         std::array<std::array<int, 4>, 2> last{};
         for (auto& row : last) row.fill(0);
         for (auto const& e : macro.events) {
-            if (e.tick >= tick) break;
+            if (e.time >= time) break;
             int pi = e.player2 ? 1 : 0;
             if (e.button >= 1 && e.button <= 3) last[pi][e.button] = e.down ? 1 : -1;
         }
@@ -1670,38 +1642,73 @@ public:
         macro.physicsFrames.push_back(f);
     }
     
-    // Replay all inputs scheduled for the given tick. Called from
-    // processCommands AFTER incrementing simulationTick but BEFORE
-    // the original processCommands runs.
+    // Push due inputs to CBF's m_queuedButtons queue. CBF's buildStepQueue
+    // will read them and place each at the exact substep based on the
+    // timestamp. This uses CBF's OWN processing for both recording and
+    // playback, so the one-step delay from popStepQueue is consistent —
+    // it cancels out.
     //
-    // This is the heart of the tick-based system:
-    //   - No floating-point comparison
-    //   - No epsilon
-    //   - No level-time lookup
-    //   - No wall-clock interpolation
-    //   - No accumulated dt
+    // The timestamp is converted from level time to wall-clock using:
+    //   inputWall = lastFrameTime + (eventLevelTime - frameStartLevel) / speed
     //
-    // Just: if event.tick == simulationTick, fire it. The cursor only
-    // advances forward, so this is O(number of inputs at this tick),
-    // which is almost always 0 or 1.
-    void replayInputsForTick(uint64_t tick) {
+    // This places the input at the correct position within CBF's frame
+    // window [lastFrameTime, currentFrameTime].
+    void pushInputsToCBFQueue() {
         if (mode != bot::Mode::Playing) return;
-        auto gl = GJBaseGameLayer::get();
-        if (!gl) return;
+        if (cbfState() != bot::CBFState::Syzzi) return;
 
-        injecting = true;
-        // Use <= instead of ==. If the tick counter is AHEAD of an event's
-        // tick (e.g., we're at tick 6 but an event was at tick 5), we still
-        // fire it — catching up. This prevents the cursor from getting stuck
-        // if processCommands is called a different number of times during
-        // playback vs recording.
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].tick <= tick) {
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+
+        double speed = speedMultiplier();
+        if (speed <= 0.0) return;
+
+        // CBF's frame window
+        double currentFrameTime = m_frameStartWall;
+        double lastFrameTime = m_frameStartWall - m_prevFrameDelta;
+        double frameStartLevel = levelTime(pl);
+        double frameLevelAdvance = m_prevFrameDelta * speed;
+
+        // Safety margin: keep timestamps in the middle 80% of the window
+        // so CBF always processes them (not deferred to next frame)
+        double margin = m_prevFrameDelta * 0.1;
+        double safeLow  = lastFrameTime + margin;
+        double safeHigh = currentFrameTime - margin;
+
+        while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+
+            double levelDelta = e.time - frameStartLevel;
+
+            // If beyond this frame, stop
+            if (levelDelta > frameLevelAdvance + 0.0001) break;
+
+            // If past due, fire directly (rare edge case)
+            if (levelDelta < -0.0001) {
+                injecting = true;
+                pl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
+                injecting = false;
+                ++playbackIndex;
+                continue;
+            }
+
+            // Convert level time to wall-clock within CBF's frame window
+            double inputWallTime = lastFrameTime + levelDelta / speed;
+            if (inputWallTime < safeLow)  inputWallTime = safeLow;
+            if (inputWallTime > safeHigh) inputWallTime = safeHigh;
+
+            // Push to CBF's queue — CBF's buildStepQueue will place this
+            // at the exact substep and fire handleButton via popStepQueue.
+            pl->m_queuedButtons.push_back({
+                static_cast<PlayerButton>(e.button),
+                e.down,
+                e.player2,
+                0,                // m_step (unused by CBF)
+                inputWallTime     // wall-clock timestamp
+            });
+
             ++playbackIndex;
         }
-        injecting = false;
     }
 
     // Apply a physics frame. Called from processCommands BEFORE the original
@@ -1796,16 +1803,15 @@ public:
         if (!pl) return;
         CheckpointFrame f;
         f.eventCount    = static_cast<int>(macro.events.size());
-        f.levelTime     = levelTime(pl);    // for physics frames
-        f.tick          = simulationTick;   // for inputs
+        f.levelTime     = levelTime(pl);
         f.checkpointPtr = cpPtr;
         if (practiceFixEnabled) {
             f.p1.capture(pl->m_player1);
             f.p2.capture(pl->m_player2);
         }
         checkpoints.push_back(f);
-        log::debug("[Bot] Checkpoint stored (events={}, t={:.4f}, tick={})",
-                   f.eventCount, f.levelTime, f.tick);
+        log::debug("[Bot] Checkpoint stored (events={}, t={:.4f})",
+                   f.eventCount, f.levelTime);
     }
 
     void onCheckpointRemoved() {
@@ -1832,15 +1838,10 @@ public:
         }
 
         if (mode == bot::Mode::Playing) {
-            // Restore the simulation tick to the checkpoint's tick.
-            // This makes the input cursor resume at exactly the right point.
-            simulationTick = frame->tick;
-            seekPlaybackTo(frame->tick);
             seekPhysicsPlayback(frame->levelTime);
+            seekPlaybackTo(frame->levelTime);
         } else if (mode == bot::Mode::Recording) {
-            // Restore tick and truncate inputs after the checkpoint tick
-            simulationTick = frame->tick;
-            truncateAfter(frame->tick);
+            truncateAfter(frame->levelTime);
             truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
             m_lastRecordTime = frame->levelTime;
@@ -1849,23 +1850,19 @@ public:
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
     // overwrite the superseded inputs on the next frame; we just clear the
     // checkpoint stack and rewind the playback cursor here.
-    void onRestart(PlayLayer* pl, bool fromStart) {
+        void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
-            simulationTick = 0;
-            m_lastTickLevelTime = -1.0;
             if (pl) {
-                seekPlaybackTo(0);
+                seekPlaybackTo(0.0);
                 seekPhysicsPlayback(0.0);
-                applyHeldStateAt(pl, 0);
+                applyHeldStateAt(pl, 0.0);
             }
         } else if (mode == bot::Mode::Recording) {
-            simulationTick = 0;
-            m_lastTickLevelTime = -1.0;
-            truncateAfter(0);
+            truncateAfter(0.0);
             truncatePhysicsAfter(0.0);
             recomputeHeldState();
             resetHeldState();
@@ -1880,14 +1877,9 @@ public:
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
-            simulationTick = 0;           // level restarted → tick = 0
-            m_lastTickLevelTime = -1.0;   // reset tracker
-            seekPlaybackTo(0);
+            seekPlaybackTo(0.0);
             seekPhysicsPlayback(0.0);
-            if (pl) applyHeldStateAt(pl, 0);
-        } else if (mode == bot::Mode::Recording) {
-            simulationTick = 0;
-            m_lastTickLevelTime = -1.0;
+            if (pl && !physicsMode) applyHeldStateAt(pl, 0.0);
         }
     }
 
@@ -1896,17 +1888,14 @@ public:
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
-            simulationTick = 0;
-            seekPlaybackTo(0);
+            seekPlaybackTo(0.0);
             seekPhysicsPlayback(0.0);
         } else if (mode == bot::Mode::Recording) {
-            // Truncate inputs recorded after the current tick (the dead attempt).
-            // The simulationTick is NOT reset here — the checkpoint load will
-            // restore it. If no checkpoint (normal mode), onRestart handles it.
-            truncateAfter(simulationTick);
-            truncatePhysicsAfter(levelTime(pl));
+            double t = levelTime(pl);
+            truncateAfter(t);
+            truncatePhysicsAfter(t);
             recomputeHeldState();
-            m_lastRecordTime = levelTime(pl);
+            m_lastRecordTime = t;
         }
     }
 
@@ -2059,7 +2048,7 @@ public:
         wr(&count, 4);
         for (auto const& e : macro.events) {
             uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
-            wr(&e.tick, 8);       // uint64_t tick (was double time)
+            wr(&e.time, 8);
             wr(&e.button, 1);
             wr(&flags, 1);
         }
@@ -2113,16 +2102,7 @@ public:
         for (uint32_t i = 0; i < count && in; ++i) {
             InputEvent e;
             uint8_t flags = 0;
-            if (version >= 4) {
-                // v4+: tick-based (uint64_t)
-                rd(&e.tick, 8);
-            } else {
-                // v3 and below: time-based (double) — convert to tick 0
-                // (old macros can't be perfectly converted, so start at 0)
-                double oldTime = 0.0;
-                rd(&oldTime, 8);
-                e.tick = 0;  // legacy macros won't replay accurately
-            }
+            rd(&e.time, 8);
             rd(&e.button, 1);
             rd(&flags, 1);
             e.down    = (flags & 1) != 0;
@@ -2160,7 +2140,7 @@ public:
         };
 
         uint32_t magic = 0x4D504447; // 'GDPM'
-        uint32_t version = 3;  // v3: tick-based inputs
+        uint32_t version = 2;  // v2: level time only
         uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
         uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
@@ -2188,10 +2168,10 @@ public:
             wr(&held, 1);
         }
 
-        // Write input events (tick-based)
+        // Write input events
         for (auto const& e : macro.events) {
             uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
-            wr(&e.tick, 8);       // uint64_t tick
+            wr(&e.time, 8);
             wr(&e.button, 1);
             wr(&flags, 1);
         }
@@ -2264,15 +2244,7 @@ public:
             for (uint32_t i = 0; i < inputCount && in; ++i) {
                 InputEvent e;
                 uint8_t flags = 0;
-                if (version >= 3) {
-                    // v3+: tick-based (uint64_t)
-                    rd(&e.tick, 8);
-                } else {
-                    // v2: time-based (double) — read and discard
-                    double oldTime = 0.0;
-                    rd(&oldTime, 8);
-                    e.tick = 0;
-                }
+                rd(&e.time, 8);
                 rd(&e.button, 1);
                 rd(&flags, 1);
                 e.down    = (flags & 1) != 0;
@@ -2349,7 +2321,7 @@ public:
             << " normalized=" << (macro.normalized ? 1 : 0) << "\n";
         out << "# time  button(1=jump,2=left,3=right)  D/U  P1/P2\n";
         for (auto const& e : macro.events) {
-            out << e.tick << '\t'
+            out << formatTime50(BotManager::roundTimeForText(e.time)) << '\t'
                 << static_cast<int>(e.button) << '\t'
                 << (e.down ? 'D' : 'U') << '\t'
                 << (e.player2 ? "P2" : "P1") << '\n';
@@ -2382,10 +2354,10 @@ public:
                 continue;
             }
             std::istringstream ss(line);
-            uint64_t tick; int button; std::string du, pp;
-            if (!(ss >> tick >> button >> du >> pp)) continue;
+            double t; int button; std::string du, pp;
+            if (!(ss >> t >> button >> du >> pp)) continue;
             InputEvent e;
-            e.tick    = tick;
+            e.time    = t;
             e.button  = static_cast<uint8_t>(button);
             e.down    = (!du.empty() && (du[0] == 'D' || du[0] == 'd'));
             e.player2 = (pp == "P2" || pp == "p2");

@@ -42,8 +42,25 @@
 #include <Geode/binding/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 
 using namespace geode::prelude;
+
+// what do you know it, THE CC SCHEDULER HOOK IS BACKKKKKKKKKKKKKKKK
+class $modify(BotCCScheduler, CCScheduler) {
+    static void onModify(auto& self) {
+        // Run AFTER CBF so m_frameStartWall ≈ CBF's currentFrameTime
+        (void) self.setHookPriority("CCScheduler::update", 1000000);
+    }
+
+    void update(float dt) {
+        auto& bot = BotManager::get();
+        bot.m_prevFrameDelta = bot.m_frameStartWall > 0.0
+            ? (BotManager::getWallTime() - bot.m_frameStartWall) : 0.0;
+        bot.m_frameStartWall = BotManager::getWallTime();
+        CCScheduler::update(dt);
+    }
+};
 
 // ============================================================================
 //  Small helpers
@@ -69,10 +86,9 @@ static inline bool isPlay(GJBaseGameLayer* self) {
 //
 class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     static void onModify(auto& self) {
-        // CBF uses "VeryEarly" priority. We need to run BEFORE CBF so our
-        // inputs are in m_queuedButtons before CBF's buildStepQueue() reads them.
-        // In Geode, LOWER priority number = runs EARLIER in the hook chain.
+        // getModifiedDelta: VeryEarly so we push to m_queuedButtons BEFORE CBF
         (void) self.setHookPriority("GJBaseGameLayer::getModifiedDelta", -1000000);
+        // handleButton: VeryEarly so we record before CBF processes
         (void) self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
     }
 
@@ -96,8 +112,6 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             return;
         }
         GJBaseGameLayer::update(dt);
-        // syncRecordingToTime is no longer needed for inputs (ticks are
-        // deterministic). Keep it for physics frame truncation compatibility.
         if (isPlay(this)) {
             BotManager::get().syncRecordingToTime(this);
         }
@@ -109,33 +123,17 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
     // the moment we replay it is a single physics sub-step.
+    //
+    // We fire inputs BEFORE the original so CBF sees them during this sub-step.
+    // We do NOT teleport the player — position teleportation fights GD's own
+    // continuous collision detection and causes the engine to register deaths
+    // whenever consecutive recorded positions straddle a hazard. Pure input
+    // replay lets physics (and collision) run naturally from replayed button state.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        auto& bot = BotManager::get();
-        
-        // Only increment tick when the level is ACTUALLY running (level time
-        // advancing). This prevents tick from running ahead during pauses,
-        // loading screens, or frame hitches — which was causing the CPS
-        // counter to spike (all backlogged inputs firing at once).
-        if (isPlay(this)) {
-            double currentLevelTime = BotManager::levelTime(this);
-            if (currentLevelTime < bot.m_lastTickLevelTime) {
-                // Level restarted (time went backwards) — reset tick
-                bot.simulationTick = 0;
-            } else if (currentLevelTime > bot.m_lastTickLevelTime) {
-                // Level is running — increment tick
-                bot.simulationTick++;
-            }
-            // If equal, level is frozen (paused) — don't increment
-            bot.m_lastTickLevelTime = currentLevelTime;
-        }
-        
-        // Replay inputs scheduled for this tick BEFORE the physics step.
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.replayInputsForTick(bot.simulationTick);
-        }
-        // Run the physics step.
+        // No fireDueInputs here — inputs are pushed to CBF's queue from
+        // getModifiedDelta (before CBF's buildStepQueue processes them).
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // Apply physics frame AFTER the step.
+        auto& bot = BotManager::get();
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
@@ -153,6 +151,13 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
+        // Push inputs to CBF's queue BEFORE CBF's buildStepQueue runs.
+        // Our hook priority is -1000000 (VeryEarly), so we run before CBF.
+        // CBF will read our entries from m_queuedButtons and place them
+        // at the exact substep using its own buildStepQueue logic.
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.pushInputsToCBFQueue();
+        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
