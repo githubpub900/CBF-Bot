@@ -2224,7 +2224,6 @@ public:
                 macro.events.push_back(e);
             }
         }
-        }
 
         in.close();
         macroName = name;
