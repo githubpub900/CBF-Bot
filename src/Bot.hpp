@@ -2104,7 +2104,7 @@ public:
         };
 
         uint32_t magic = 0x4D504447; // 'GDPM'
-        uint32_t version = 2;  // v2: level time only
+        uint32_t version = 4;  // v4: X-position based inputs
         uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
         uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
@@ -2132,10 +2132,10 @@ public:
             wr(&held, 1);
         }
 
-        // Write input events
+        // Write input events (X-position based)
         for (auto const& e : macro.events) {
             uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
-            wr(&e.xPos, 4);       // float
+            wr(&e.xPos, 4);       // float (was double time, 8 bytes)
             wr(&e.button, 1);
             wr(&flags, 1);
         }
@@ -2208,13 +2208,22 @@ public:
             for (uint32_t i = 0; i < inputCount && in; ++i) {
                 InputEvent e;
                 uint8_t flags = 0;
-                rd(&e.time, 8);
+                if (version >= 4) {
+                    // v4+: X-position based (float)
+                    rd(&e.xPos, 4);
+                } else {
+                    // v2/v3: time-based (double) — read and discard
+                    double oldTime = 0.0;
+                    rd(&oldTime, 8);
+                    e.xPos = 0.f;  // legacy macros won't replay accurately
+                }
                 rd(&e.button, 1);
                 rd(&flags, 1);
                 e.down    = (flags & 1) != 0;
                 e.player2 = (flags & 2) != 0;
                 macro.events.push_back(e);
             }
+        }
         }
 
         in.close();
