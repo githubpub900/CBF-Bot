@@ -117,17 +117,16 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // replay lets physics (and collision) run naturally from replayed button state.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        // Fire inputs BEFORE the step (lookahead by dt)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.fireDueInputs(this, dt);
+            // Apply physics frame FIRST — puts player at the exact recorded X
+            // for this step. This ensures inputs fire at the correct X position,
+            // preventing them from grouping together.
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
+            // Fire inputs at the corrected X (no dt lookahead needed — X is exact)
+            bot.fireDueInputs(this, 0.0f);
         }
         // Run the physics step
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // Apply physics frame AFTER (position only, NO velocity — this was
-        // what stopped the fighting)
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
-        }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
