@@ -1656,11 +1656,8 @@ public:
         injecting = false;
     }
 
-    // Apply a physics frame. Called from processCommands BEFORE the original
-    // runs (so physics starts from the correct position).
        // Apply position/velocity from the physics frame. Called BEFORE
-    // processCommands so the step starts from the correct position.
-    void applyPhysicsPosition(double time) {
+        void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1683,13 +1680,15 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
+        // ONLY set position, NEVER velocity. Setting velocity fights the
+        // inputs' natural effect (e.g., jump velocity gets overridden).
+        // Position-only correction keeps the player on track without
+        // interfering with input-driven movement.
         if (pl->m_player1) {
             pl->m_player1->setPosition({frame.p1x, frame.p1y});
-            pl->m_player1->m_yVelocity = frame.p1yVel;
         }
         if (pl->m_player2) {
             pl->m_player2->setPosition({frame.p2x, frame.p2y});
-            pl->m_player2->m_yVelocity = frame.p2yVel;
         }
     }
 
