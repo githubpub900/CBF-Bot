@@ -1423,7 +1423,7 @@ public:
             lastX = std::max(lastX, e.xPos);
         }
         int repaired = 0;
-        for (int int = 0; pi < 2; ++pi) {
+        for (int pi = 0; pi < 2; ++pi) {
             for (int b = 1; b <= 3; ++b) {
                 if (held[pi][b]) {
                     macro.events.emplace_back(lastX + 1.f,
@@ -1803,7 +1803,7 @@ public:
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
-            playbackRecordIndex = 0;
+            playbackIndex = 0;
             physicsPlaybackIndex = 0;
             seekPlaybackTo(0.f);                  // inputs use X
             seekPhysicsPlayback(0.0);              // physics frames use levelTime
@@ -1812,7 +1812,7 @@ public:
     }
 
     void onPlayerDeath(PlayLayer* pl) {
-        if (mode == bot::Mode::Position) {
+        if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
