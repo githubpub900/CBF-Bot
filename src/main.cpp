@@ -229,6 +229,7 @@ class $modify(BotPlayLayer, PlayLayer) {
 //  This is the Claude Opus insight: PlayerObject::update is the per-substep
 //  clock, not processCommands.
 // ============================================================================
+
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
         (void) self.setHookPriority("PlayerObject::update", -1000000);
@@ -236,10 +237,9 @@ class $modify(BotPlayerObject, PlayerObject) {
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Fire inputs per substep using NATURAL X (before physics correction).
-        // X advances per substep under CBF, giving substep precision.
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
-            this == this->m_gameLayer->m_player1) {
+        // Fire inputs per substep using NATURAL X. We no longer restrict to P1 
+        // so P2's inputs trigger correctly in duals.
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer) {
             bot.fireDueInputs(this->m_gameLayer, 0.0f);
         }
         PlayerObject::update(dt);

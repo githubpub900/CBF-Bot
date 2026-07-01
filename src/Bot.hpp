@@ -1198,6 +1198,15 @@ public:
     bool      speedhackEnabled = false;
     double    speed = 1.0;
 
+    // balls
+    size_t    playbackIndex = 0;
+    size_t    playbackIndexP2 = 0; // ADD THIS for dual player
+    double m_lastRecordTime = 0.0;
+    
+    // ADD THESE to track movement direction for reverse portal support
+    float m_lastP1X = 0.f; 
+    float m_lastP2X = 0.f;
+
     // Misc options.
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
     bool      discardDeadInputs  = true;  // truncate on checkpoint reload / restart
@@ -1348,10 +1357,13 @@ public:
         }
         mode = bot::Mode::Playing;
         auto pl = PlayLayer::get();
-        float startX = pl && pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-        seekPlaybackTo(startX);
+        float x1 = pl && pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
+        float x2 = pl && pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
+        seekPlaybackTo(x1, x2);
         seekPhysicsPlayback(levelTime(gl));
         m_currentHeld.fill(false);
+        m_lastP1X = x1;
+        m_lastP2X = x2;
         log::info("[Bot] Playback started ({} events, {} frames)",
                   macro.events.size(), macro.physicsFrames.size());
         notify("Playback started", NotificationIcon::Success);
@@ -1362,6 +1374,7 @@ public:
         if (mode == bot::Mode::Playing) releaseAll();
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
+        playbackIndexP2 = 0;
         physicsPlaybackIndex = 0;
         m_currentHeld.fill(false);
         refreshUI();
@@ -1378,11 +1391,19 @@ public:
     }
 
     // Move the playback cursor to the first event at/after `time`.
-    void seekPlaybackTo(float x) {
+    void seekPlaybackTo(float x1, float x2) {
         playbackIndex = 0;
-        while (playbackIndex < macro.events.size() &&
-               macro.events[playbackIndex].xPos < x) {
+        while (playbackIndex < macro.events.size()) {
+            auto const& e = macro.events[playbackIndex];
+            if (!e.player2 && e.xPos > x1) break;
             ++playbackIndex;
+        }
+        
+        playbackIndexP2 = 0;
+        while (playbackIndexP2 < macro.events.size()) {
+            auto const& e = macro.events[playbackIndexP2];
+            if (e.player2 && e.xPos > x2) break;
+            ++playbackIndexP2;
         }
     }
 
@@ -1500,15 +1521,12 @@ public:
     }
 
     // Drop every recorded event whose timestamp is strictly after `t`.
-    void truncateAfter(float x) {
-        size_t n = macro.events.size();
-        while (n > 0 && macro.events[n - 1].xPos > x) --n;
-        if (n < macro.events.size()) {
-            size_t dropped = macro.events.size() - n;
-            macro.events.resize(n);
+    void truncateAfter(int eventCount) {
+        if (macro.events.size() > static_cast<size_t>(eventCount)) {
+            size_t dropped = macro.events.size() - eventCount;
+            macro.events.resize(eventCount);
             refreshUIProgress();
-            log::info("[Bot] Re-record: discarded {} superseded input(s) after x={:.3f}",
-                      dropped, x);
+            log::info("[Bot] Re-record: discarded {} superseded input(s)", dropped);
         }
     }
 
@@ -1542,12 +1560,12 @@ public:
     // At playback start / checkpoint-resume, re-press any button whose last
     // transition before `time` was a press, so a hold that spans the resume
     // point is honoured instead of silently dropped.
-    void applyHeldStateAt(GJBaseGameLayer* gl, float x) {
+    void applyHeldStateAt(GJBaseGameLayer* gl, int eventCount) {
         if (!gl) return;
         std::array<std::array<int, 4>, 2> last{};
         for (auto& row : last) row.fill(0);
-        for (auto const& e : macro.events) {
-            if (e.xPos >= x) break;
+        for (int i = 0; i < eventCount && i < static_cast<int>(macro.events.size()); ++i) {
+            auto const& e = macro.events[i];
             int pi = e.player2 ? 1 : 0;
             if (e.button >= 1 && e.button <= 3) last[pi][e.button] = e.down ? 1 : -1;
         }
@@ -1624,13 +1642,55 @@ public:
         float p2X = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
 
         injecting = true;
-        while (playbackIndex < macro.events.size()) {
-            auto const& e = macro.events[playbackIndex];
-            float checkX = e.player2 ? p2X : p1X;
-            if (e.xPos > checkX) break;  // X comparison, not levelTime
-            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
-            ++playbackIndex;
+
+        // P1 Logic
+        bool p1Reversed = (p1X < m_lastP1X - 0.01f);
+        bool p1Forward  = (p1X > m_lastP1X + 0.01f);
+
+        if (p1Reversed) {
+            // Moving left (reverse portal / platformer): fire backwards
+            while (playbackIndex > 0) {
+                auto const& e = macro.events[playbackIndex - 1];
+                if (e.player2) { --playbackIndex; continue; }
+                if (e.xPos < p1X) break;
+                gl->handleButton(e.down, static_cast<int>(e.button), true);
+                --playbackIndex;
+            }
+        } else if (p1Forward) {
+            // Moving right: fire forwards
+            while (playbackIndex < macro.events.size()) {
+                auto const& e = macro.events[playbackIndex];
+                if (e.player2) { ++playbackIndex; continue; }
+                if (e.xPos > p1X) break;
+                gl->handleButton(e.down, static_cast<int>(e.button), true);
+                ++playbackIndex;
+            }
         }
+        m_lastP1X = p1X;
+
+        // P2 Logic
+        bool p2Reversed = (p2X < m_lastP2X - 0.01f);
+        bool p2Forward  = (p2X > m_lastP2X + 0.01f);
+
+        if (p2Reversed) {
+            while (playbackIndexP2 > 0) {
+                auto const& e = macro.events[playbackIndexP2 - 1];
+                if (!e.player2) { --playbackIndexP2; continue; }
+                if (e.xPos < p2X) break;
+                gl->handleButton(e.down, static_cast<int>(e.button), false);
+                --playbackIndexP2;
+            }
+        } else if (p2Forward) {
+            while (playbackIndexP2 < macro.events.size()) {
+                auto const& e = macro.events[playbackIndexP2];
+                if (!e.player2) { ++playbackIndexP2; continue; }
+                if (e.xPos > p2X) break;
+                gl->handleButton(e.down, static_cast<int>(e.button), false);
+                ++playbackIndexP2;
+            }
+        }
+        m_lastP2X = p2X;
+
         injecting = false;
     }
 
@@ -1737,11 +1797,7 @@ public:
         if (!checkpoints.empty()) checkpoints.pop_back();
     }
 
-    // Called after the game has loaded a checkpoint. The actual discarding of
-    // "dead inputs" is handled automatically by syncRecordingToTime (the level
-    // clock jumps backwards on a checkpoint load); here we just apply our accurate
-    // physics snapshot to fix the practice bug, and re-align playback.
-      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+       void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1757,47 +1813,61 @@ public:
         }
 
         if (mode == bot::Mode::Playing) {
-            seekPhysicsPlayback(frame->levelTime);  // physics frames use levelTime
-            seekPlaybackTo(frame->xPos);            // inputs use X
+            seekPhysicsPlayback(frame->levelTime);
+            float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
+            float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
+            seekPlaybackTo(x1, x2);
+            m_lastP1X = x1;
+            m_lastP2X = x2;
+            applyHeldStateAt(pl, frame->eventCount);
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(frame->xPos);             // inputs use X
-            truncatePhysicsAfter(frame->levelTime); // physics frames use levelTime
+            truncateAfter(frame->eventCount);
+            truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
         }
     }
-    // Pause-menu restart. The level clock resets, so syncRecordingToTime will
-    // overwrite the superseded inputs on the next frame; we just clear the
-    // checkpoint stack and rewind the playback cursor here.
+
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
+            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
             if (pl) {
-                seekPlaybackTo(0.f);              // inputs use X
-                seekPhysicsPlayback(0.0);          // physics frames use levelTime
-                applyHeldStateAt(pl, 0.f);         // inputs use X
+                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
+                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
+                seekPlaybackTo(x1, x2);
+                m_lastP1X = x1;
+                m_lastP2X = x2;
+                seekPhysicsPlayback(0.0);
+                applyHeldStateAt(pl, 0);
             }
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(0.f);                    // inputs use X
-            truncatePhysicsAfter(0.0);              // physics frames use levelTime
+            truncateAfter(0);
+            truncatePhysicsAfter(0.0);
             recomputeHeldState();
             resetHeldState();
         }
         refreshUIProgress();
     }
 
-    // Fresh level / resetLevel: reset transient state but keep the macro.
     void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
+            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
-            seekPlaybackTo(0.f);                  // inputs use X
-            seekPhysicsPlayback(0.0);              // physics frames use levelTime
-            if (pl) applyHeldStateAt(pl, 0.f);     // inputs use X
+            if (pl) {
+                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
+                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
+                seekPlaybackTo(x1, x2);
+                m_lastP1X = x1;
+                m_lastP2X = x2;
+                seekPhysicsPlayback(0.0);
+                applyHeldStateAt(pl, 0);
+            }
         }
     }
 
@@ -1805,13 +1875,20 @@ public:
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
+            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
-            seekPlaybackTo(0.f);                  // inputs use X
-            seekPhysicsPlayback(0.0);              // physics frames use levelTime
+            if (pl) {
+                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
+                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
+                seekPlaybackTo(x1, x2);
+                m_lastP1X = x1;
+                m_lastP2X = x2;
+                seekPhysicsPlayback(0.0);
+            }
         } else if (mode == bot::Mode::Recording) {
-            float x = pl && pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-            truncateAfter(x);                     // inputs use X
-            truncatePhysicsAfter(levelTime(pl));  // physics frames use levelTime
+            int eventCount = static_cast<int>(macro.events.size());
+            truncateAfter(eventCount);
+            truncatePhysicsAfter(levelTime(pl));
             recomputeHeldState();
         }
     }
