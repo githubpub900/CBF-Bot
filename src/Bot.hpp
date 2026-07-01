@@ -1199,9 +1199,7 @@ public:
     double    speed = 1.0;
 
     // balls
-    size_t    playbackIndex = 0;
     size_t    playbackIndexP2 = 0; // ADD THIS for dual player
-    double m_lastRecordTime = 0.0;
     
     // ADD THESE to track movement direction for reverse portal support
     float m_lastP1X = 0.f; 
