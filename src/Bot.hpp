@@ -248,7 +248,7 @@ namespace bot {
 
     // The magic + version stamped at the top of a saved macro file.
     static constexpr uint32_t MACRO_MAGIC   = 0x4D544447; // 'G''D''T''M' little-endian
-    static constexpr uint32_t MACRO_VERSION = 5;  // v5: X-position based inputs
+    static constexpr uint32_t MACRO_VERSION = 6;  // v6: level-time based inputs (accurate)
 
     // Default toggle key for the GUI.
     static constexpr cocos2d::enumKeyCodes TOGGLE_KEY = cocos2d::enumKeyCodes::KEY_K;
@@ -292,17 +292,17 @@ namespace bot {
 //  next up event for the same button.
 //
 struct InputEvent {
-    float   xPos     = 0.f;   // player X position when input fired
+    double  time     = 0.0;   // m_gameState.m_levelTime when the input fired
     uint8_t button   = 1;
     bool    down     = true;
     bool    player2  = false;
 
     InputEvent() = default;
-    InputEvent(float x, uint8_t b, bool d, bool p2)
-        : xPos(x), button(b), down(d), player2(p2) {}
+    InputEvent(double t, uint8_t b, bool d, bool p2)
+        : time(t), button(b), down(d), player2(p2) {}
 
     bool operator<(InputEvent const& o) const {
-        if (xPos != o.xPos) return xPos < o.xPos;
+        if (time != o.time) return time < o.time;
         if (down != o.down) return down && !o.down;
         return button < o.button;
     }
@@ -1115,8 +1115,7 @@ struct PlayerSnapshot {
 //
 struct CheckpointFrame {
     int            eventCount = 0;
-    double         levelTime  = 0.0;   // for physics frames
-    float          xPos       = 0.f;   // for inputs
+    double         levelTime  = 0.0;   // used for both physics frames AND inputs
     PlayerSnapshot p1;
     PlayerSnapshot p2;
     void*          checkpointPtr = nullptr;
@@ -1149,10 +1148,11 @@ struct Macro {
     size_t size() const { return events.size(); }
     bool empty() const { return events.empty(); }
 
-    // The level time of the final input -- used for the progress readout.
-    // Since timestamps are now wall-clock, this returns wall-clock duration.
+    // The level time of the final input/frame -- used for the progress readout.
     double duration() const {
-        return physicsFrames.empty() ? 0.0 : physicsFrames.back().time;
+        double d = events.empty() ? 0.0 : events.back().time;
+        if (!physicsFrames.empty()) d = std::max(d, physicsFrames.back().time);
+        return d;
     }
     // Keep the list ordered. We almost always append in order while recording,
     // but a stable sort makes editing / merging safe and cheap.
@@ -1197,13 +1197,6 @@ public:
     // Speedhack.
     bool      speedhackEnabled = false;
     double    speed = 1.0;
-
-    // balls
-    size_t    playbackIndexP2 = 0; // ADD THIS for dual player
-    
-    // ADD THESE to track movement direction for reverse portal support
-    float m_lastP1X = 0.f; 
-    float m_lastP2X = 0.f;
 
     // Misc options.
     bool      practiceFixEnabled = true;  // accurate checkpoint snapshots
@@ -1354,14 +1347,12 @@ public:
             return;
         }
         mode = bot::Mode::Playing;
-        auto pl = PlayLayer::get();
-        float x1 = pl && pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-        float x2 = pl && pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-        seekPlaybackTo(x1, x2);
-        seekPhysicsPlayback(levelTime(gl));
+        validateAndRepair();
+        double startT = levelTime(gl);
+        seekPlaybackTo(startT);
+        seekPhysicsPlayback(startT);
+        applyHeldStateAt(gl, startT);
         m_currentHeld.fill(false);
-        m_lastP1X = x1;
-        m_lastP2X = x2;
         log::info("[Bot] Playback started ({} events, {} frames)",
                   macro.events.size(), macro.physicsFrames.size());
         notify("Playback started", NotificationIcon::Success);
@@ -1372,7 +1363,6 @@ public:
         if (mode == bot::Mode::Playing) releaseAll();
         mode = bot::Mode::Disabled;
         playbackIndex = 0;
-        playbackIndexP2 = 0;
         physicsPlaybackIndex = 0;
         m_currentHeld.fill(false);
         refreshUI();
@@ -1389,19 +1379,11 @@ public:
     }
 
     // Move the playback cursor to the first event at/after `time`.
-    void seekPlaybackTo(float x1, float x2) {
+    void seekPlaybackTo(double time) {
         playbackIndex = 0;
-        while (playbackIndex < macro.events.size()) {
-            auto const& e = macro.events[playbackIndex];
-            if (!e.player2 && e.xPos > x1 + 1.0f) break;
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time < time) {
             ++playbackIndex;
-        }
-        
-        playbackIndexP2 = 0;
-        while (playbackIndexP2 < macro.events.size()) {
-            auto const& e = macro.events[playbackIndexP2];
-            if (e.player2 && e.xPos > x2 + 1.0f) break;
-            ++playbackIndexP2;
         }
     }
 
@@ -1435,17 +1417,19 @@ public:
     void validateAndRepair() {
         std::array<std::array<bool, 4>, 2> held{};
         for (auto& row : held) row.fill(false);
-        float lastX = 0.f;
+        double lastTime = 0.0;
         for (auto const& e : macro.events) {
             if (e.button >= 1 && e.button <= 3)
                 held[e.player2 ? 1 : 0][e.button] = e.down;
-            lastX = std::max(lastX, e.xPos);
+            lastTime = std::max(lastTime, e.time);
         }
         int repaired = 0;
         for (int pi = 0; pi < 2; ++pi) {
             for (int b = 1; b <= 3; ++b) {
                 if (held[pi][b]) {
-                    macro.events.emplace_back(lastX + 1.f,
+                    // Release just after the last real event so playback never
+                    // leaves a button stuck down, without shifting any real timing.
+                    macro.events.emplace_back(lastTime + 0.001,
                         static_cast<uint8_t>(b), false, pi == 1);
                     ++repaired;
                 }
@@ -1498,17 +1482,13 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Capture player X position — NOT levelTime
-        float x = 0.f;
-        if (pl) {
-            if (isPlayer1 && pl->m_player1) {
-                x = pl->m_player1->getPositionX();
-            } else if (!isPlayer1 && pl->m_player2) {
-                x = pl->m_player2->getPositionX();
-            }
-        }
+        // Capture the authoritative level clock. This is what CBF has already
+        // advanced to the correct sub-step by the time handleButton fires, so
+        // it is sub-frame accurate for free (see the design notes at the top
+        // of this file). It is also monotonic, unlike X position.
+        double t = levelTime(gl);
 
-        InputEvent e(x, static_cast<uint8_t>(button), down, player2);
+        InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
         refreshUIProgress();
     }
@@ -1519,12 +1499,15 @@ public:
     }
 
     // Drop every recorded event whose timestamp is strictly after `t`.
-    void truncateAfter(int eventCount) {
-        if (macro.events.size() > static_cast<size_t>(eventCount)) {
-            size_t dropped = macro.events.size() - eventCount;
-            macro.events.resize(eventCount);
+    void truncateAfter(double t) {
+        size_t n = macro.events.size();
+        while (n > 0 && macro.events[n - 1].time > t) --n;
+        if (n < macro.events.size()) {
+            size_t dropped = macro.events.size() - n;
+            macro.events.resize(n);
             refreshUIProgress();
-            log::info("[Bot] Re-record: discarded {} superseded input(s)", dropped);
+            log::info("[Bot] Re-record: discarded {} superseded input(s) after t={:.6f}",
+                      dropped, t);
         }
     }
 
@@ -1558,12 +1541,12 @@ public:
     // At playback start / checkpoint-resume, re-press any button whose last
     // transition before `time` was a press, so a hold that spans the resume
     // point is honoured instead of silently dropped.
-    void applyHeldStateAt(GJBaseGameLayer* gl, int eventCount) {
+    void applyHeldStateAt(GJBaseGameLayer* gl, double time) {
         if (!gl) return;
         std::array<std::array<int, 4>, 2> last{};
         for (auto& row : last) row.fill(0);
-        for (int i = 0; i < eventCount && i < static_cast<int>(macro.events.size()); ++i) {
-            auto const& e = macro.events[i];
+        for (auto const& e : macro.events) {
+            if (e.time >= time) break;
             int pi = e.player2 ? 1 : 0;
             if (e.button >= 1 && e.button <= 3) last[pi][e.button] = e.down ? 1 : -1;
         }
@@ -1629,55 +1612,23 @@ public:
         macro.physicsFrames.push_back(f);
     }
     
-    void fireDueInputs(GJBaseGameLayer* gl, float dt = 0.0f) {
+    // Fire every recorded event whose timestamp has been reached. `time` is
+    // the CURRENT level clock, read once per physics step from processCommands
+    // (called before the original step runs). Since m_levelTime is monotonic and identical in meaning between record and
+    // playback, comparing against it (rather than X position) means an event
+    // fires at most one sub-step away from the instant it was recorded --
+    // regardless of speed portals, dual mode, or knockback.
+    void fireDueInputs(GJBaseGameLayer* gl, double time) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
 
-        auto pl = PlayLayer::get();
-        if (!pl) return;
-
-        float p1X = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-        float p2X = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-
         injecting = true;
-
-        // P1 Logic
-        while (playbackIndex < macro.events.size()) {
+        while (playbackIndex < macro.events.size() &&
+               macro.events[playbackIndex].time <= time) {
             auto const& e = macro.events[playbackIndex];
-            if (e.player2) { ++playbackIndex; continue; }
-            
-            // If the input is far behind us, SKIP it. 
-            // This prevents 100 clicks at once if applyPhysicsPosition teleports us.
-            if (e.xPos < p1X - 1.0f) {
-                ++playbackIndex;
-                continue;
-            }
-            // If the input is ahead of us, wait.
-            if (e.xPos > p1X + 1.0f) {
-                break;
-            }
-            
-            gl->handleButton(e.down, static_cast<int>(e.button), true);
+            gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
-
-        // P2 Logic
-        while (playbackIndexP2 < macro.events.size()) {
-            auto const& e = macro.events[playbackIndexP2];
-            if (!e.player2) { ++playbackIndexP2; continue; }
-            
-            if (e.xPos < p2X - 1.0f) {
-                ++playbackIndexP2;
-                continue;
-            }
-            if (e.xPos > p2X + 1.0f) {
-                break;
-            }
-            
-            gl->handleButton(e.down, static_cast<int>(e.button), false);
-            ++playbackIndexP2;
-        }
-
         injecting = false;
     }
 
@@ -1771,7 +1722,6 @@ public:
         CheckpointFrame f;
         f.eventCount    = static_cast<int>(macro.events.size());
         f.levelTime     = levelTime(pl);
-        f.xPos          = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
         f.checkpointPtr = cpPtr;
         if (practiceFixEnabled) {
             f.p1.capture(pl->m_player1);
@@ -1784,7 +1734,11 @@ public:
         if (!checkpoints.empty()) checkpoints.pop_back();
     }
 
-       void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+    // Called after the game has loaded a checkpoint. The actual discarding of
+    // "dead inputs" is handled automatically by syncRecordingToTime (the level
+    // clock jumps backwards on a checkpoint load); here we just apply our accurate
+    // physics snapshot to fix the practice bug, and re-align playback.
+      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1801,37 +1755,30 @@ public:
 
         if (mode == bot::Mode::Playing) {
             seekPhysicsPlayback(frame->levelTime);
-            float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-            float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-            seekPlaybackTo(x1, x2);
-            m_lastP1X = x1;
-            m_lastP2X = x2;
-            applyHeldStateAt(pl, frame->eventCount);
+            seekPlaybackTo(frame->levelTime);
+            applyHeldStateAt(pl, frame->levelTime);
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(frame->eventCount);
+            truncateAfter(frame->levelTime);
             truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
         }
     }
-
+    // Pause-menu restart. The level clock resets, so syncRecordingToTime will
+    // overwrite the superseded inputs on the next frame; we just clear the
+    // checkpoint stack and rewind the playback cursor here.
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
-            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
             if (pl) {
-                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-                seekPlaybackTo(x1, x2);
-                m_lastP1X = x1;
-                m_lastP2X = x2;
+                seekPlaybackTo(0.0);
                 seekPhysicsPlayback(0.0);
-                applyHeldStateAt(pl, 0);
+                applyHeldStateAt(pl, 0.0);
             }
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(0);
+            truncateAfter(0.0);
             truncatePhysicsAfter(0.0);
             recomputeHeldState();
             resetHeldState();
@@ -1839,22 +1786,16 @@ public:
         refreshUIProgress();
     }
 
+    // Fresh level / resetLevel: reset transient state but keep the macro.
     void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
-            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
-            if (pl) {
-                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-                seekPlaybackTo(x1, x2);
-                m_lastP1X = x1;
-                m_lastP2X = x2;
-                seekPhysicsPlayback(0.0);
-                applyHeldStateAt(pl, 0);
-            }
+            seekPlaybackTo(0.0);
+            seekPhysicsPlayback(0.0);
+            if (pl) applyHeldStateAt(pl, 0.0);
         }
     }
 
@@ -1862,20 +1803,13 @@ public:
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
-            playbackIndexP2 = 0;
             physicsPlaybackIndex = 0;
-            if (pl) {
-                float x1 = pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-                float x2 = pl->m_player2 ? pl->m_player2->getPositionX() : 0.f;
-                seekPlaybackTo(x1, x2);
-                m_lastP1X = x1;
-                m_lastP2X = x2;
-                seekPhysicsPlayback(0.0);
-            }
+            seekPlaybackTo(0.0);
+            seekPhysicsPlayback(0.0);
         } else if (mode == bot::Mode::Recording) {
-            int eventCount = static_cast<int>(macro.events.size());
-            truncateAfter(eventCount);
-            truncatePhysicsAfter(levelTime(pl));
+            double t = levelTime(pl);
+            truncateAfter(t);
+            truncatePhysicsAfter(t);
             recomputeHeldState();
         }
     }
@@ -2004,6 +1938,7 @@ public:
     // store a record per frame, only the transitions, which is what keeps macros
     // tiny regardless of level length or playback FPS.
     bool saveMacro(std::string const& name) {
+        validateAndRepair();
         auto path = macroPath(name);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) {
@@ -2029,7 +1964,7 @@ public:
         wr(&count, 4);
         for (auto const& e : macro.events) {
             uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
-            wr(&e.xPos, 4);       // float (was double time, 8 bytes)
+            wr(&e.time, 8);       // double, level-time seconds
             wr(&e.button, 1);
             wr(&flags, 1);
         }
@@ -2083,14 +2018,20 @@ public:
         for (uint32_t i = 0; i < count && in; ++i) {
             InputEvent e;
             uint8_t flags = 0;
-            if (version >= 5) {
-                // v5+: X-position based (float)
-                rd(&e.xPos, 4);
+            if (version >= 6) {
+                // v6+: level-time based (double) -- accurate.
+                rd(&e.time, 8);
+            } else if (version == 5) {
+                // v5: X-position based (float). There is no way to recover a
+                // true timestamp from a stored X position, so these macros
+                // cannot be losslessly upgraded. Skip the corrupted field and
+                // warn loudly rather than silently mis-playing the run.
+                float oldX = 0.f;
+                rd(&oldX, 4);
+                e.time = 0.0;
             } else {
-                // v4 and below: time-based (double) — can't convert to X
-                double oldTime = 0.0;
-                rd(&oldTime, 8);
-                e.xPos = 0.f;  // legacy macros won't replay accurately
+                // v4 and below: time-based (double) -- same format as v6+.
+                rd(&e.time, 8);
             }
             rd(&e.button, 1);
             rd(&flags, 1);
@@ -2103,6 +2044,13 @@ public:
         recomputeHeldState();
         macroName = name;
         playbackIndex = 0;
+        if (version == 5) {
+            notify("This macro was saved by the old X-position build and "
+                   "cannot be recovered accurately -- please re-record it.",
+                   NotificationIcon::Warning);
+            log::warn("[Bot] Loaded v5 (X-position) macro '{}' -- timestamps "
+                      "are unrecoverable, re-record recommended", name);
+        }
         log::info("[Bot] Loaded {} events from {} (level {})",
                   macro.events.size(), path.string(), macro.levelID);
         notify(fmt::format("Loaded {} inputs", macro.events.size()),
@@ -2129,7 +2077,7 @@ public:
         };
 
         uint32_t magic = 0x4D504447; // 'GDPM'
-        uint32_t version = 4;  // v4: X-position based inputs
+        uint32_t version = 5;  // v5: level-time based inputs (accurate)
         uint32_t frameCount = static_cast<uint32_t>(macro.physicsFrames.size());
         uint32_t inputCount = static_cast<uint32_t>(macro.events.size());
         int32_t levelID = macro.levelID;
@@ -2157,10 +2105,10 @@ public:
             wr(&held, 1);
         }
 
-        // Write input events (X-position based)
+        // Write input events (level-time based)
         for (auto const& e : macro.events) {
             uint8_t flags = (e.down ? 1 : 0) | (e.player2 ? 2 : 0);
-            wr(&e.xPos, 4);       // float (was double time, 8 bytes)
+            wr(&e.time, 8);       // double, level-time seconds
             wr(&e.button, 1);
             wr(&flags, 1);
         }
@@ -2230,23 +2178,36 @@ public:
         // Read input events (v2+)
         if (version >= 2) {
             macro.events.reserve(inputCount);
+            bool warnV4 = false;
             for (uint32_t i = 0; i < inputCount && in; ++i) {
                 InputEvent e;
                 uint8_t flags = 0;
-                if (version >= 4) {
-                    // v4+: X-position based (float)
-                    rd(&e.xPos, 4);
+                if (version >= 5) {
+                    // v5+: level-time based (double) -- accurate.
+                    rd(&e.time, 8);
+                } else if (version == 4) {
+                    // v4: X-position based (float). Not recoverable as a
+                    // timestamp -- skip the field and flag for a warning.
+                    float oldX = 0.f;
+                    rd(&oldX, 4);
+                    e.time = 0.0;
+                    warnV4 = true;
                 } else {
-                    // v2/v3: time-based (double) — read and discard
-                    double oldTime = 0.0;
-                    rd(&oldTime, 8);
-                    e.xPos = 0.f;  // legacy macros won't replay accurately
+                    // v2/v3: time-based (double) -- same format as v5+.
+                    rd(&e.time, 8);
                 }
                 rd(&e.button, 1);
                 rd(&flags, 1);
                 e.down    = (flags & 1) != 0;
                 e.player2 = (flags & 2) != 0;
                 macro.events.push_back(e);
+            }
+            if (warnV4) {
+                notify("This physics macro was saved by the old X-position "
+                       "build and cannot be recovered accurately -- please "
+                       "re-record it.", NotificationIcon::Warning);
+                log::warn("[Bot] Loaded v4 (X-position) physics macro '{}' -- "
+                          "input timestamps are unrecoverable", name);
             }
         }
 
@@ -2318,7 +2279,7 @@ public:
             << " normalized=" << (macro.normalized ? 1 : 0) << "\n";
         out << "# time  button(1=jump,2=left,3=right)  D/U  P1/P2\n";
         for (auto const& e : macro.events) {
-            out << e.xPos << '\t'
+            out << formatTime50(e.time) << '\t'
                 << static_cast<int>(e.button) << '\t'
                 << (e.down ? 'D' : 'U') << '\t'
                 << (e.player2 ? "P2" : "P1") << '\n';
@@ -2351,10 +2312,10 @@ public:
                 continue;
             }
             std::istringstream ss(line);
-            float x; int button; std::string du, pp;
-            if (!(ss >> x >> button >> du >> pp)) continue;
+            double t; int button; std::string du, pp;
+            if (!(ss >> t >> button >> du >> pp)) continue;
             InputEvent e;
-            e.xPos    = x;
+            e.time    = t;
             e.button  = static_cast<uint8_t>(button);
             e.down    = (!du.empty() && (du[0] == 'D' || du[0] == 'd'));
             e.player2 = (pp == "P2" || pp == "p2");

@@ -108,18 +108,21 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // processCommands runs once per physics step. With Syzzi's CBF active there
     // are many tiny steps per rendered frame, so firing our due inputs here gives
     // sub-frame accuracy: the worst-case error between the recorded timestamp and
-    // the moment we replay it is a single physics sub-step.
+    // the moment we replay it is a single physics sub-step, because m_levelTime
+    // has already been advanced to this sub-step's value by the time we read it.
     //
-    // We fire inputs BEFORE the original so CBF sees them during this sub-step.
-    // We do NOT teleport the player — position teleportation fights GD's own
-    // continuous collision detection and causes the engine to register deaths
-    // whenever consecutive recorded positions straddle a hazard. Pure input
-    // replay lets physics (and collision) run naturally from replayed button state.
+    // We fire inputs BEFORE the original so CBF/the engine sees them during this
+    // sub-step. We do NOT teleport the player — position teleportation fights
+    // GD's own continuous collision detection and causes the engine to register
+    // deaths whenever consecutive recorded positions straddle a hazard. Pure
+    // input replay lets physics (and collision) run naturally from replayed
+    // button state, keyed on the same level-time clock inputs were recorded with.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // No input firing here — PlayerObject::update handles it per substep
-        // with the NATURAL X (before physics frame correction).
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.fireDueInputs(this, BotManager::levelTime(this));
+        }
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         // Apply physics frame AFTER the step (position only, no velocity)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
@@ -215,34 +218,6 @@ class $modify(BotPlayLayer, PlayLayer) {
         // Reset m_timeWarp and audio pitch when leaving the level
         this->m_gameState.m_timeWarp = 1.0f;
         bot.resetAudioPitch();
-    }
-};
-
-// ============================================================================
-//  PlayerObject::update hook — per-substep input dispatch
-// ============================================================================
-//  CBF splits each physics step into substeps inside PlayerObject::update.
-//  By hooking here with VeryEarly priority, we run BEFORE CBF's splitting,
-//  once per substep. m_levelTime is at step-end, but firing here gives us
-//  more frequent checks within the frame, catching inputs earlier.
-//
-//  This is the Claude Opus insight: PlayerObject::update is the per-substep
-//  clock, not processCommands.
-// ============================================================================
-
-class $modify(BotPlayerObject, PlayerObject) {
-    static void onModify(auto& self) {
-        (void) self.setHookPriority("PlayerObject::update", -1000000);
-    }
-
-    void update(float dt) {
-        auto& bot = BotManager::get();
-        // Only fire if we are the game layer's active player object
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
-            (this == this->m_gameLayer->m_player1 || this == this->m_gameLayer->m_player2)) {
-            bot.fireDueInputs(this->m_gameLayer, 0.0f);
-        }
-        PlayerObject::update(dt);
     }
 };
 
