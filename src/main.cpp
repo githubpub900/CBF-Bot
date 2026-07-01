@@ -237,9 +237,9 @@ class $modify(BotPlayerObject, PlayerObject) {
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Fire inputs per substep using NATURAL X. We no longer restrict to P1 
-        // so P2's inputs trigger correctly in duals.
-        if (bot.mode == bot::Mode::Playing && this->m_gameLayer) {
+        // Only fire if we are the game layer's active player object
+        if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
+            (this == this->m_gameLayer->m_player1 || this == this->m_gameLayer->m_player2)) {
             bot.fireDueInputs(this->m_gameLayer, 0.0f);
         }
         PlayerObject::update(dt);

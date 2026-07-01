@@ -1393,14 +1393,14 @@ public:
         playbackIndex = 0;
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            if (!e.player2 && e.xPos > x1) break;
+            if (!e.player2 && e.xPos > x1 + 0.01f) break;
             ++playbackIndex;
         }
         
         playbackIndexP2 = 0;
         while (playbackIndexP2 < macro.events.size()) {
             auto const& e = macro.events[playbackIndexP2];
-            if (e.player2 && e.xPos > x2) break;
+            if (e.player2 && e.xPos > x2 + 0.01f) break;
             ++playbackIndexP2;
         }
     }
@@ -1641,57 +1641,27 @@ public:
 
         injecting = true;
 
-        // P1 Logic
-        bool p1Reversed = (p1X < m_lastP1X - 0.01f);
-        bool p1Forward  = (p1X > m_lastP1X + 0.01f);
-
-        if (p1Reversed) {
-            // Moving left (reverse portal / platformer): fire backwards
-            while (playbackIndex > 0) {
-                auto const& e = macro.events[playbackIndex - 1];
-                if (e.player2) { --playbackIndex; continue; }
-                if (e.xPos < p1X) break;
-                gl->handleButton(e.down, static_cast<int>(e.button), true);
-                --playbackIndex;
-            }
-        } else if (p1Forward) {
-            // Moving right: fire forwards
-            while (playbackIndex < macro.events.size()) {
-                auto const& e = macro.events[playbackIndex];
-                if (e.player2) { ++playbackIndex; continue; }
-                if (e.xPos > p1X) break;
-                gl->handleButton(e.down, static_cast<int>(e.button), true);
-                ++playbackIndex;
-            }
+        // P1 Logic: Forward-only. A small epsilon (0.01f) prevents getting 
+        // stuck if the player stops slightly short of the input's X position.
+        while (playbackIndex < macro.events.size()) {
+            auto const& e = macro.events[playbackIndex];
+            if (e.player2) { ++playbackIndex; continue; }
+            if (e.xPos > p1X + 0.01f) break;
+            gl->handleButton(e.down, static_cast<int>(e.button), true);
+            ++playbackIndex;
         }
-        m_lastP1X = p1X;
 
-        // P2 Logic
-        bool p2Reversed = (p2X < m_lastP2X - 0.01f);
-        bool p2Forward  = (p2X > m_lastP2X + 0.01f);
-
-        if (p2Reversed) {
-            while (playbackIndexP2 > 0) {
-                auto const& e = macro.events[playbackIndexP2 - 1];
-                if (!e.player2) { --playbackIndexP2; continue; }
-                if (e.xPos < p2X) break;
-                gl->handleButton(e.down, static_cast<int>(e.button), false);
-                --playbackIndexP2;
-            }
-        } else if (p2Forward) {
-            while (playbackIndexP2 < macro.events.size()) {
-                auto const& e = macro.events[playbackIndexP2];
-                if (!e.player2) { ++playbackIndexP2; continue; }
-                if (e.xPos > p2X) break;
-                gl->handleButton(e.down, static_cast<int>(e.button), false);
-                ++playbackIndexP2;
-            }
+        // P2 Logic: Forward-only.
+        while (playbackIndexP2 < macro.events.size()) {
+            auto const& e = macro.events[playbackIndexP2];
+            if (!e.player2) { ++playbackIndexP2; continue; }
+            if (e.xPos > p2X + 0.01f) break;
+            gl->handleButton(e.down, static_cast<int>(e.button), false);
+            ++playbackIndexP2;
         }
-        m_lastP2X = p2X;
 
         injecting = false;
     }
-
        // Apply position/velocity from the physics frame. Called BEFORE
         void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
