@@ -1636,7 +1636,7 @@ public:
     }
 
        // Apply position/velocity from the physics frame. Called BEFORE
-    void applyPhysicsPosition(double time) {
+        void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1659,22 +1659,13 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
-        // ONLY correct if drift is significant (> 3 units).
-        // This prevents X from jumping ahead and causing input grouping.
-        // Small drift is left alone so inputs drive naturally.
+        // ALWAYS apply position (no range check). Do NOT set velocity —
+        // setting velocity fights the inputs.
         if (pl->m_player1) {
-            float dx = pl->m_player1->getPositionX() - frame.p1x;
-            float dy = pl->m_player1->getPositionY() - frame.p1y;
-            if (std::abs(dx) > 3.f || std::abs(dy) > 3.f) {
-                pl->m_player1->setPosition({frame.p1x, frame.p1y});
-            }
+            pl->m_player1->setPosition({frame.p1x, frame.p1y});
         }
         if (pl->m_player2) {
-            float dx = pl->m_player2->getPositionX() - frame.p2x;
-            float dy = pl->m_player2->getPositionY() - frame.p2y;
-            if (std::abs(dx) > 3.f || std::abs(dy) > 3.f) {
-                pl->m_player2->setPosition({frame.p2x, frame.p2y});
-            }
+            pl->m_player2->setPosition({frame.p2x, frame.p2y});
         }
     }
 

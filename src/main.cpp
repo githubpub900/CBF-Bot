@@ -116,11 +116,11 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // whenever consecutive recorded positions straddle a hazard. Pure input
     // replay lets physics (and collision) run naturally from replayed button state.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        // No input firing here — PlayerObject::update handles it per sub-step
+        // No input firing here — PlayerObject::update handles it per substep
+        // with the NATURAL X (before physics frame correction).
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto& bot = BotManager::get();
-        // Apply physics frame AFTER (position only, no velocity)
-        // This corrects drift without causing input grouping
+        // Apply physics frame AFTER the step (position only, no velocity)
         if (isPlay(this) && bot.mode == bot::Mode::Playing) {
             bot.applyPhysicsPosition(BotManager::levelTime(this));
         }
@@ -236,9 +236,8 @@ class $modify(BotPlayerObject, PlayerObject) {
 
     void update(float dt) {
         auto& bot = BotManager::get();
-        // Fire inputs per sub-step. X advances per sub-step under CBF,
-        // so checking X here gives sub-step precision.
-        // Only fire from P1's update (avoid double-fire in dual)
+        // Fire inputs per substep using NATURAL X (before physics correction).
+        // X advances per substep under CBF, giving substep precision.
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
             bot.fireDueInputs(this->m_gameLayer, 0.0f);
