@@ -292,7 +292,7 @@ namespace bot {
 //  next up event for the same button.
 //
 struct InputEvent {
-    float   xPos     = 0.f;   // player X position when input fired (sub-step precise under CBF)
+    float   xPos     = 0.f;   // player X position when input fired
     uint8_t button   = 1;
     bool    down     = true;
     bool    player2  = false;
@@ -1464,7 +1464,7 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+       void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
@@ -1479,8 +1479,7 @@ public:
         int  pi = player2 ? 1 : 0;
         heldState[pi][button] = down;
 
-        // Capture player X position — this has sub-step precision under CBF
-        // because X advances smoothly with each physics sub-step.
+        // Capture player X position — NOT levelTime
         float x = 0.f;
         if (pl) {
             if (isPlayer1 && pl->m_player1) {
@@ -1628,7 +1627,7 @@ public:
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
             float checkX = e.player2 ? p2X : p1X;
-            if (e.xPos > checkX) break;
+            if (e.xPos > checkX) break;  // X comparison, not levelTime
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
         }
