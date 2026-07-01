@@ -116,17 +116,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // whenever consecutive recorded positions straddle a hazard. Pure input
     // replay lets physics (and collision) run naturally from replayed button state.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        auto& bot = BotManager::get();
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            // Apply physics frame FIRST — puts player at the exact recorded X
-            // for this step. This ensures inputs fire at the correct X position,
-            // preventing them from grouping together.
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
-            // Fire inputs at the corrected X (no dt lookahead needed — X is exact)
-            bot.fireDueInputs(this, 0.0f);
-        }
-        // Run the physics step
+        // No input firing here — PlayerObject::update handles it per sub-step
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        auto& bot = BotManager::get();
+        // Apply physics frame AFTER (position only, no velocity)
+        // This corrects drift without causing input grouping
+        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
+            bot.applyPhysicsPosition(BotManager::levelTime(this));
+        }
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }
@@ -234,19 +231,17 @@ class $modify(BotPlayLayer, PlayLayer) {
 // ============================================================================
 class $modify(BotPlayerObject, PlayerObject) {
     static void onModify(auto& self) {
-        // VeryEarly = run BEFORE CBF's hook
         (void) self.setHookPriority("PlayerObject::update", -1000000);
     }
 
     void update(float dt) {
         auto& bot = BotManager::get();
+        // Fire inputs per sub-step. X advances per sub-step under CBF,
+        // so checking X here gives sub-step precision.
         // Only fire from P1's update (avoid double-fire in dual)
         if (bot.mode == bot::Mode::Playing && this->m_gameLayer &&
             this == this->m_gameLayer->m_player1) {
-            // Fire inputs due at current level time.
-            // dt is the substep delta — use it as lookahead to catch
-            // inputs due within this substep.
-            bot.fireDueInputs(this->m_gameLayer, dt);
+            bot.fireDueInputs(this->m_gameLayer, 0.0f);
         }
         PlayerObject::update(dt);
     }

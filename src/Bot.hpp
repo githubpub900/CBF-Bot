@@ -1183,8 +1183,7 @@ public:
     // Index of the next event to fire during playback.
     size_t    playbackIndex = 0;
     double m_lastRecordTime = 0.0;
-    double m_frameStartWall = 0.0;
-    double m_prevFrameDelta = 0.0;
+
 
     // Set true while we are injecting our own inputs, so the handleButton hook
     // knows not to record them back into the macro.
@@ -1303,39 +1302,6 @@ public:
     // Read the authoritative, frame-rate independent level clock.
     static double levelTime(GJBaseGameLayer* gl) {
         return gl ? gl->m_gameState.m_levelTime : 0.0;
-    }
-
-        static double getWallTime() {
-        #if defined(GEODE_IS_WINDOWS)
-        static LARGE_INTEGER freq = [](){
-            LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f;
-        }();
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        return static_cast<double>(t.QuadPart) / static_cast<double>(freq.QuadPart);
-        #elif defined(GEODE_IS_MACOS) || defined(GEODE_IS_IOS)
-        return static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1'000'000'000.0;
-        #else
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1'000'000'000.0);
-        #endif
-    }
-
-    // Sub-step level time for accurate input timestamps during recording.
-    //
-    // The wall-clock interpolation that used to live here was measuring time
-    // since the START of CCScheduler::update (i.e. the whole rendered frame),
-    // not time since the current sub-step started. That delta grows monotonically
-    // across all sub-steps in a frame and has no reliable mapping to a specific
-    // sub-step's fraction — it adds measurement noise rather than precision.
-    //
-    // With Syzzi's CBF, m_levelTime is already advanced once per physics
-    // sub-step *before* handleButton is called, so it IS sub-frame accurate.
-    // With RobTop's CBS it's similarly correct per step. Just read it directly.
-    double preciseLevelTime(GJBaseGameLayer* gl) {
-        if (!gl) return 0.0;
-        return levelTime(gl);
     }
 
     // Round a timestamp the way a text export wants it: clamp to a sane number
@@ -1457,7 +1423,7 @@ public:
             lastX = std::max(lastX, e.xPos);
         }
         int repaired = 0;
-        for (int pi = 0; pi < 2; ++pi) {
+        for (int int = 0; pi < 2; ++pi) {
             for (int b = 1; b <= 3; ++b) {
                 if (held[pi][b]) {
                     macro.events.emplace_back(lastX + 1.f,
@@ -1662,8 +1628,6 @@ public:
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
             float checkX = e.player2 ? p2X : p1X;
-            // Fire when player reaches or passes the recorded X position.
-            // This is deterministic — the same X always fires at the same step.
             if (e.xPos > checkX) break;
             gl->handleButton(e.down, static_cast<int>(e.button), !e.player2);
             ++playbackIndex;
@@ -1672,7 +1636,7 @@ public:
     }
 
        // Apply position/velocity from the physics frame. Called BEFORE
-        void applyPhysicsPosition(double time) {
+    void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
@@ -1695,15 +1659,22 @@ public:
         if (physicsPlaybackIndex >= macro.physicsFrames.size()) return;
 
         auto const& frame = macro.physicsFrames[physicsPlaybackIndex];
-        // ONLY set position, NEVER velocity. Setting velocity fights the
-        // inputs' natural effect (e.g., jump velocity gets overridden).
-        // Position-only correction keeps the player on track without
-        // interfering with input-driven movement.
+        // ONLY correct if drift is significant (> 3 units).
+        // This prevents X from jumping ahead and causing input grouping.
+        // Small drift is left alone so inputs drive naturally.
         if (pl->m_player1) {
-            pl->m_player1->setPosition({frame.p1x, frame.p1y});
+            float dx = pl->m_player1->getPositionX() - frame.p1x;
+            float dy = pl->m_player1->getPositionY() - frame.p1y;
+            if (std::abs(dx) > 3.f || std::abs(dy) > 3.f) {
+                pl->m_player1->setPosition({frame.p1x, frame.p1y});
+            }
         }
         if (pl->m_player2) {
-            pl->m_player2->setPosition({frame.p2x, frame.p2y});
+            float dx = pl->m_player2->getPositionX() - frame.p2x;
+            float dy = pl->m_player2->getPositionY() - frame.p2y;
+            if (std::abs(dx) > 3.f || std::abs(dy) > 3.f) {
+                pl->m_player2->setPosition({frame.p2x, frame.p2y});
+            }
         }
     }
 
@@ -1780,7 +1751,7 @@ public:
     // "dead inputs" is handled automatically by syncRecordingToTime (the level
     // clock jumps backwards on a checkpoint load); here we just apply our accurate
     // physics snapshot to fix the practice bug, and re-align playback.
-    void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
+      void onCheckpointLoaded(PlayLayer* pl, void* cpPtr) {
         if (!pl) return;
 
         CheckpointFrame* frame = nullptr;
@@ -1796,11 +1767,11 @@ public:
         }
 
         if (mode == bot::Mode::Playing) {
-            seekPhysicsPlayback(frame->levelTime);
-            seekPlaybackTo(frame->xPos);
+            seekPhysicsPlayback(frame->levelTime);  // physics frames use levelTime
+            seekPlaybackTo(frame->xPos);            // inputs use X
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(frame->xPos);
-            truncatePhysicsAfter(frame->levelTime);
+            truncateAfter(frame->xPos);             // inputs use X
+            truncatePhysicsAfter(frame->levelTime); // physics frames use levelTime
             recomputeHeldState();
         }
     }
@@ -1814,13 +1785,13 @@ public:
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
             if (pl) {
-                seekPlaybackTo(0.f);
-                seekPhysicsPlayback(0.0);
-                applyHeldStateAt(pl, 0.f);
+                seekPlaybackTo(0.f);              // inputs use X
+                seekPhysicsPlayback(0.0);          // physics frames use levelTime
+                applyHeldStateAt(pl, 0.f);         // inputs use X
             }
         } else if (mode == bot::Mode::Recording) {
-            truncateAfter(0.f);
-            truncatePhysicsAfter(0.0);
+            truncateAfter(0.f);                    // inputs use X
+            truncatePhysicsAfter(0.0);              // physics frames use levelTime
             recomputeHeldState();
             resetHeldState();
         }
@@ -1832,25 +1803,25 @@ public:
         checkpoints.clear();
         if (mode == bot::Mode::Playing) {
             releaseAll();
-            playbackIndex = 0;
+            playbackRecordIndex = 0;
             physicsPlaybackIndex = 0;
-            seekPlaybackTo(0.f);
-            seekPhysicsPlayback(0.0);
-            if (pl) applyHeldStateAt(pl, 0.f);
+            seekPlaybackTo(0.f);                  // inputs use X
+            seekPhysicsPlayback(0.0);              // physics frames use levelTime
+            if (pl) applyHeldStateAt(pl, 0.f);     // inputs use X
         }
     }
 
     void onPlayerDeath(PlayLayer* pl) {
-        if (mode == bot::Mode::Playing) {
+        if (mode == bot::Mode::Position) {
             releaseAll();
             playbackIndex = 0;
             physicsPlaybackIndex = 0;
-            seekPlaybackTo(0.f);
-            seekPhysicsPlayback(0.0);
+            seekPlaybackTo(0.f);                  // inputs use X
+            seekPhysicsPlayback(0.0);              // physics frames use levelTime
         } else if (mode == bot::Mode::Recording) {
             float x = pl && pl->m_player1 ? pl->m_player1->getPositionX() : 0.f;
-            truncateAfter(x);
-            truncatePhysicsAfter(levelTime(pl));
+            truncateAfter(x);                     // inputs use X
+            truncatePhysicsAfter(levelTime(pl));  // physics frames use levelTime
             recomputeHeldState();
         }
     }
