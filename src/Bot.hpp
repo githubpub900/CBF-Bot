@@ -1393,14 +1393,14 @@ public:
         playbackIndex = 0;
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
-            if (!e.player2 && e.xPos > x1 + 0.01f) break;
+            if (!e.player2 && e.xPos > x1 + 1.0f) break;
             ++playbackIndex;
         }
         
         playbackIndexP2 = 0;
         while (playbackIndexP2 < macro.events.size()) {
             auto const& e = macro.events[playbackIndexP2];
-            if (e.player2 && e.xPos > x2 + 0.01f) break;
+            if (e.player2 && e.xPos > x2 + 1.0f) break;
             ++playbackIndexP2;
         }
     }
@@ -1641,27 +1641,46 @@ public:
 
         injecting = true;
 
-        // P1 Logic: Forward-only. A small epsilon (0.01f) prevents getting 
-        // stuck if the player stops slightly short of the input's X position.
+        // P1 Logic
         while (playbackIndex < macro.events.size()) {
             auto const& e = macro.events[playbackIndex];
             if (e.player2) { ++playbackIndex; continue; }
-            if (e.xPos > p1X + 0.01f) break;
+            
+            // If the input is far behind us, SKIP it. 
+            // This prevents 100 clicks at once if applyPhysicsPosition teleports us.
+            if (e.xPos < p1X - 1.0f) {
+                ++playbackIndex;
+                continue;
+            }
+            // If the input is ahead of us, wait.
+            if (e.xPos > p1X + 1.0f) {
+                break;
+            }
+            
             gl->handleButton(e.down, static_cast<int>(e.button), true);
             ++playbackIndex;
         }
 
-        // P2 Logic: Forward-only.
+        // P2 Logic
         while (playbackIndexP2 < macro.events.size()) {
             auto const& e = macro.events[playbackIndexP2];
             if (!e.player2) { ++playbackIndexP2; continue; }
-            if (e.xPos > p2X + 0.01f) break;
+            
+            if (e.xPos < p2X - 1.0f) {
+                ++playbackIndexP2;
+                continue;
+            }
+            if (e.xPos > p2X + 1.0f) {
+                break;
+            }
+            
             gl->handleButton(e.down, static_cast<int>(e.button), false);
             ++playbackIndexP2;
         }
 
         injecting = false;
     }
+
        // Apply position/velocity from the physics frame. Called BEFORE
         void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
