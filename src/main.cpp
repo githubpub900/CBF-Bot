@@ -123,10 +123,15 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             bot.fireDueInputs(this, BotManager::levelTime(this));
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // Apply physics frame AFTER the step (position only, no velocity)
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.applyPhysicsPosition(BotManager::levelTime(this));
-        }
+        // NOTE: we deliberately do NOT call applyPhysicsPosition() here.
+        // Teleporting the player to a recorded position every step fights
+        // GD's own continuous collision detection (a forced position jump can
+        // skip clean past -- or shove the player into -- a hazard edge that
+        // natural, input-driven movement would have handled correctly), and
+        // it can cause the engine to re-evaluate ground/landing state in a way
+        // that makes a queued input appear to fire twice. Pure input replay
+        // against an identical starting state and identical held-button
+        // timeline is already exactly reproducible on its own.
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
             bot.recordPhysicsFrame(BotManager::levelTime(this));
         }

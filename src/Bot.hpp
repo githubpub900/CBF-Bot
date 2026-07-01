@@ -1456,7 +1456,20 @@ public:
         }
     }
 
-    // Snap a timestamp onto RobTop's ~480 FPS input grid.
+    // Snap a timestamp onto the grid the ACTIVE CBF tier can actually address.
+    // Under RobTop's CBS the engine can only place a click on one of 480 slots
+    // per second; recording the exact raw m_levelTime (which can fall between
+    // two of those slots) stores a timestamp CBS itself could never reproduce,
+    // so on playback the click lands on whichever neighbouring slot the engine
+    // happens to round to -- which can be either early or late depending on
+    // which side of the slot boundary m_levelTime is on. Snapping at record
+    // time removes that ambiguity entirely. Under Syzzi CBF the resolution is
+    // effectively continuous, so this is a no-op there.
+    double quantizeToResolution(double t) const {
+        double step = effectiveInputResolution();
+        if (step <= 0.0 || !std::isfinite(step)) return t;
+        return std::round(t / step) * step;
+    }
     static double quantizeRobTop(double t) {
         double step = 1.0 / bot::ROBTOP_CBS_FPS;
         return std::round(t / step) * step;
@@ -1480,13 +1493,33 @@ public:
 
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
+
+        // Collapse redundant transitions: GD/CBF can legitimately call
+        // handleButton twice in a row for what is really one logical press
+        // (e.g. a click landing exactly on a step boundary, or certain input
+        // paths re-asserting an already-held button). If the button is
+        // already in the state we're about to record, this is a duplicate,
+        // not a new transition -- recording it would bake an extra
+        // press/release pair into the macro that plays back as a real
+        // double-click. heldState is the source of truth for "is this button
+        // currently down in the recording", so compare against it, not
+        // against the last emitted event (which could be for a different
+        // button/player and isn't a valid comparison).
+        if (heldState[pi][button] == down) return;
         heldState[pi][button] = down;
 
         // Capture the authoritative level clock. This is what CBF has already
         // advanced to the correct sub-step by the time handleButton fires, so
         // it is sub-frame accurate for free (see the design notes at the top
-        // of this file). It is also monotonic, unlike X position.
-        double t = levelTime(gl);
+        // of this file). It is also monotonic, unlike X position. We then
+        // snap it to the grid the active CBF tier can actually address (see
+        // quantizeToResolution) so we never store a timestamp playback can't
+        // exactly reproduce.
+        double t = quantizeToResolution(levelTime(gl));
+        if (!macro.events.empty() && t <= macro.events.back().time) {
+            double step = effectiveInputResolution();
+            t = macro.events.back().time + (step > 0.0 ? step : 1e-6);
+        }
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
         macro.events.emplace_back(e);
@@ -1632,8 +1665,15 @@ public:
         injecting = false;
     }
 
-       // Apply position/velocity from the physics frame. Called BEFORE
-        void applyPhysicsPosition(double time) {
+    // NOT CALLED DURING PLAYBACK -- kept only as a diagnostic/opt-in utility.
+    // Do not wire this back into processCommands: forcing the player's
+    // position to a recorded snapshot every step fights GD's own continuous
+    // collision detection (see the note above processCommands in main.cpp)
+    // and was the direct cause of spurious deaths-on-snap and effective
+    // double-clicks. Pure input replay (fireDueInputs) is the sole playback
+    // mechanism; this function is retained only in case a future opt-in
+    // "assisted / rewind" feature explicitly wants it.
+    void applyPhysicsPosition(double time) {
         auto pl = PlayLayer::get();
         if (!pl || macro.physicsFrames.empty()) return;
 
