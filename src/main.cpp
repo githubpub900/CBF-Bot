@@ -96,14 +96,15 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             if (!bot.filterLiveJump(down, isPlayer1)) return;
         }
 
-        // Track the PHYSICAL button state for every non-injected transition
-        // (even while dead / idle) and use it to collapse duplicates. Fresh
-        // transitions get recorded; duplicates still pass to the engine but
-        // never into the macro. See BotManager::noteLive for why this is
-        // separate from the recorded timeline's own hold table.
-        bool fresh = (play && !bot.injecting)
-                     ? bot.noteLive(down, button, isPlayer1) : false;
-        if (fresh) {
+        // Record every non-injecting handleButton transition. Full fidelity:
+        // NO dedup, no death-time filter -- letting our own selfDispatched
+        // corrections (mirror, wave gravity, autoclicker) update a shared
+        // "last-seen state" table was silently swallowing the user's later
+        // matching release as a duplicate. The result was uneven press /
+        // release counts, holds that lasted way too long, and desynced
+        // playback. Truncation on death / checkpoint reload handles the
+        // "dropped an input on the ground while dying" case cleanly.
+        if (play && !bot.injecting) {
             bot.recordInput(this, down, button, isPlayer1);
         }
 
@@ -175,18 +176,22 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
-        // Frame stepping: freeze the level and dole out exactly one
-        // 1/frameStepFps slice per queued step (M key). Since the macro,
-        // the autoclicker and the sub-step clock are all driven by the
-        // delta this returns, everything stays perfectly consistent while
-        // single-stepping -- it's just very slow time, not a special mode.
+        // Frame stepping: freeze the level and hand out exactly one
+        // 1/frameStepFps slice per queued step (M key). We MUST call
+        // GJBaseGameLayer::getModifiedDelta so CBF's own hook further down
+        // the chain runs its step-count math on the fake dt -- returning
+        // a raw 1/fps here bypassed CBF entirely (my hook's priority is
+        // earlier than CBF's), which is why "something stepped but the
+        // player didn't move": no CBF hook run == no substep processing
+        // == no PlayerObject::update calls == no physics.
         if (isPlay(this) && bot.frameStepEnabled) {
             if (bot.pendingSteps > 0) {
                 --bot.pendingSteps;
                 double fps = (std::isfinite(bot.frameStepFps) &&
                               bot.frameStepFps >= 1.0)
                              ? bot.frameStepFps : 240.0;
-                return 1.0 / fps;
+                float fakeDt = 1.0f / static_cast<float>(fps);
+                return GJBaseGameLayer::getModifiedDelta(fakeDt);
             }
             return 0.0;
         }
@@ -441,7 +446,8 @@ class $modify(BotMenuLayer, MenuLayer) {
                                    Mod::get()->getSavedValue<int64_t>("seed-value", 1337));
     bot.waveMaintainEnabled  = Mod::get()->getSavedValue<bool>("wave-maintain", false);
     bot.autoClickEnabled     = Mod::get()->getSavedValue<bool>("auto-click", false);
-    bot.autoClickCPS         = Mod::get()->getSavedValue<double>("auto-cps", 10.0);
+    bot.autoClickHz          = Mod::get()->getSavedValue<double>("auto-hz", 10.0);
+    bot.autoClickHoldRatio   = Mod::get()->getSavedValue<double>("auto-hold", 0.5);
     bot.frameStepEnabled     = Mod::get()->getSavedValue<bool>("frame-step", false);
     bot.frameStepFps         = Mod::get()->getSavedValue<double>("step-fps", 240.0);
     bot.physicsDebugEnabled  = Mod::get()->getSavedValue<bool>("physics-debug", false);

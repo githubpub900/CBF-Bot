@@ -60,6 +60,7 @@
 #include <Geode/binding/DashRingObject.hpp>
 #include <Geode/binding/LevelSettingsObject.hpp>
 #include <Geode/binding/GameToolbox.hpp>
+#include <Geode/ui/ScrollLayer.hpp>
 
 #include <vector>
 #include <array>
@@ -1228,10 +1229,13 @@ public:
     // travelling the direction the player is asking for.
     bool      waveMaintainEnabled = false;
 
-    // Autoclicker: click train on P1 jump at this many clicks per second,
-    // phase-locked to the level clock (see tickAutoClicker).
+    // Autoclicker: click train on P1 jump at `autoClickHz` clicks per
+    // second, with each click held for `autoClickHoldRatio` of the period
+    // (0.5 = classic 50% duty cycle, 0.9 = long holds with short releases,
+    // 0.1 = very short taps).
     bool      autoClickEnabled = false;
-    double    autoClickCPS     = 10.0;
+    double    autoClickHz      = 10.0;
+    double    autoClickHoldRatio = 0.5;
 
     // Set while WE are re-dispatching a transformed input (mirror copy, wave
     // gravity fix, autoclick edge). Unlike `injecting`, these still get
@@ -1254,7 +1258,7 @@ public:
 
     // Internal feature state.
     bool                autoClickHeld = false; // current autoclick edge
-    long long           autoClickLastEdge = 0; // last emitted edge index
+    double              autoClickNextTime = std::numeric_limits<double>::quiet_NaN();
     std::array<bool, 2> waveRawHeld{};         // physical jump state  [p1, p2]
     std::array<bool, 2> waveEffectiveHeld{};   // dispatched jump state [p1, p2]
     std::array<bool, 2> waveLastUpsideDown{};  // last-known gravity state
@@ -1267,17 +1271,6 @@ public:
     // hooks once per genuine physics substep.
     bool      inSubStep = false;
 
-    // PHYSICAL button state, updated for every non-injected transition that
-    // reaches handleButton -- including ones that arrive while the player is
-    // dead or the bot is idle. This is deliberately separate from
-    // `heldState` (the state of the RECORDED timeline): conflating the two
-    // was the source of the "endless hold" bug -- a release arriving during
-    // the death animation was dropped, the next press then looked like a
-    // duplicate and was ALSO dropped, and the macro was left holding from
-    // the old press until the following input. Dedup now compares against
-    // this table, and reconcileTimelineWithLive() heals the timeline after
-    // every truncation.
-    std::array<std::array<bool, 4>, 2> liveHeld{};
 
     // ----- Physics bot mode -----
     // Physics bot mode is always on — we always record physics frames
@@ -1306,6 +1299,22 @@ public:
         return Loader::get()->isModLoaded(bot::SYZZI_CBF_ID);
     }
 
+    // CBF exposes a "soft-toggle" bool setting -- when true the user has
+    // disabled CBF live without unloading the mod. Treat that as
+    // "not present" so our indicator matches actual behavior.
+    bool isSyzziCBFActive() const {
+        if (!isSyzziCBFLoaded()) return false;
+        auto mod = Loader::get()->getLoadedMod(bot::SYZZI_CBF_ID);
+        if (!mod) return false;
+        try {
+            if (mod->getSettingValue<bool>("soft-toggle")) return false;
+        } catch (...) {
+            // Setting name shifted / not present in this CBF build -- fall
+            // back to "loaded == active" so we never wrongly report red.
+        }
+        return true;
+    }
+
     bool isRobTopCBSEnabled() const {
         // RobTop's "Click Between Steps" lives as a GameManager game-variable.
         auto gm = GameManager::sharedState();
@@ -1314,7 +1323,7 @@ public:
     }
 
     bot::CBFState cbfState() const {
-        if (isSyzziCBFLoaded())  return bot::CBFState::Syzzi;
+        if (isSyzziCBFActive())  return bot::CBFState::Syzzi;
         if (isRobTopCBSEnabled()) return bot::CBFState::RobTop;
         return bot::CBFState::None;
     }
@@ -1326,11 +1335,20 @@ public:
     // A human-readable one-liner describing the current input precision, shown in
     // the GUI next to the coloured period.
     std::string cbfInfoString() const {
+        // Explicitly call out the "loaded but soft-toggled off" case, since
+        // the user's macros will silently degrade to per-frame timing until
+        // they flip CBF back on in its own settings.
+        if (isSyzziCBFLoaded() && !isSyzziCBFActive()) {
+            if (isRobTopCBSEnabled())
+                return fmt::format("CBF: soft-off; RobTop CBS on ({:.0f}Hz)",
+                                    bot::ROBTOP_CBS_FPS);
+            return "CBF: soft-toggled off -- disabled";
+        }
         switch (cbfState()) {
             case bot::CBFState::Syzzi:
                 return "CBF: Syzzi (sub-frame)";
             case bot::CBFState::RobTop:
-                return fmt::format("CBF: RobTop ({:.0f}fps cap)", bot::ROBTOP_CBS_FPS);
+                return fmt::format("CBF: RobTop ({:.0f}Hz cap)", bot::ROBTOP_CBS_FPS);
             case bot::CBFState::None:
             default:
                 return "CBF: none -- disabled";
@@ -1399,11 +1417,7 @@ public:
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
         resetHeldState();
-        autoClickLastEdge = static_cast<long long>(
-            std::floor(macro.recordStartTime * 2.0 * autoClickCPS));
-        // If a button is physically held while arming, bake the hold into the
-        // timeline so its eventual release has a matching press.
-        reconcileTimelineWithLive(macro.recordStartTime);
+        autoClickNextTime = macro.recordStartTime;
         m_lastRecordTime = macro.recordStartTime;
         log::info("[Bot] Recording armed at t={:.6f}", macro.recordStartTime);
         notify("Recording started", NotificationIcon::Success);
@@ -1553,66 +1567,13 @@ public:
     // Called from the handleButton hook. Records a transition tagged with the
     // current level time. We collapse redundant transitions (two downs in a row
     // for the same button/player) so the macro stays clean.
-    // Track the PHYSICAL state of a button for every non-injected transition
-    // that reaches handleButton -- regardless of bot mode or player death.
-    // Returns false when the transition is a duplicate (the button is already
-    // in that state), which is the hook's cue to skip recording it. The
-    // duplicate is still passed through to the engine untouched: two downs in
-    // a row can be meaningful to GD (buffer refresh), it just must not bake a
-    // phantom press/release pair into the macro.
-    bool noteLive(bool down, int button, bool isPlayer1) {
-        if (button < 1 || button > 3) return true; // not a tracked button
-        int pi = isPlayer1 ? 0 : 1;
-        if (liveHeld[pi][button] == down) return false;
-        liveHeld[pi][button] = down;
-        return true;
-    }
-
-    // Heal the recorded timeline after any truncation (death, checkpoint
-    // load, restart) or when arming mid-hold: wherever the timeline's hold
-    // state disagrees with the LIVE physical state, append a synthetic
-    // transition at `t` so the two match. This is what fixes the "endless
-    // hold" desync: a release that happened during the death animation is
-    // re-applied at the respawn point instead of being lost forever.
-    void reconcileTimelineWithLive(double t) {
-        if (mode != bot::Mode::Recording) return;
-        bool changed = false;
-        for (int pi = 0; pi < 2; ++pi) {
-            for (int b = 1; b <= 3; ++b) {
-                if (heldState[pi][b] != liveHeld[pi][b]) {
-                    macro.events.emplace_back(t, static_cast<uint8_t>(b),
-                                              liveHeld[pi][b], pi == 1);
-                    heldState[pi][b] = liveHeld[pi][b];
-                    changed = true;
-                }
-            }
-        }
-        if (changed) {
-            macro.sort();
-            refreshUIProgress();
-        }
-    }
-
        void recordInput(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
         if (mode != bot::Mode::Recording) return;
         if (injecting) return;
         if (button < 1 || button > 3) return;
 
-        auto pl = PlayLayer::get();
-        if (pl) {
-            // Don't store events while dead -- they'd be truncated on respawn
-            // anyway. The physical state was already captured by noteLive()
-            // in the hook, and reconcileTimelineWithLive() re-applies any
-            // hold/release difference at the respawn point.
-            if (pl->m_player1 && pl->m_player1->m_isDead) return;
-            if (pl->m_player2 && pl->m_player2->m_isDead) return;
-        }
-
         bool player2 = !isPlayer1;
         int  pi = player2 ? 1 : 0;
-
-        // Duplicate collapse already happened in the hook (noteLive); here we
-        // just keep the timeline's own hold table in sync.
         heldState[pi][button] = down;
 
         // Stamp with m_levelTime -- the game's own clock, which CBF advances
@@ -1756,32 +1717,54 @@ public:
     // with the option on plays back exactly as flown -- which is also why
     // this never runs during playback: the macro already contains the
     // corrected inputs.
+    // Wave gravity correction. Two entry conditions fire the correction:
+    //
+    //   (A) The gravity state FLIPPED since we last looked (m_isUpsideDown
+    //       differs from waveLastUpsideDown). This is the real fix for
+    //       "holding into an upside-down portal doesn't work" -- state-only
+    //       comparison never fires after the first correction (raw stays
+    //       true, effective stays synced to it), so a subsequent portal is
+    //       invisible. Flip detection sees every portal.
+    //
+    //   (B) The user's raw hold changed (filterLiveJump wrote a new value
+    //       that hasn't been dispatched yet) -- caught by the effective vs
+    //       stored comparison as before.
+    //
+    // When we release the jump we also stomp on GD's jump buffer AND its
+    // ring-jump / last-jump-time fields. Any one of those fields holding a
+    // stale value causes the wave to snap the jump back on for one substep,
+    // which is exactly what visibly overrode the release before.
     void tickWaveGravityFor(GJBaseGameLayer* gl, PlayerObject* p, bool isP1) {
         if (!waveMaintainEnabled || mode == bot::Mode::Playing || !gl) return;
         if (!p || p->m_isDead) return;
         int pi = isP1 ? 0 : 1;
-        waveLastUpsideDown[pi] = p->m_isUpsideDown;
-        // Outside the wave the correction is a straight pass-through --
-        // which also releases a phantom hold the moment a portal takes
-        // the player out of wave mode.
-        bool effective = p->m_isDart
-                         ? (waveRawHeld[pi] != p->m_isUpsideDown)
-                         : waveRawHeld[pi];
-        if (effective == waveEffectiveHeld[pi]) return;
+
+        bool upside = p->m_isUpsideDown;
+        bool flipped = upside != waveLastUpsideDown[pi];
+        waveLastUpsideDown[pi] = upside;
+
+        bool effective = p->m_isDart ? (waveRawHeld[pi] != upside)
+                                      : waveRawHeld[pi];
+        // Fire when we detect a flip, OR when the stored effective is out
+        // of sync with what we now want.
+        if (!flipped && effective == waveEffectiveHeld[pi]) return;
+
         waveEffectiveHeld[pi] = effective;
         selfDispatch = true;
         gl->handleButton(effective, 1, isP1);
         selfDispatch = false;
-        // Bulldoze the jump-buffer fields when releasing so the buffered
-        // press GD's own jump-buffer logic keeps around after handleButton
-        // cannot re-assert the hold on the next substep. This is what fixes
-        // "holding into an upside-down portal doesn't reverse direction" --
-        // the release was firing, but a stale buffered jump was silently
-        // re-pressing the button before the wave physics read it.
-        if (!effective && p) {
+
+        if (!effective) {
+            // Full buffer teardown -- ANY of these fields left set will
+            // silently re-press the jump on the next substep, which was the
+            // exact reason "holding into an upside-down portal" appeared
+            // not to work: the release fired, but the buffered press won.
             p->m_jumpBuffered = false;
             p->m_wasJumpBuffered = false;
             p->m_stateJumpBuffered = 0;
+            p->m_stateRingJump = false;
+            p->m_stateRingJump2 = false;
+            p->m_touchedRing = false;
         }
     }
 
@@ -1849,50 +1832,83 @@ public:
         selfDispatch = prev;
     }
 
-    // Autoclicker: a 50% duty-cycle click train on P1 jump at `autoClickCPS`
-    // clicks per second, phase-locked to the game clock so edges are
-    // exactly reproducible, frame-rate independent, and speedhack-safe.
+    // Autoclicker. Two independent parameters:
+    //   autoClickHz         -- clicks per second (press-release pairs)
+    //   autoClickHoldRatio  -- fraction of the period the button is held
     //
-    // KEY FIX: reads m_levelTime directly and tracks the LAST EMITTED EDGE
-    // INDEX (`autoClickLastEdge`), not a "how many edges in this dt" batch.
-    // Every call emits all edges from lastEdge+1 up to floor(now / half)
-    // and then advances lastEdge. This is robust against being called an
-    // unpredictable number of times per substep (the icon-kit / ghost /
-    // helper PlayerObject::update paths ALL used to accumulate dt on the
-    // old sub-step clock, which was the direct cause of the 64x overshoot
-    // when the user set 1000 CPS). Now every extra call is a no-op: the
-    // target index is already >= the last emitted index.
+    // With Hz=1000, ratio=0.5 the press fires at t=0.000, release at
+    // t=0.0005, next press at t=0.001, ... With Hz=10, ratio=0.9 the
+    // press fires at t=0.00 and release at t=0.09 -- long hold, short gap.
     //
-    // Recording captures the clicks as normal transitions -- we do NOT set
-    // selfDispatch, so the hook's mirror + wave-gravity + record paths all
-    // run naturally, which is what makes the autoclicks visible to
-    // downstream tools (MegaHack's CPS counter, etc.) as real inputs.
-    // Disabled during playback: the macro owns the buttons then.
+    // Routed through PlayLayer::pushButton / releaseButton (not
+    // handleButton) so the click enters GD's own held-state / jump-buffer
+    // machinery exactly the way a real OS input from CBF's dispatch queue
+    // does -- which is what makes it visible to downstream detectors
+    // (MegaHack's CPS counter etc.) as a real input, and what keeps CBF's
+    // sub-frame precision intact. handleButton would still fire under it
+    // via GD's own routing, so we don't need to double-call.
+    //
+    // Re-anchors on every level-clock jump (checkpoint / respawn / restart)
+    // by resetting autoClickNextTime to now + gap, so it never disables
+    // itself and never fires a huge catch-up burst.
     void tickAutoClicker(GJBaseGameLayer* gl, double now) {
+        auto pl = PlayLayer::get();
         bool active = autoClickEnabled &&
                       mode != bot::Mode::Playing &&
                       !guiPaused &&
-                      std::isfinite(autoClickCPS) && autoClickCPS > 0.0 &&
-                      gl != nullptr;
+                      std::isfinite(autoClickHz) && autoClickHz > 0.0 &&
+                      pl != nullptr && gl != nullptr;
+
+        auto press = [&](bool down){
+            // Go through GJBaseGameLayer::handleButton so BOTH the recorder
+            // path and CBF's own dispatch path see the click as normal user
+            // input. selfDispatch skips mirror auto-re-dispatch (we do it
+            // ourselves below) and wave-gravity rewriting on the same call.
+            selfDispatch = true;
+            gl->handleButton(down, 1, true);
+            if (mirrorEnabled && isTwoPlayerLevel(gl)) {
+                gl->handleButton(down, 1, false);
+            }
+            selfDispatch = false;
+        };
+
         if (!active) {
-            if (autoClickHeld && gl) {
+            if (autoClickHeld) {
+                press(false);
                 autoClickHeld = false;
-                gl->handleButton(false, 1, true);
             }
             return;
         }
-        double half = 0.5 / autoClickCPS;
-        auto target = static_cast<long long>(std::floor(now / half));
-        if (target <= autoClickLastEdge) return;
-        // Runaway guard (a big time jump after e.g. loading a checkpoint):
-        // just snap the parity forward without spamming intermediate edges.
-        if (target - autoClickLastEdge > 200) autoClickLastEdge = target - 200;
-        for (long long i = autoClickLastEdge + 1; i <= target; ++i) {
-            bool down = (i % 2) == 0;
-            gl->handleButton(down, 1, true);
-            autoClickHeld = down;
+
+        double ratio = std::clamp(autoClickHoldRatio, 0.02, 0.98);
+        double period = 1.0 / autoClickHz;
+        double holdDur = period * ratio;
+
+        // Bootstrap / re-anchor: if the scheduled next edge is way behind
+        // (fresh attempt, respawn, big clock jump) or way ahead (rate just
+        // dropped), reset to the current substep.
+        if (!std::isfinite(autoClickNextTime) ||
+            autoClickNextTime < now - period ||
+            autoClickNextTime > now + period * 2.0) {
+            autoClickNextTime = now;
+            autoClickHeld = false;
         }
-        autoClickLastEdge = target;
+
+        // Fire every due edge inside this substep window. Guard against
+        // huge bursts after a lag spike by capping edges per call.
+        int fired = 0;
+        while (autoClickNextTime <= now && fired < 512) {
+            if (!autoClickHeld) {
+                press(true);
+                autoClickHeld = true;
+                autoClickNextTime += holdDur;
+            } else {
+                press(false);
+                autoClickHeld = false;
+                autoClickNextTime += (period - holdDur);
+            }
+            ++fired;
+        }
     }
 
     // ----- sub-step driver ---------------------------------------------------
@@ -2139,11 +2155,9 @@ public:
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
         }
 
-        // Re-anchor the autoclick edge counter to the resume time so the
-        // click train picks up in phase instead of firing a huge catch-up
-        // burst on the next substep.
-        autoClickLastEdge = static_cast<long long>(
-            std::floor(frame->levelTime * 2.0 * autoClickCPS));
+        // Re-anchor the autoclicker to the resume time so it picks up in
+        // phase instead of firing a huge catch-up burst on the next substep.
+        autoClickNextTime = frame->levelTime;
 
         if (mode == bot::Mode::Playing) {
             seekPhysicsPlayback(frame->levelTime);
@@ -2153,9 +2167,6 @@ public:
             truncateAfter(frame->levelTime);
             truncatePhysicsAfter(frame->levelTime);
             recomputeHeldState();
-            // Heal any hold that changed physically while dead (the release
-            // was deliberately not stored) so the timeline matches reality.
-            reconcileTimelineWithLive(frame->levelTime);
         }
     }
     // Pause-menu restart. The level clock resets, so syncRecordingToTime will
@@ -2163,7 +2174,7 @@ public:
     // checkpoint stack and rewind the playback cursor here.
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
-        autoClickLastEdge = 0;
+        autoClickNextTime = std::numeric_limits<double>::quiet_NaN();
         autoClickHeld = false;
         waveRawHeld.fill(false);
         waveEffectiveHeld.fill(false);
@@ -2181,9 +2192,6 @@ public:
             truncateAfter(0.0);
             truncatePhysicsAfter(0.0);
             recomputeHeldState();
-            // Re-express any button still physically held as a press at t=0
-            // so the fresh attempt's timeline starts consistent.
-            reconcileTimelineWithLive(0.0);
         }
         refreshUIProgress();
     }
@@ -2202,14 +2210,11 @@ public:
         waveLastUpsideDown.fill(false);
         applySeedLock();
         if (pl && levelTime(pl) < 0.001) {
-            autoClickLastEdge = 0;
+            autoClickNextTime = std::numeric_limits<double>::quiet_NaN();
             if (mode == bot::Mode::Recording) {
-                // Death without a checkpoint restarts the attempt at t=0:
-                // superseded inputs go, and still-held buttons re-press at 0.
                 truncateAfter(0.0);
                 truncatePhysicsAfter(0.0);
                 recomputeHeldState();
-                reconcileTimelineWithLive(0.0);
             }
         }
         if (mode == bot::Mode::Playing) {
@@ -2301,7 +2306,8 @@ public:
         m->setSavedValue<int64_t>("seed-value", lockedSeed);
         m->setSavedValue<bool>("wave-maintain", waveMaintainEnabled);
         m->setSavedValue<bool>("auto-click", autoClickEnabled);
-        m->setSavedValue<double>("auto-cps", autoClickCPS);
+        m->setSavedValue<double>("auto-hz", autoClickHz);
+        m->setSavedValue<double>("auto-hold", autoClickHoldRatio);
         m->setSavedValue<bool>("frame-step", frameStepEnabled);
         m->setSavedValue<double>("step-fps", frameStepFps);
         m->setSavedValue<bool>("physics-debug", physicsDebugEnabled);
@@ -2335,14 +2341,24 @@ public:
             double v = std::stod(s);
             if (std::isfinite(v) && v >= 0.0) {
                 // Edges are batched per substep, so high rates are cheap --
-                // cap at 10k CPS (~83 edges per 240Hz substep) to keep the
+                // cap at 10k Hz (~83 edges per 240Hz substep) to keep the
                 // per-step dispatch loop bounded.
-                autoClickCPS = std::min(v, 10000.0);
+                autoClickHz = std::min(v, 10000.0);
                 persist();
             }
         } catch (...) {
             // ignore malformed input; keep the previous value
         }
+    }
+
+    void setAutoClickHoldFromString(std::string const& s) {
+        try {
+            double v = std::stod(s);
+            if (std::isfinite(v)) {
+                autoClickHoldRatio = std::clamp(v, 0.02, 0.98);
+                persist();
+            }
+        } catch (...) {}
     }
 
     void setFrameStepFpsFromString(std::string const& s) {
@@ -2888,6 +2904,15 @@ protected:
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
 
+    // Macro list widget (main page). Simple vertical stack of clickable
+    // rows in a CCScrollLayer; the selection tint marks the active row.
+    cocos2d::extension::CCScale9Sprite* m_listBg = nullptr;
+    geode::ScrollLayer*   m_macroList    = nullptr;
+    cocos2d::CCLabelBMFont* m_selInfoLabel = nullptr; // "v6 • 421 inputs • 1:07"
+    std::vector<std::string> m_macroNames;
+    std::vector<CCMenuItemSpriteExtra*> m_macroRowButtons;
+    int                   m_selectedMacro = -1;
+
     // Settings page (opened via the gear button in the panel corner).
     cocos2d::CCNode*      m_settingsPanel = nullptr;
     cocos2d::CCMenu*      m_mainMenu      = nullptr;
@@ -2901,6 +2926,7 @@ protected:
     CCMenuItemToggler*    m_physToggle     = nullptr;
     geode::TextInput*     m_seedInput    = nullptr;
     geode::TextInput*     m_cpsInput     = nullptr;
+    geode::TextInput*     m_holdInput    = nullptr;
     geode::TextInput*     m_stepFpsInput = nullptr;
     bool                  m_settingsOpen = false;
 
@@ -3191,11 +3217,15 @@ public:
             m_seedInput->setString(fmt::format("{}", BotManager::get().lockedSeed));
         }
         if (m_cpsInput) {
-            m_cpsInput->setString(fmt::format("{:g}", BotManager::get().autoClickCPS));
+            m_cpsInput->setString(fmt::format("{:g}", BotManager::get().autoClickHz));
+        }
+        if (m_holdInput) {
+            m_holdInput->setString(fmt::format("{:g}", BotManager::get().autoClickHoldRatio));
         }
         if (m_stepFpsInput) {
             m_stepFpsInput->setString(fmt::format("{:g}", BotManager::get().frameStepFps));
         }
+        refreshMacroList();
     }
 
     void refreshStatus() {
@@ -3283,8 +3313,6 @@ private:
         constexpr float W = kPanelW, H = kPanelH;
         auto winSize = CCDirector::sharedDirector()->getWinSize();
 
-        // Container node, centred on screen. Wide rectangular card at full
-        // scale so it fills most of the screen with room for every control.
         m_panel = CCNode::create();
         m_panel->setContentSize({ W, H });
         m_panel->setAnchorPoint({ 0.5f, 0.5f });
@@ -3292,74 +3320,43 @@ private:
         m_panel->setPosition({ winSize.width * 0.5f, winSize.height * 0.5f });
         this->addChild(m_panel);
 
-        // Background (rounded GD square).
         auto bg = cocos2d::extension::CCScale9Sprite::create("GJ_square01.png");
         bg->setContentSize({ W, H });
         bg->setPosition({ W * 0.5f, H * 0.5f });
         bg->setOpacity(255);
         m_panel->addChild(bg);
 
-        // Title.
         auto title = CCLabelBMFont::create("Polik Playback", "goldFont.fnt");
         title->setPosition({ W * 0.5f, H - 22.f });
         title->setScale(0.8f);
         m_panel->addChild(title);
 
-        // The coloured period + status line. The period is the green/yellow/red
-        // CBF indicator the spec asked for.
-        // Status indicator moved to the top-RIGHT corner of the panel:
-        // [status text] [coloured .]   both right-anchored so they stay
-        // inside the panel regardless of how long the status string is.
+        // Coloured "." indicator + CBF state label in the top-right corner.
         m_periodLabel = CCLabelBMFont::create(".", "bigFont.fnt");
         m_periodLabel->setAnchorPoint({ 1.f, 0.5f });
         m_periodLabel->setPosition({ W - 16.f, H - 20.f });
         m_periodLabel->setScale(1.25f);
         m_panel->addChild(m_periodLabel);
 
-        m_statusLabel = CCLabelBMFont::create("CBF: ...", "chatFont.fnt");
+        m_statusLabel = CCLabelBMFont::create("CBF: ...", "bigFont.fnt");
         m_statusLabel->setAnchorPoint({ 1.f, 0.5f });
         m_statusLabel->setPosition({ W - 34.f, H - 20.f });
-        m_statusLabel->setScale(0.62f);
+        m_statusLabel->setScale(0.32f);
         m_panel->addChild(m_statusLabel);
 
-        // Info strip: mode / progress / stats as one row across the top, so
-        // nothing overlaps the control rows below.
-        m_modeLabel = CCLabelBMFont::create("Mode: idle", "chatFont.fnt");
-        m_modeLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_modeLabel->setPosition({ 22.f, H - 52.f });
-        m_modeLabel->setScale(0.6f);
-        m_panel->addChild(m_modeLabel);
-
-        m_progressLabel = CCLabelBMFont::create("0 inputs  |  0.00s", "chatFont.fnt");
-        m_progressLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_progressLabel->setPosition({ 195.f, H - 52.f });
-        m_progressLabel->setScale(0.55f);
-        m_panel->addChild(m_progressLabel);
-
-        m_statsLabel = CCLabelBMFont::create("press 0  rel 0  p1 0  p2 0", "chatFont.fnt");
-        m_statsLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_statsLabel->setPosition({ 360.f, H - 52.f });
-        m_statsLabel->setScale(0.5f);
-        m_statsLabel->setOpacity(190);
-        m_panel->addChild(m_statsLabel);
-
-        // ---- main menu of buttons / togglers -----------------------------
+        // ---- main menu (buttons + togglers) ------------------------------
         auto menu = CCMenu::create();
         menu->setPosition({ 0.f, 0.f });
-        // Capture clicks at a very high priority so they always land on us even
-        // though there is live gameplay underneath.
         menu->setTouchPriority(-1000);
         m_panel->addChild(menu);
         m_mainMenu = menu;
 
-        // Settings gear in the top-left corner -> opens the settings page.
+        // Settings gear in the top-left corner.
         cocos2d::CCNode* gearSpr =
             CCSprite::createWithSpriteFrameName("GJ_optionsBtn_001.png");
         if (gearSpr) {
             gearSpr->setScale(0.42f);
         } else {
-            // Sprite sheet not loaded yet for some reason -- fall back to a
-            // plain labelled button rather than crashing.
             auto bs = ButtonSprite::create("Cfg");
             bs->setScale(0.5f);
             gearSpr = bs;
@@ -3369,77 +3366,149 @@ private:
         gearBtn->setPosition({ 24.f, H - 20.f });
         menu->addChild(gearBtn);
 
+        // Big X close button in the top-right corner (below the CBF indicator).
+        auto xSpr = CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png");
+        if (!xSpr) {
+            auto fallback = ButtonSprite::create("X");
+            fallback->setScale(0.5f);
+            xSpr = fallback;
+        } else {
+            xSpr->setScale(0.42f);
+        }
+        auto xBtn = CCMenuItemSpriteExtra::create(
+            xSpr, this, menu_selector(BotUILayer::onClose));
+        xBtn->setPosition({ W - 20.f, H - 46.f });
+        menu->addChild(xBtn);
+
         auto& bot = BotManager::get();
 
-        // Row A: mode togglers + speedhack. Wide layout -- three toggles and
-        // a textbox fit on one row with no overlap.
-        float yA = H - 92.f;
-        m_recordToggle = makeToggle(menu, m_panel, { 45.f, yA },
+        // ---- LEFT COLUMN: mode / options / speed / info ------------------
+        constexpr float xL = 42.f;
+        float y = H - 62.f;
+        m_recordToggle = makeToggle(menu, m_panel, { xL, y },
             menu_selector(BotUILayer::onRecord), "Record (V)",
             bot.mode == bot::Mode::Recording);
-        m_playToggle = makeToggle(menu, m_panel, { 185.f, yA },
+        m_playToggle = makeToggle(menu, m_panel, { xL + 130.f, y },
             menu_selector(BotUILayer::onPlay), "Play (B)",
             bot.mode == bot::Mode::Playing);
-        m_speedToggle = makeToggle(menu, m_panel, { 325.f, yA },
-            menu_selector(BotUILayer::onSpeedToggle), "Speed", bot.speedhackEnabled);
-        m_speedInput = geode::TextInput::create(110.f, "speed", "chatFont.fnt");
+
+        y -= 34.f;
+        m_speedToggle = makeToggle(menu, m_panel, { xL, y },
+            menu_selector(BotUILayer::onSpeedToggle), "Speed",
+            bot.speedhackEnabled);
+        m_speedInput = geode::TextInput::create(80.f, "1", "bigFont.fnt");
         m_speedInput->setCommonFilter(geode::CommonFilter::Float);
         m_speedInput->setString(fmt::format("{:g}", bot.speed));
-        m_speedInput->setPosition({ 452.f, yA });
-        m_speedInput->setScale(0.9f);
+        m_speedInput->setPosition({ xL + 140.f, y });
+        m_speedInput->setScale(0.7f);
         m_speedInput->setCallback([](std::string const& s) {
             BotManager::get().setSpeedFromString(s);
         });
         m_panel->addChild(m_speedInput);
 
-        // Row B: option togglers. Initial visual state is set from the saved
-        // bools so the checkmarks always start in sync (no manual offset /
-        // no 480fps snap -- the snap is automatic under RobTop's CBS).
-        float yB = yA - 46.f;
-        m_practiceToggle = makeToggle(menu, m_panel, { 45.f, yB },
+        y -= 34.f;
+        m_practiceToggle = makeToggle(menu, m_panel, { xL, y },
             menu_selector(BotUILayer::onPracticeFix), "Practice fix",
             bot.practiceFixEnabled);
-        m_deadToggle = makeToggle(menu, m_panel, { 185.f, yB },
+        m_deadToggle = makeToggle(menu, m_panel, { xL + 130.f, y },
             menu_selector(BotUILayer::onDeadInputs), "Discard dead",
             bot.discardDeadInputs);
-        m_autoSaveToggle = makeToggle(menu, m_panel, { 325.f, yB },
-            menu_selector(BotUILayer::onAutoSave), "Auto-save",
+        y -= 32.f;
+        m_autoSaveToggle = makeToggle(menu, m_panel, { xL, y },
+            menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
 
-        // Row C: macro name + housekeeping buttons.
-        float yC = yB - 46.f;
-        auto nameLbl = CCLabelBMFont::create("Name", "chatFont.fnt");
-        nameLbl->setAnchorPoint({ 0.f, 0.5f });
-        nameLbl->setPosition({ 24.f, yC });
-        nameLbl->setScale(0.6f);
-        m_panel->addChild(nameLbl);
-        m_nameInput = geode::TextInput::create(180.f, "macro", "chatFont.fnt");
+        y -= 34.f;
+        m_modeLabel = CCLabelBMFont::create("Mode: idle", "bigFont.fnt");
+        m_modeLabel->setAnchorPoint({ 0.f, 0.5f });
+        m_modeLabel->setPosition({ xL - 15.f, y });
+        m_modeLabel->setScale(0.4f);
+        m_panel->addChild(m_modeLabel);
+        y -= 18.f;
+        m_progressLabel = CCLabelBMFont::create("0 inputs  |  0.00s", "bigFont.fnt");
+        m_progressLabel->setAnchorPoint({ 0.f, 0.5f });
+        m_progressLabel->setPosition({ xL - 15.f, y });
+        m_progressLabel->setScale(0.36f);
+        m_panel->addChild(m_progressLabel);
+        y -= 16.f;
+        m_statsLabel = CCLabelBMFont::create("press 0  rel 0  p1 0  p2 0", "bigFont.fnt");
+        m_statsLabel->setAnchorPoint({ 0.f, 0.5f });
+        m_statsLabel->setPosition({ xL - 15.f, y });
+        m_statsLabel->setScale(0.32f);
+        m_statsLabel->setOpacity(190);
+        m_panel->addChild(m_statsLabel);
+
+        // ---- RIGHT COLUMN: macro list + info + name + save/load ---------
+        constexpr float xR = 290.f;
+        constexpr float listW = 210.f, listH = 148.f;
+        auto listTitle = CCLabelBMFont::create("Macros", "bigFont.fnt");
+        listTitle->setAnchorPoint({ 0.5f, 0.5f });
+        listTitle->setPosition({ xR + listW * 0.5f, H - 54.f });
+        listTitle->setScale(0.55f);
+        m_panel->addChild(listTitle);
+
+        // Rounded-square background frame around the scrollable list.
+        m_listBg = cocos2d::extension::CCScale9Sprite::create("GJ_square02.png");
+        m_listBg->setContentSize({ listW, listH });
+        m_listBg->setPosition({ xR + listW * 0.5f, H - 54.f - 20.f - listH * 0.5f });
+        m_panel->addChild(m_listBg);
+
+        m_macroList = geode::ScrollLayer::create({ listW - 8.f, listH - 8.f });
+        m_macroList->setPosition({ xR + 4.f, H - 54.f - 20.f - listH + 4.f });
+        m_macroList->m_contentLayer->setLayout(
+            geode::ColumnLayout::create()
+                ->setAxisReverse(true)
+                ->setAxisAlignment(geode::AxisAlignment::End)
+                ->setGap(0.f)
+                ->setAutoGrowAxis(listH - 8.f));
+        m_panel->addChild(m_macroList);
+
+        // Info line under the list -- populated by refreshMacroList /
+        // selectMacro. "v6 -- 421 inputs -- 8.42s -- Bloodbath"
+        float infoY = H - 54.f - 20.f - listH - 14.f;
+        m_selInfoLabel = CCLabelBMFont::create(
+            "select a macro", "bigFont.fnt");
+        m_selInfoLabel->setAnchorPoint({ 0.5f, 0.5f });
+        m_selInfoLabel->setPosition({ xR + listW * 0.5f, infoY });
+        m_selInfoLabel->setScale(0.36f);
+        m_selInfoLabel->setOpacity(200);
+        m_panel->addChild(m_selInfoLabel);
+
+        // Name textbox + save/load buttons under the info line.
+        float nameY = infoY - 22.f;
+        m_nameInput = geode::TextInput::create(120.f, "macro", "bigFont.fnt");
         m_nameInput->setString(bot.macroName);
-        m_nameInput->setPosition({ 170.f, yC });
-        m_nameInput->setScale(0.9f);
+        m_nameInput->setPosition({ xR + 60.f, nameY });
+        m_nameInput->setScale(0.7f);
         m_nameInput->setCallback([](std::string const& s) {
             if (!s.empty()) { BotManager::get().macroName = s; BotManager::get().persist(); }
         });
         m_panel->addChild(m_nameInput);
-        makeButton(menu, { 330.f, yC }, "Clear", menu_selector(BotUILayer::onClear));
-        makeButton(menu, { 405.f, yC }, "List",  menu_selector(BotUILayer::onList));
-        makeButton(menu, { 475.f, yC }, "Close", menu_selector(BotUILayer::onClose));
+        makeButton(menu, { xR + 140.f, nameY }, "Save",
+                   menu_selector(BotUILayer::onSave));
+        makeButton(menu, { xR + 185.f, nameY }, "Load",
+                   menu_selector(BotUILayer::onLoad));
 
-        // Row D: file operations.
-        float yD = yC - 46.f;
-        makeButton(menu, { 60.f, yD },  "Save",   menu_selector(BotUILayer::onSave));
-        makeButton(menu, { 145.f, yD }, "Load",   menu_selector(BotUILayer::onLoad));
-        makeButton(menu, { 240.f, yD }, "Export", menu_selector(BotUILayer::onExport));
-        makeButton(menu, { 340.f, yD }, "Import", menu_selector(BotUILayer::onImport));
+        // Delete / refresh row under save+load.
+        float actionY = nameY - 24.f;
+        makeButton(menu, { xR + 45.f, actionY }, "Delete",
+                   menu_selector(BotUILayer::onDeleteMacro));
+        makeButton(menu, { xR + 110.f, actionY }, "Clear macro",
+                   menu_selector(BotUILayer::onClear));
+        makeButton(menu, { xR + 190.f, actionY }, "Refresh",
+                   menu_selector(BotUILayer::onRefreshList));
 
-        // Hint at the bottom.
+        // Bottom hint (bigFont at small scale is still legible).
         auto hint = CCLabelBMFont::create(
             "K: menu   V: record   B: play   N: stop   M: frame step",
-            "chatFont.fnt");
-        hint->setPosition({ W * 0.5f, 16.f });
-        hint->setScale(0.5f);
+            "bigFont.fnt");
+        hint->setPosition({ W * 0.5f, 12.f });
+        hint->setScale(0.32f);
         hint->setOpacity(160);
         m_panel->addChild(hint);
+
+        // Fill the list with whatever's currently on disk.
+        refreshMacroList();
     }
 
     // ----- settings page (gear button) -------------------------------------
@@ -3480,10 +3549,10 @@ private:
         float y = H - 62.f;
 
         auto addTag = [this](const char* text, float x, float ty) {
-            auto lbl = CCLabelBMFont::create(text, "chatFont.fnt");
+            auto lbl = CCLabelBMFont::create(text, "bigFont.fnt");
             lbl->setAnchorPoint({ 1.f, 0.5f });
             lbl->setPosition({ x, ty });
-            lbl->setScale(0.6f);
+            lbl->setScale(0.4f);
             m_settingsPanel->addChild(lbl);
         };
 
@@ -3498,82 +3567,96 @@ private:
             menu_selector(BotUILayer::onPhysicsDebug), "Physics debug",
             bot.physicsDebugEnabled);
 
-        // Row 2: random-seed lock + the seed value.
-        y -= 44.f;
+        // Row 2: seed lock + value.
+        y -= 40.f;
         m_seedToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onSeedLock), "Lock seed",
             bot.seedLockEnabled);
         addTag("Seed", 158.f, y);
-        m_seedInput = geode::TextInput::create(90.f, "1337", "chatFont.fnt");
+        m_seedInput = geode::TextInput::create(90.f, "1337", "bigFont.fnt");
         m_seedInput->setCommonFilter(geode::CommonFilter::Int);
         m_seedInput->setString(fmt::format("{}", bot.lockedSeed));
         m_seedInput->setPosition({ 210.f, y });
-        m_seedInput->setScale(0.9f);
+        m_seedInput->setScale(0.7f);
         m_seedInput->setCallback([](std::string const& s) {
             BotManager::get().setSeedFromString(s);
         });
         m_settingsPanel->addChild(m_seedInput);
 
-        // Row 3: wave gravity maintain.
-        y -= 44.f;
+        // Row 3: wave gravity.
+        y -= 40.f;
         m_waveToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onWaveMaintain), "Maintain gravity (wave)",
             bot.waveMaintainEnabled);
 
-        // Row 4: autoclicker + clicks-per-second.
-        y -= 44.f;
+        // Row 4: autoclicker: Hz + hold ratio inline.
+        y -= 40.f;
         m_autoClickToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onAutoClick), "Autoclick",
             bot.autoClickEnabled);
-        addTag("CPS", 158.f, y);
-        m_cpsInput = geode::TextInput::create(90.f, "10", "chatFont.fnt");
+        addTag("Hz", 158.f, y);
+        m_cpsInput = geode::TextInput::create(65.f, "10", "bigFont.fnt");
         m_cpsInput->setCommonFilter(geode::CommonFilter::Float);
-        m_cpsInput->setString(fmt::format("{:g}", bot.autoClickCPS));
-        m_cpsInput->setPosition({ 210.f, y });
-        m_cpsInput->setScale(0.9f);
+        m_cpsInput->setString(fmt::format("{:g}", bot.autoClickHz));
+        m_cpsInput->setPosition({ 195.f, y });
+        m_cpsInput->setScale(0.7f);
         m_cpsInput->setCallback([](std::string const& s) {
             BotManager::get().setAutoClickCPSFromString(s);
         });
         m_settingsPanel->addChild(m_cpsInput);
+        addTag("Hold", 258.f, y);
+        m_holdInput = geode::TextInput::create(60.f, "0.5", "bigFont.fnt");
+        m_holdInput->setCommonFilter(geode::CommonFilter::Float);
+        m_holdInput->setString(fmt::format("{:g}", bot.autoClickHoldRatio));
+        m_holdInput->setPosition({ 295.f, y });
+        m_holdInput->setScale(0.7f);
+        m_holdInput->setCallback([](std::string const& s) {
+            BotManager::get().setAutoClickHoldFromString(s);
+        });
+        m_settingsPanel->addChild(m_holdInput);
 
-        // Row 5: frame stepping. Layout is unmistakable:
-        // [x] Frame step   [press M to step]   FPS [    240    ]
-        // The FPS box sits right next to the label so it's clear what the
-        // number is controlling.
-        y -= 44.f;
+        // Row 5: frame stepping. [x] Frame step   press M to step   FPS [240]
+        y -= 40.f;
         m_stepToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onFrameStep), "Frame step",
             bot.frameStepEnabled);
-        auto keybindHint = CCLabelBMFont::create("press M to step", "chatFont.fnt");
+        auto keybindHint = CCLabelBMFont::create("press M to step", "bigFont.fnt");
         keybindHint->setAnchorPoint({ 0.f, 0.5f });
-        keybindHint->setPosition({ 180.f, y });
-        keybindHint->setScale(0.5f);
+        keybindHint->setPosition({ 175.f, y });
+        keybindHint->setScale(0.36f);
         keybindHint->setOpacity(200);
         m_settingsPanel->addChild(keybindHint);
         addTag("FPS", 330.f, y);
-        m_stepFpsInput = geode::TextInput::create(90.f, "240", "chatFont.fnt");
+        m_stepFpsInput = geode::TextInput::create(90.f, "240", "bigFont.fnt");
         m_stepFpsInput->setCommonFilter(geode::CommonFilter::Float);
         m_stepFpsInput->setString(fmt::format("{:g}", bot.frameStepFps));
         m_stepFpsInput->setPosition({ 385.f, y });
-        m_stepFpsInput->setScale(0.9f);
+        m_stepFpsInput->setScale(0.7f);
         m_stepFpsInput->setCallback([](std::string const& s) {
             BotManager::get().setFrameStepFpsFromString(s);
         });
         m_settingsPanel->addChild(m_stepFpsInput);
 
-        // Single hint line at the bottom -- the row labels + inline tags
-        // above already say what each control is; this is just the caveats
-        // that don't fit on a toggle label.
+        // Bottom caveats.
         auto hint = CCLabelBMFont::create(
-            "Mirror needs 2P level. Autoclick up to 10000 CPS. "
+            "Mirror needs 2P level. Hold = fraction of period held (0.02-0.98). "
             "Physics debug replays recorded positions.",
-            "chatFont.fnt");
+            "bigFont.fnt");
         hint->setAnchorPoint({ 0.f, 0.5f });
         hint->setPosition({ 22.f, 32.f });
-        hint->setScale(0.42f);
+        hint->setScale(0.3f);
         hint->setOpacity(160);
         m_settingsPanel->addChild(hint);
 
+        // X close in settings top-right, plus a Back button on the bottom.
+        auto xSpr = CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png");
+        if (xSpr) {
+            xSpr->setScale(0.42f);
+            auto xBtn = CCMenuItemSpriteExtra::create(
+                xSpr, this, menu_selector(BotUILayer::onSettingsBack));
+            xBtn->setPosition({ W - 20.f, H - 20.f });
+            m_settingsMenu->addChild(xBtn);
+        }
         makeButton(m_settingsMenu, { W - 55.f, 32.f }, "Back",
                    menu_selector(BotUILayer::onSettingsBack));
 
@@ -3591,10 +3674,10 @@ private:
         forceTogglerState(toggle, initialState);
         menu->addChild(toggle);
 
-        auto lbl = CCLabelBMFont::create(label, "chatFont.fnt");
+        auto lbl = CCLabelBMFont::create(label, "bigFont.fnt");
         lbl->setAnchorPoint({ 0.f, 0.5f });
-        lbl->setPosition({ pos.x + 16.f, pos.y });
-        lbl->setScale(0.55f);
+        lbl->setPosition({ pos.x + 12.f, pos.y });
+        lbl->setScale(0.36f);
         panel->addChild(lbl);
         return toggle;
     }
@@ -3696,24 +3779,40 @@ private:
         bot.physicsDebugEnabled = !bot.physicsDebugEnabled;
         bot.persist();
     }
+    // ----- macro-list callbacks --------------------------------------------
     void onSave(CCObject*) {
         auto& bot = BotManager::get();
+        // Save under the text-box name, then refresh so the new entry
+        // shows up in the list.
         if (bot.physicsMode) bot.savePhysicsMacro(bot.macroName);
         else bot.saveMacro(bot.macroName);
+        refreshMacroList();
     }
     void onLoad(CCObject*) {
         auto& bot = BotManager::get();
-        if (bot.physicsMode) bot.loadPhysicsMacro(bot.macroName);
-        else bot.loadMacro(bot.macroName);
+        // Prefer the selected list row; fall back to the text-box name.
+        std::string name = (m_selectedMacro >= 0 &&
+                            m_selectedMacro < (int)m_macroNames.size())
+                           ? m_macroNames[m_selectedMacro] : bot.macroName;
+        if (bot.physicsMode) bot.loadPhysicsMacro(name);
+        else bot.loadMacro(name);
         refreshAll();
     }
-    void onExport(CCObject*) {
-        BotManager::get().saveMacroText(BotManager::get().macroName);
+    void onDeleteMacro(CCObject*) {
+        if (m_selectedMacro < 0 ||
+            m_selectedMacro >= (int)m_macroNames.size()) {
+            Notification::create("Select a macro first",
+                                 NotificationIcon::Info)->show();
+            return;
+        }
+        auto& bot = BotManager::get();
+        std::error_code ec;
+        std::filesystem::remove(bot.macroPath(m_macroNames[m_selectedMacro]), ec);
+        std::filesystem::remove(bot.physicsMacroPath(m_macroNames[m_selectedMacro]), ec);
+        m_selectedMacro = -1;
+        refreshMacroList();
     }
-    void onImport(CCObject*) {
-        BotManager::get().loadMacroText(BotManager::get().macroName);
-        refreshAll();
-    }
+    void onRefreshList(CCObject*) { refreshMacroList(); }
     void onClear(CCObject*) {
         auto& bot = BotManager::get();
         bot.macro.clear();
@@ -3722,24 +3821,130 @@ private:
         bot.playbackIndex = 0;
         refreshAll();
     }
-    void onList(CCObject*) {
-        auto names = BotManager::get().listMacros();
-        if (names.empty()) {
-            Notification::create("No saved macros", NotificationIcon::Info)->show();
-            return;
-        }
-        std::string joined;
-        for (size_t i = 0; i < names.size(); ++i) {
-            joined += names[i];
-            if (i + 1 < names.size()) joined += ", ";
-        }
-        log::info("[Bot] Saved macros: {}", joined);
-        Notification::create(
-            fmt::format("{} macro(s) -- see console", names.size()),
-            NotificationIcon::Info)->show();
-    }
     void onClose(CCObject*) {
         setPanelVisible(false);
+    }
+
+    // ----- macro list population + selection --------------------------------
+    void refreshMacroList() {
+        if (!m_macroList) return;
+        m_macroNames = BotManager::get().listMacros();
+        auto* content = m_macroList->m_contentLayer;
+        if (!content) return;
+        content->removeAllChildren();
+        m_macroRowButtons.clear();
+
+        constexpr float rowH = 22.f;
+        float rowW = m_macroList->getContentSize().width;
+        content->setContentSize({
+            rowW,
+            std::max<float>(m_macroList->getContentSize().height,
+                            rowH * (float)m_macroNames.size())
+        });
+
+        for (size_t i = 0; i < m_macroNames.size(); ++i) {
+            auto rowMenu = CCMenu::create();
+            rowMenu->setContentSize({ rowW, rowH });
+            rowMenu->setTouchPriority(-1050);
+
+            auto spr = ButtonSprite::create(m_macroNames[i].c_str());
+            spr->setScale(0.5f);
+            auto btn = CCMenuItemSpriteExtra::create(
+                spr, this, menu_selector(BotUILayer::onMacroRow));
+            btn->setPosition({ rowW * 0.5f, rowH * 0.5f });
+            btn->setTag(static_cast<int>(i));
+            rowMenu->addChild(btn);
+            m_macroRowButtons.push_back(btn);
+            content->addChild(rowMenu);
+        }
+        content->updateLayout();
+        m_macroList->scrollToTop();
+        applySelectionTint();
+        updateSelectionInfo();
+    }
+
+    void onMacroRow(CCObject* sender) {
+        if (auto item = typeinfo_cast<CCMenuItemSpriteExtra*>(sender)) {
+            m_selectedMacro = item->getTag();
+            applySelectionTint();
+            updateSelectionInfo();
+            // Also pre-fill the name box with the selected name so Save
+            // over the same slot is one click.
+            if (m_nameInput &&
+                m_selectedMacro >= 0 &&
+                m_selectedMacro < (int)m_macroNames.size()) {
+                auto& bot = BotManager::get();
+                bot.macroName = m_macroNames[m_selectedMacro];
+                bot.persist();
+                m_nameInput->setString(bot.macroName);
+            }
+        }
+    }
+
+    void applySelectionTint() {
+        for (int i = 0; i < (int)m_macroRowButtons.size(); ++i) {
+            auto* btn = m_macroRowButtons[i];
+            auto img = btn->getNormalImage();
+            if (auto spr = typeinfo_cast<cocos2d::CCNodeRGBA*>(img)) {
+                spr->setColor(i == m_selectedMacro
+                              ? cocos2d::ccColor3B{140, 255, 170}
+                              : cocos2d::ccColor3B{255, 255, 255});
+            }
+        }
+    }
+
+    // Peek at the saved-macro header without disturbing the loaded macro:
+    // return "v6  -  421 inputs  -  8.42s  -  Bloodbath" (or a truncated
+    // form on error). Cheap enough to do on selection.
+    void updateSelectionInfo() {
+        if (!m_selInfoLabel) return;
+        if (m_selectedMacro < 0 ||
+            m_selectedMacro >= (int)m_macroNames.size()) {
+            m_selInfoLabel->setString("select a macro");
+            return;
+        }
+        auto path = BotManager::get().macroPath(m_macroNames[m_selectedMacro]);
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            m_selInfoLabel->setString("(not on disk)");
+            return;
+        }
+        uint32_t magic = 0, version = 0;
+        in.read(reinterpret_cast<char*>(&magic), 4);
+        in.read(reinterpret_cast<char*>(&version), 4);
+        if (magic != bot::MACRO_MAGIC) {
+            m_selInfoLabel->setString("(unknown format)");
+            return;
+        }
+        double recordStart = 0.0, recordFps = 240.0;
+        uint8_t norm = 0;
+        in.read(reinterpret_cast<char*>(&recordStart), 8);
+        in.read(reinterpret_cast<char*>(&recordFps), 8);
+        in.read(reinterpret_cast<char*>(&norm), 1);
+        int32_t levelID = 0;
+        uint16_t nameLen = 0;
+        std::string levelName;
+        if (version >= 2) {
+            in.read(reinterpret_cast<char*>(&levelID), 4);
+            in.read(reinterpret_cast<char*>(&nameLen), 2);
+            if (nameLen) {
+                levelName.resize(nameLen, '\0');
+                in.read(levelName.data(), nameLen);
+            }
+        }
+        uint32_t count = 0;
+        in.read(reinterpret_cast<char*>(&count), 4);
+        // Last event's timestamp = duration; seek to the last record.
+        double duration = 0.0;
+        if (count > 0) {
+            std::streamoff perEvent = 10; // 8 (time) + 1 (button) + 1 (flags)
+            in.seekg(-perEvent, std::ios::end);
+            in.read(reinterpret_cast<char*>(&duration), 8);
+        }
+        std::string label = fmt::format("v{}  |  {} inputs  |  {:.2f}s",
+                                        version, count, duration);
+        if (!levelName.empty()) label += "  |  " + levelName;
+        m_selInfoLabel->setString(label.c_str());
     }
 };
 
