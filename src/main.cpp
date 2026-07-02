@@ -129,14 +129,26 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     }
     
     void update(float dt) {
-        if (isPlay(this) && BotManager::get().guiPaused) {
-            return;
+        auto& bot = BotManager::get();
+        if (isPlay(this) && bot.guiPaused) return;
+        // Push our speedhack multiplier into the game state's m_timeWarp
+        // BEFORE the base update. GD's physics loop, CBF's step-count
+        // formula, and the audio engine all read m_timeWarp -- setting it
+        // here makes the speedhack scale everything (m_levelTime,
+        // substeps, music pitch) uniformly and by the same code path GD's
+        // own speedhack would use. Reset to 1.0 when disabled so we don't
+        // strand the level at a stale multiplier.
+        if (isPlay(this)) {
+            float target = bot.speedhackEnabled
+                           ? static_cast<float>(bot.speedMultiplier())
+                           : 1.0f;
+            this->m_gameState.m_timeWarp = target;
         }
         GJBaseGameLayer::update(dt);
         if (isPlay(this)) {
-            BotManager::get().syncRecordingToTime(this);
+            bot.syncRecordingToTime(this);
         }
-        BotManager::get().applyMusicSpeed();
+        bot.applyMusicSpeed();
     }
 
 // ---- playback (primary, per physics step) ----------------------------
@@ -205,11 +217,12 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             }
             return 0.0;
         }
-        double modified = GJBaseGameLayer::getModifiedDelta(dt);
-        if (bot.speedhackEnabled && isPlay(this)) {
-            modified *= bot.speedMultiplier();
-        }
-        return modified;
+        // Speedhack is applied via m_gameState.m_timeWarp (set in the
+        // update hook), NOT by multiplying delta here. Multiplying delta
+        // conflicted with CBF's own step-count formula
+        // (round(delta * 60 / min(1, timewarp) * 4)); m_timeWarp is the
+        // exact hook GD's own speedhack uses and CBF understands.
+        return GJBaseGameLayer::getModifiedDelta(dt);
     }
 };
 
@@ -474,8 +487,6 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.waveMaintainEnabled  = Mod::get()->getSavedValue<bool>("wave-maintain", false);
     bot.autoClickEnabled     = Mod::get()->getSavedValue<bool>("auto-click", false);
     bot.autoClickHz          = Mod::get()->getSavedValue<double>("auto-hz", 10.0);
-    bot.autoClickDir         = static_cast<int>(
-                                   Mod::get()->getSavedValue<int64_t>("auto-dir", 0));
     bot.frameStepEnabled     = Mod::get()->getSavedValue<bool>("frame-step", false);
     bot.frameStepFps         = Mod::get()->getSavedValue<double>("step-fps", 240.0);
     bot.physicsDebugEnabled  = Mod::get()->getSavedValue<bool>("physics-debug", false);

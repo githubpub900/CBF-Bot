@@ -1242,15 +1242,9 @@ public:
     bool      waveMaintainEnabled = false;
 
     // Autoclicker: click train on P1 jump at `autoClickHz` clicks per
-    // second, 50% duty cycle. Reverted to the simple edge-based scheme
-    // per user request.  `autoClickDir` sets an OPTIONAL direction that is
-    // held while the autoclicker runs -- Left or Right -- to enable
-    // "diagonal" autoclick (jump + steering). 0=none, 2=left, 3=right;
-    // match the button-id numbering in bot::Button.
+    // second, 50% duty cycle. Simple edge-based scheme.
     bool      autoClickEnabled = false;
     double    autoClickHz      = 10.0;
-    int       autoClickDir     = 0;
-    bool      autoClickDirHeld = false; // are we currently holding the dir?
 
     // Set while WE are re-dispatching a transformed input (mirror copy, wave
     // gravity fix, autoclick edge). Unlike `injecting`, these still get
@@ -1792,37 +1786,33 @@ public:
     // with the option on plays back exactly as flown -- which is also why
     // this never runs during playback: the macro already contains the
     // corrected inputs.
-    // Wave gravity correction. Two entry conditions fire the correction:
+    // Wave gravity correction. Fires the moment the effective hold state
+    // is out of sync with what we want -- checked every substep, so any
+    // divergence heals in <= 1 substep.
     //
-    //   (A) The gravity state FLIPPED since we last looked (m_isUpsideDown
-    //       differs from waveLastUpsideDown). This is the real fix for
-    //       "holding into an upside-down portal doesn't work" -- state-only
-    //       comparison never fires after the first correction (raw stays
-    //       true, effective stays synced to it), so a subsequent portal is
-    //       invisible. Flip detection sees every portal.
+    // The authoritative flip check is the SIGN OF m_gravity, not
+    // m_isUpsideDown. In GD 2.2 m_isUpsideDown is a display / animation
+    // flag that GD flips through a slightly deferred code path, while
+    // m_gravity is what the physics loop actually integrates. Reading
+    // m_gravity sign catches the flip on the SAME substep it happens.
     //
-    //   (B) The user's raw hold changed (filterLiveJump wrote a new value
-    //       that hasn't been dispatched yet) -- caught by the effective vs
-    //       stored comparison as before.
-    //
-    // When we release the jump we also stomp on GD's jump buffer AND its
-    // ring-jump / last-jump-time fields. Any one of those fields holding a
-    // stale value causes the wave to snap the jump back on for one substep,
-    // which is exactly what visibly overrode the release before.
+    // On release we also stomp on GD's jump buffer AND ring-jump fields.
+    // Any one of those left set will silently re-press the jump on the
+    // next substep, which visibly overrides the release. Full teardown.
     void tickWaveGravityFor(GJBaseGameLayer* gl, PlayerObject* p, bool isP1) {
         if (!waveMaintainEnabled || mode == bot::Mode::Playing || !gl) return;
         if (!p || p->m_isDead) return;
         int pi = isP1 ? 0 : 1;
 
-        bool upside = p->m_isUpsideDown;
-        bool flipped = upside != waveLastUpsideDown[pi];
+        // Use m_gravity sign as the authoritative direction. m_isUpsideDown
+        // is a secondary flag GD updates on a slightly different code path
+        // and reading it lets the wave move wrong for a substep or two.
+        bool upside = (p->m_gravity < 0.0) || p->m_isUpsideDown;
         waveLastUpsideDown[pi] = upside;
 
         bool effective = p->m_isDart ? (waveRawHeld[pi] != upside)
                                       : waveRawHeld[pi];
-        // Fire when we detect a flip, OR when the stored effective is out
-        // of sync with what we now want.
-        if (!flipped && effective == waveEffectiveHeld[pi]) return;
+        if (effective == waveEffectiveHeld[pi]) return;
 
         waveEffectiveHeld[pi] = effective;
         selfDispatch = true;
@@ -1830,10 +1820,6 @@ public:
         selfDispatch = false;
 
         if (!effective) {
-            // Full buffer teardown -- ANY of these fields left set will
-            // silently re-press the jump on the next substep, which was the
-            // exact reason "holding into an upside-down portal" appeared
-            // not to work: the release fired, but the buffered press won.
             p->m_jumpBuffered = false;
             p->m_wasJumpBuffered = false;
             p->m_stateJumpBuffered = 0;
@@ -1926,14 +1912,20 @@ public:
     // Re-anchors on every level-clock jump (checkpoint / respawn / restart)
     // by resetting autoClickNextTime to now + gap, so it never disables
     // itself and never fires a huge catch-up burst.
-    // Old-style edge-based autoclicker (per user request). Every substep,
-    // computes the edge index at the current time as floor(now * 2 * Hz)
-    // and fires all missed edges up to it. State (down) is (edge % 2 == 0).
+    // Edge-based autoclicker. State AFTER edge k is down when k is even;
+    // edge k sits at time k*(0.5/Hz). We fire every missed edge from
+    // lastEdge+1 to floor(now*2*Hz).
     //
-    // Direction hold: if `autoClickDir` is 2 (left) or 3 (right), that
-    // direction is HELD continuously while the autoclicker is active --
-    // gives you "diagonal" autoclick (steer left/right while auto-jumping).
-    // Cleaned up on disable / mode change / GUI pause.
+    // KEY FIX (was disabling itself after death): on any BACKWARD clock
+    // jump (respawn, checkpoint reload, restart) autoClickLastEdge would
+    // stay at its high pre-death value while the level clock reset to 0,
+    // so `target <= lastEdge` was true for the entire duration it took the
+    // clock to catch up -- the autoclicker looked disabled until the user
+    // toggled it off/on. Now we detect clock-backward and resnap.
+    //
+    // KEY FIX (MegaHack detection): dropped selfDispatch so the calls flow
+    // through the normal handleButton chain -- MegaHack's CPS counter,
+    // wave gravity, mirror, recording all see them as real inputs.
     void tickAutoClicker(GJBaseGameLayer* gl, double now) {
         bool active = autoClickEnabled &&
                       mode != bot::Mode::Playing &&
@@ -1941,47 +1933,33 @@ public:
                       std::isfinite(autoClickHz) && autoClickHz > 0.0 &&
                       gl != nullptr;
 
-        auto press = [&](int btn, bool down){
-            selfDispatch = true;
-            gl->handleButton(down, btn, true);
-            if (mirrorEnabled && isTwoPlayerLevel(gl)) {
-                gl->handleButton(down, btn, false);
-            }
-            selfDispatch = false;
-        };
-
-        // Diagonal direction hold.
-        bool dirWanted = active && (autoClickDir == 2 || autoClickDir == 3);
-        if (dirWanted != autoClickDirHeld && gl) {
-            if (autoClickDirHeld && autoClickDir != 0) {
-                press(autoClickDir, false);
-            }
-            if (dirWanted) {
-                press(autoClickDir, true);
-            }
-            autoClickDirHeld = dirWanted;
-        }
-
+        // Release any held click when disabling.
         if (!active) {
-            if (autoClickHeld) {
-                press(1, false);
+            if (autoClickHeld && gl) {
+                gl->handleButton(false, 1, true);
                 autoClickHeld = false;
             }
             return;
         }
 
-        // Edge k lives at time k * (0.5 / Hz). State AFTER edge k: down when
-        // k is even. Compute the current target edge from wall clock; emit
-        // every missed edge from lastEdge+1 to target.
         double half = 0.5 / autoClickHz;
         long long target = (long long)std::floor(now / half);
+
+        // Clock jumped backwards (death / respawn / checkpoint reload):
+        // snap lastEdge into the current window so the click train picks
+        // right back up instead of waiting out the stale offset.
+        if (target < autoClickLastEdge - 4) {
+            autoClickLastEdge = target;
+            autoClickHeld = (target % 2) == 0;
+            return;
+        }
         if (target <= autoClickLastEdge) return;
-        // Runaway guard: cap edges emitted per substep so a big clock jump
-        // doesn't spam thousands of clicks.
+        // Runaway guard: cap edges per call after a huge dt.
         if (target - autoClickLastEdge > 200) autoClickLastEdge = target - 200;
+
         for (long long i = autoClickLastEdge + 1; i <= target; ++i) {
             bool down = (i % 2) == 0;
-            press(1, down);
+            gl->handleButton(down, 1, true);
             autoClickHeld = down;
         }
         autoClickLastEdge = target;
@@ -2391,7 +2369,6 @@ public:
         m->setSavedValue<bool>("wave-maintain", waveMaintainEnabled);
         m->setSavedValue<bool>("auto-click", autoClickEnabled);
         m->setSavedValue<double>("auto-hz", autoClickHz);
-        m->setSavedValue<int64_t>("auto-dir", autoClickDir);
         m->setSavedValue<bool>("frame-step", frameStepEnabled);
         m->setSavedValue<double>("step-fps", frameStepFps);
         m->setSavedValue<bool>("physics-debug", physicsDebugEnabled);
@@ -2435,11 +2412,6 @@ public:
         }
     }
 
-    void setAutoClickDir(int dir) {
-        if (dir != 0 && dir != 2 && dir != 3) dir = 0;
-        autoClickDir = dir;
-        persist();
-    }
 
     void setFrameStepFpsFromString(std::string const& s) {
         try {
@@ -3014,7 +2986,6 @@ protected:
     CCMenuItemToggler*    m_physToggle     = nullptr;
     geode::TextInput*     m_seedInput    = nullptr;
     geode::TextInput*     m_cpsInput     = nullptr;
-    CCMenuItemSpriteExtra* m_dirButton   = nullptr;
     geode::TextInput*     m_stepFpsInput = nullptr;
     bool                  m_settingsOpen = false;
 
@@ -3306,14 +3277,6 @@ public:
         if (m_cpsInput) {
             m_cpsInput->setString(fmt::format("{:g}", BotManager::get().autoClickHz));
         }
-        if (m_dirButton) {
-            auto* bs = typeinfo_cast<ButtonSprite*>(m_dirButton->getNormalImage());
-            if (bs) {
-                int d = BotManager::get().autoClickDir;
-                bs->setString(d == 2 ? "Diag: L"
-                            : d == 3 ? "Diag: R" : "Diag: -");
-            }
-        }
         if (m_stepFpsInput) {
             m_stepFpsInput->setString(fmt::format("{:g}", BotManager::get().frameStepFps));
         }
@@ -3521,15 +3484,20 @@ private:
         m_panel->addChild(m_statsLabel);
 
         // CBF STATUS: moved to the BOTTOM-LEFT corner where nothing else is.
+        // CBF period "." and status label share the SAME Y so they read
+        // as one line. bigFont's "." glyph sits high on the baseline, so
+        // to visually center it against a chatFont-ish text label we
+        // anchor its top-line at the same Y and use a smaller scale.
+        constexpr float cbfY = 22.f;
         m_periodLabel = CCLabelBMFont::create(".", "bigFont.fnt");
         m_periodLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_periodLabel->setPosition({ xL - 18.f, 18.f });
-        m_periodLabel->setScale(1.5f);
+        m_periodLabel->setPosition({ xL - 18.f, cbfY });
+        m_periodLabel->setScale(0.9f);
         m_panel->addChild(m_periodLabel);
 
         m_statusLabel = CCLabelBMFont::create("CBF: ...", "bigFont.fnt");
         m_statusLabel->setAnchorPoint({ 0.f, 0.5f });
-        m_statusLabel->setPosition({ xL, 18.f });
+        m_statusLabel->setPosition({ xL - 4.f, cbfY });
         m_statusLabel->setScale(0.36f);
         m_panel->addChild(m_statusLabel);
 
@@ -3568,37 +3536,43 @@ private:
         m_selInfoLabel->setOpacity(200);
         m_panel->addChild(m_selInfoLabel);
 
-        // Name box + Save/Load, generously spaced.
+        // Name box on ITS OWN ROW so it doesn't collide with the buttons.
         float nameY = infoY - 32.f;
-        m_nameInput = geode::TextInput::create(130.f, "macro", "bigFont.fnt");
+        m_nameInput = geode::TextInput::create(230.f, "macro", "bigFont.fnt");
         m_nameInput->setString(bot.macroName);
-        m_nameInput->setPosition({ xR + 65.f, nameY });
+        m_nameInput->setPosition({ xR + listW * 0.5f, nameY });
         m_nameInput->setScale(0.7f);
         m_nameInput->setCallback([](std::string const& s) {
             if (!s.empty()) { BotManager::get().macroName = s; BotManager::get().persist(); }
         });
         m_panel->addChild(m_nameInput);
-        makeButton(menu, { xR + 165.f, nameY }, "Save",
-                   menu_selector(BotUILayer::onSave));
-        makeButton(menu, { xR + 210.f, nameY }, "Load",
-                   menu_selector(BotUILayer::onLoad));
 
-        // Delete / clear / refresh row.
-        float actionY = nameY - 34.f;
-        makeButton(menu, { xR + 45.f, actionY }, "Delete",
+        // Buttons row: Save / Load / Delete / Refresh, evenly spaced.
+        float btnY = nameY - 32.f;
+        constexpr float btnSpacing = 56.f;
+        float btnX0 = xR + listW * 0.5f - 1.5f * btnSpacing;
+        makeButton(menu, { btnX0,                 btnY }, "Save",
+                   menu_selector(BotUILayer::onSave));
+        makeButton(menu, { btnX0 + btnSpacing,    btnY }, "Load",
+                   menu_selector(BotUILayer::onLoad));
+        makeButton(menu, { btnX0 + btnSpacing*2,  btnY }, "Del",
                    menu_selector(BotUILayer::onDeleteMacro));
-        makeButton(menu, { xR + 120.f, actionY }, "Clear macro",
-                   menu_selector(BotUILayer::onClear));
-        makeButton(menu, { xR + 210.f, actionY }, "Refresh",
+        makeButton(menu, { btnX0 + btnSpacing*3,  btnY }, "Refresh",
                    menu_selector(BotUILayer::onRefreshList));
 
-        // Keybind hint in the bottom-right (bottom-left has the CBF strip).
+        // "Clear current" is separate -- it clears the loaded macro in
+        // memory, distinct from Delete which removes a saved file.
+        makeButton(menu, { xR + listW * 0.5f, btnY - 32.f }, "Clear current",
+                   menu_selector(BotUILayer::onClear));
+
+        // Keybind hint at the very bottom, RIGHT-anchored to avoid the
+        // CBF strip in the bottom-left. Kept short.
         auto hint = CCLabelBMFont::create(
-            "K: menu   V: rec   B: play   N: stop   M: step",
+            "K menu  V rec  B play  N stop  M step",
             "bigFont.fnt");
         hint->setAnchorPoint({ 1.f, 0.5f });
-        hint->setPosition({ W - 20.f, 18.f });
-        hint->setScale(0.32f);
+        hint->setPosition({ W - 24.f, 20.f });
+        hint->setScale(0.3f);
         hint->setOpacity(160);
         m_panel->addChild(hint);
 
@@ -3680,7 +3654,7 @@ private:
         // Row 3: wave gravity.
         y -= 40.f;
         m_waveToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
-            menu_selector(BotUILayer::onWaveMaintain), "Maintain gravity (wave)",
+            menu_selector(BotUILayer::onWaveMaintain), "Wave grav lock",
             bot.waveMaintainEnabled);
 
         // Row 4: autoclicker: Hz + hold ratio inline.
@@ -3698,16 +3672,6 @@ private:
             BotManager::get().setAutoClickCPSFromString(s);
         });
         m_settingsPanel->addChild(m_cpsInput);
-        // Diagonal direction: cycle button toggles None -> Left -> Right.
-        auto dirBtn = ButtonSprite::create(
-            bot.autoClickDir == 2 ? "Diag: L" :
-            bot.autoClickDir == 3 ? "Diag: R" : "Diag: -");
-        dirBtn->setScale(0.55f);
-        auto dirItem = CCMenuItemSpriteExtra::create(
-            dirBtn, this, menu_selector(BotUILayer::onAutoDir));
-        dirItem->setPosition({ 295.f, y });
-        m_settingsMenu->addChild(dirItem);
-        m_dirButton = dirItem;
 
         // Row 5: frame stepping. [x] Frame step   press M to step   FPS [240]
         y -= 40.f;
@@ -3733,12 +3697,11 @@ private:
 
         // Bottom caveats.
         auto hint = CCLabelBMFont::create(
-            "Mirror needs 2P level. Hold = fraction of period held (0.02-0.98). "
-            "Physics debug replays recorded positions.",
+            "Mirror needs 2P mode. Physics debug replays positions.",
             "bigFont.fnt");
         hint->setAnchorPoint({ 0.f, 0.5f });
         hint->setPosition({ 22.f, 32.f });
-        hint->setScale(0.3f);
+        hint->setScale(0.32f);
         hint->setOpacity(160);
         m_settingsPanel->addChild(hint);
 
@@ -3861,19 +3824,6 @@ private:
         auto& bot = BotManager::get();
         bot.autoClickEnabled = !bot.autoClickEnabled;
         bot.persist();
-    }
-    void onAutoDir(CCObject*) {
-        auto& bot = BotManager::get();
-        // Cycle None -> Left -> Right -> None ...
-        int next = (bot.autoClickDir == 0) ? 2
-                 : (bot.autoClickDir == 2) ? 3 : 0;
-        bot.setAutoClickDir(next);
-        if (m_dirButton) {
-            if (auto bs = typeinfo_cast<ButtonSprite*>(m_dirButton->getNormalImage())) {
-                bs->setString(next == 2 ? "Diag: L"
-                            : next == 3 ? "Diag: R" : "Diag: -");
-            }
-        }
     }
     void onFrameStep(CCObject*) {
         auto& bot = BotManager::get();
