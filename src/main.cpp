@@ -87,6 +87,16 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
         auto& bot = BotManager::get();
         bool play = isPlay(this);
 
+        // BLOCK USER INPUTS DURING PLAYBACK.
+        // While a macro is playing, live user inputs must NOT reach the
+        // engine or they overlap the recorded inputs and desync playback.
+        // Only our own re-dispatches (injecting / selfDispatch) get through
+        // -- everything the user physically presses is swallowed here.
+        if (play && bot.mode == bot::Mode::Playing &&
+            !bot.injecting && !bot.selfDispatch) {
+            return;
+        }
+
         // Wave "maintain gravity": may rewrite a live jump transition (so the
         // hold direction survives gravity portals) or swallow it entirely if
         // the rewritten transition is redundant. Only for raw user input --
@@ -218,6 +228,23 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
 //  corrected before the next substep.
 //
 class $modify(BotPlayerObject, PlayerObject) {
+    // Fire the wave-gravity correction the INSTANT a gravity portal flips
+    // the player, before any further physics runs. This is the fix for
+    // "holding into an upside-down portal doesn't work" that per-substep
+    // begin/end checks can't achieve -- they only see the flip AFTER the
+    // substep's physics has already applied gravity to velocity in the
+    // wrong direction.
+    void flipGravity(bool p0, bool p1) {
+        PlayerObject::flipGravity(p0, p1);
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+        bool isP1 = (this == pl->m_player1);
+        bool isP2 = (this == pl->m_player2);
+        if (!isP1 && !isP2) return;
+        auto& bot = BotManager::get();
+        bot.tickWaveGravityFor(pl, this, isP1);
+    }
+
     void update(float dt) {
         auto pl = PlayLayer::get();
         if (!pl) {  // menus, editor preview, icon kit -- not our players
@@ -447,7 +474,8 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.waveMaintainEnabled  = Mod::get()->getSavedValue<bool>("wave-maintain", false);
     bot.autoClickEnabled     = Mod::get()->getSavedValue<bool>("auto-click", false);
     bot.autoClickHz          = Mod::get()->getSavedValue<double>("auto-hz", 10.0);
-    bot.autoClickHoldRatio   = Mod::get()->getSavedValue<double>("auto-hold", 0.5);
+    bot.autoClickDir         = static_cast<int>(
+                                   Mod::get()->getSavedValue<int64_t>("auto-dir", 0));
     bot.frameStepEnabled     = Mod::get()->getSavedValue<bool>("frame-step", false);
     bot.frameStepFps         = Mod::get()->getSavedValue<double>("step-fps", 240.0);
     bot.physicsDebugEnabled  = Mod::get()->getSavedValue<bool>("physics-debug", false);
