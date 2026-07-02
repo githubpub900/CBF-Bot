@@ -63,6 +63,7 @@
 #include <array>
 #include <string>
 #include <cstdint>
+#include <cstdlib>
 #include <cctype>
 #include <cmath>
 #include <algorithm>
@@ -1207,6 +1208,40 @@ public:
     // recording -- handy so a clean practice run is never lost.
     bool      autoSaveOnComplete = true;
 
+    // ----- settings (gear menu) --------------------------------------------
+
+    // Input mirroring: every live P1 input is also dispatched to P2 (and vice
+    // versa). With `mirrorInvert` the mirrored copy behaves like an
+    // upside-down player two: jump state flipped, left/right swapped.
+    bool      mirrorEnabled = false;
+    bool      mirrorInvert  = false;
+
+    // Random-seed lock: reseed the RNG with `lockedSeed` at the start of
+    // every attempt so seeded effects roll identically on every macro run.
+    bool      seedLockEnabled = false;
+    int       lockedSeed      = 1337;
+
+    // Wave-only "maintain gravity": when a gravity portal flips the wave, the
+    // effective hold state is inverted automatically so the wave keeps
+    // travelling the direction the player is asking for.
+    bool      waveMaintainEnabled = false;
+
+    // Autoclicker: click train on P1 jump at this many clicks per second,
+    // phase-locked to the level clock (see tickAutoClicker).
+    bool      autoClickEnabled = false;
+    double    autoClickCPS     = 10.0;
+
+    // Set while WE are re-dispatching a transformed input (mirror copy, wave
+    // gravity fix, autoclick edge). Unlike `injecting`, these still get
+    // RECORDED into the macro -- the flag only stops the handleButton hook
+    // from transforming them a second time (mirror ping-pong, double flips).
+    bool      selfDispatch = false;
+
+    // Internal feature state.
+    bool                autoClickHeld = false; // current autoclick edge
+    std::array<bool, 2> waveRawHeld{};         // physical jump state  [p1, p2]
+    std::array<bool, 2> waveEffectiveHeld{};   // dispatched jump state [p1, p2]
+
     // ----- Physics bot mode -----
     // Physics bot mode is always on — we always record physics frames
     // AND inputs. Physics frames correct drift from input timing errors.
@@ -1511,11 +1546,16 @@ public:
         // Capture the authoritative level clock. This is what CBF has already
         // advanced to the correct sub-step by the time handleButton fires, so
         // it is sub-frame accurate for free (see the design notes at the top
-        // of this file). It is also monotonic, unlike X position. We then
-        // snap it to the grid the active CBF tier can actually address (see
-        // quantizeToResolution) so we never store a timestamp playback can't
-        // exactly reproduce.
-        double t = quantizeToResolution(levelTime(gl));
+        // of this file). It is also monotonic, unlike X position.
+        //
+        // Under Syzzi CBF we store the RAW double -- effectively infinite
+        // resolution, any sub-step addressable -- because rounding would throw
+        // away exactly the timing CBF exists to provide, and a double costs
+        // the same 8 bytes on disk either way. Only under RobTop's CBS do we
+        // snap to its 480fps grid, since that is the only grid the engine
+        // itself can reproduce a click on (see quantizeRobTop).
+        double t = levelTime(gl);
+        if (cbfState() == bot::CBFState::RobTop) t = quantizeRobTop(t);
         if (!macro.events.empty() && t <= macro.events.back().time) {
             double step = effectiveInputResolution();
             t = macro.events.back().time + (step > 0.0 ? step : 1e-6);
@@ -1608,6 +1648,127 @@ public:
         injecting = false;
     }
 
+    // ----- settings features: mirror / wave gravity / autoclick / seed -----
+
+    // Wave "maintain gravity", live-input half. Rewrites a LIVE jump
+    // transition so the wave keeps travelling the direction the user asks
+    // for even after a gravity portal flips the meaning of "hold":
+    // effective = raw XOR upside-down. Returns false when the rewritten
+    // transition is redundant (the engine is already in that state) and the
+    // hook should swallow it. Wave-only by design -- every other gamemode
+    // passes through untouched. The raw state is tracked even while the
+    // option is off so enabling it mid-attempt behaves correctly.
+    bool filterLiveJump(bool& down, bool isPlayer1) {
+        int pi = isPlayer1 ? 0 : 1;
+        waveRawHeld[pi] = down;
+        if (!waveMaintainEnabled) { waveEffectiveHeld[pi] = down; return true; }
+        auto pl = PlayLayer::get();
+        PlayerObject* p = pl ? (isPlayer1 ? pl->m_player1 : pl->m_player2)
+                             : nullptr;
+        if (!p || !p->m_isDart) { waveEffectiveHeld[pi] = down; return true; }
+        bool effective = (down != p->m_isUpsideDown);
+        if (effective == waveEffectiveHeld[pi]) return false;
+        waveEffectiveHeld[pi] = effective;
+        down = effective;
+        return true;
+    }
+
+    // Wave "maintain gravity", per-physics-step half. When a gravity portal
+    // flips m_isUpsideDown while the raw button state is unchanged, this
+    // re-dispatches the corrected hold on the very step the flip happened.
+    // The corrected transitions go through the normal recording path, so a
+    // macro recorded with the option on plays back exactly as flown -- which
+    // is also why this never runs during playback: the macro already
+    // contains the corrected inputs.
+    void tickWaveGravity(GJBaseGameLayer* gl) {
+        if (!waveMaintainEnabled || mode == bot::Mode::Playing || !gl) return;
+        auto pl = PlayLayer::get();
+        if (!pl) return;
+        for (int pi = 0; pi < 2; ++pi) {
+            PlayerObject* p = (pi == 0) ? pl->m_player1 : pl->m_player2;
+            if (!p || p->m_isDead) continue;
+            // Outside the wave the correction is a straight pass-through --
+            // which also releases a phantom hold the moment a portal takes
+            // the player out of wave mode.
+            bool effective = p->m_isDart
+                             ? (waveRawHeld[pi] != p->m_isUpsideDown)
+                             : waveRawHeld[pi];
+            if (effective == waveEffectiveHeld[pi]) continue;
+            waveEffectiveHeld[pi] = effective;
+            selfDispatch = true;
+            gl->handleButton(effective, 1, pi == 0);
+            selfDispatch = false;
+        }
+    }
+
+    void setWaveMaintain(GJBaseGameLayer* gl, bool on) {
+        waveMaintainEnabled = on;
+        if (!on && gl) {
+            // Hand control back to the raw button state so a phantom hold
+            // (or a suppressed one) doesn't outlive the option.
+            selfDispatch = true;
+            for (int pi = 0; pi < 2; ++pi) {
+                if (waveEffectiveHeld[pi] != waveRawHeld[pi]) {
+                    waveEffectiveHeld[pi] = waveRawHeld[pi];
+                    gl->handleButton(waveRawHeld[pi], 1, pi == 0);
+                }
+            }
+            selfDispatch = false;
+        }
+        persist();
+    }
+
+    // Mirror a LIVE input onto the other player. With `mirrorInvert` the
+    // mirrored copy behaves like an upside-down player two: jump state
+    // flipped, left/right swapped. Dispatched with selfDispatch set so the
+    // copy is not re-mirrored back (no ping-pong) -- but it IS recorded, so
+    // a macro captured with mirroring on replays identically even with the
+    // option later turned off.
+    void dispatchMirrored(GJBaseGameLayer* gl, bool down, int button, bool isPlayer1) {
+        if (!gl) return;
+        bool d = down;
+        int  b = button;
+        if (mirrorInvert) {
+            if (b == 1)      d = !d;
+            else if (b == 2) b = 3;
+            else if (b == 3) b = 2;
+        }
+        bool prev = selfDispatch;
+        selfDispatch = true;
+        gl->handleButton(d, b, !isPlayer1);
+        selfDispatch = prev;
+    }
+
+    // Autoclicker: a 50% duty-cycle click train on P1 jump at `autoClickCPS`
+    // clicks per second, phase-locked to the level clock -- so the edges are
+    // exactly reproducible, frame-rate independent, and speedhack-safe. Runs
+    // once per physics step; with CBF that means the click edges land on
+    // sub-frame step boundaries, the same precision as everything else here.
+    // Recording captures the clicks as normal transitions. Disabled during
+    // playback: the macro owns the buttons then.
+    void tickAutoClicker(GJBaseGameLayer* gl, double now) {
+        bool want = autoClickEnabled &&
+                    mode != bot::Mode::Playing &&
+                    !guiPaused &&
+                    std::isfinite(autoClickCPS) && autoClickCPS > 0.0 &&
+                    std::fmod(now * autoClickCPS, 1.0) < 0.5;
+        if (want == autoClickHeld || !gl) return;
+        autoClickHeld = want;
+        selfDispatch = true;
+        gl->handleButton(want, 1, true);
+        if (mirrorEnabled) dispatchMirrored(gl, want, 1, true);
+        selfDispatch = false;
+    }
+
+    // Random-seed lock: reseed the CRT RNG at the start of every attempt so
+    // anything driven by rand() rolls the same numbers on every run of the
+    // macro. (On Windows GD links its own CRT, so randomness living entirely
+    // inside the game's copy of rand() may be out of reach -- but everything
+    // in mod-land, and the common sources of run-to-run drift, are pinned.)
+    void applySeedLock() {
+        if (seedLockEnabled) std::srand(static_cast<unsigned int>(lockedSeed));
+    }
+
     // ----- Physics bot: record and apply -----
 
     // Record a physics frame. Called from processCommands AFTER the original
@@ -1645,12 +1806,17 @@ public:
         macro.physicsFrames.push_back(f);
     }
     
-    // Fire every recorded event whose timestamp has been reached. `time` is
-    // the CURRENT level clock, read once per physics step from processCommands
-    // (called before the original step runs). Since m_levelTime is monotonic and identical in meaning between record and
-    // playback, comparing against it (rather than X position) means an event
-    // fires at most one sub-step away from the instant it was recorded --
-    // regardless of speed portals, dual mode, or knockback.
+    // Fire every recorded event whose timestamp falls at or before `time`.
+    //
+    // `time` is the level clock the UPCOMING physics step will have advanced
+    // to (current m_levelTime + this step's dt), passed in by the
+    // processCommands hook BEFORE the original step runs. That lookahead is
+    // the heart of the alignment fix: an input recorded mid-step at t=T
+    // influenced the physics step that *covered* T, so on playback it must be
+    // re-applied before that same step -- not one step later, which is what
+    // comparing against the pre-step clock used to do. With the lookahead,
+    // every event lands on exactly the physics step it was recorded on, at
+    // any FPS, any speedhack multiplier, and any CBF subdivision.
     void fireDueInputs(GJBaseGameLayer* gl, double time) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
@@ -1829,6 +1995,11 @@ public:
     // Fresh level / resetLevel: reset transient state but keep the macro.
     void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
+        // New attempt: feature state from the previous one is stale.
+        autoClickHeld = false;
+        waveRawHeld.fill(false);
+        waveEffectiveHeld.fill(false);
+        applySeedLock();
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
@@ -1911,6 +2082,13 @@ public:
         m->setSavedValue<bool>("discard-dead", discardDeadInputs);
         m->setSavedValue<bool>("auto-save", autoSaveOnComplete);
         m->setSavedValue<std::string>("macro-name", macroName);
+        m->setSavedValue<bool>("mirror", mirrorEnabled);
+        m->setSavedValue<bool>("mirror-invert", mirrorInvert);
+        m->setSavedValue<bool>("seed-lock", seedLockEnabled);
+        m->setSavedValue<int64_t>("seed-value", lockedSeed);
+        m->setSavedValue<bool>("wave-maintain", waveMaintainEnabled);
+        m->setSavedValue<bool>("auto-click", autoClickEnabled);
+        m->setSavedValue<double>("auto-cps", autoClickCPS);
     }
 
     void setSpeedFromString(std::string const& s) {
@@ -1921,6 +2099,27 @@ public:
                 log::info("[Bot] Speed set to {}", speed);
                 persist();
                 applyMusicSpeed();   // <-- add this line
+            }
+        } catch (...) {
+            // ignore malformed input; keep the previous value
+        }
+    }
+
+    void setSeedFromString(std::string const& s) {
+        try {
+            lockedSeed = static_cast<int>(std::stol(s));
+            persist();
+        } catch (...) {
+            // ignore malformed input; keep the previous value
+        }
+    }
+
+    void setAutoClickCPSFromString(std::string const& s) {
+        try {
+            double v = std::stod(s);
+            if (std::isfinite(v) && v >= 0.0) {
+                autoClickCPS = v;
+                persist();
             }
         } catch (...) {
             // ignore malformed input; keep the previous value
@@ -2458,6 +2657,19 @@ protected:
     CCMenuItemToggler*    m_autoSaveToggle = nullptr;
     bool                  m_visible      = false;
 
+    // Settings page (opened via the gear button in the panel corner).
+    cocos2d::CCNode*      m_settingsPanel = nullptr;
+    cocos2d::CCMenu*      m_mainMenu      = nullptr;
+    cocos2d::CCMenu*      m_settingsMenu  = nullptr;
+    CCMenuItemToggler*    m_mirrorToggle   = nullptr;
+    CCMenuItemToggler*    m_invertToggle   = nullptr;
+    CCMenuItemToggler*    m_seedToggle     = nullptr;
+    CCMenuItemToggler*    m_waveToggle     = nullptr;
+    CCMenuItemToggler*    m_autoClickToggle = nullptr;
+    geode::TextInput*     m_seedInput = nullptr;
+    geode::TextInput*     m_cpsInput  = nullptr;
+    bool                  m_settingsOpen = false;
+
     // Drag state for the panel title bar.
     bool             m_dragging   = false;
     cocos2d::CCPoint m_dragStart  {0.f, 0.f};
@@ -2490,6 +2702,7 @@ public:
         this->setZOrder((std::numeric_limits<int>::max)());
 
         buildPanel();
+        buildSettingsPanel();
         setPanelVisible(false);
 
         BotManager::get().ui = this;
@@ -2570,7 +2783,13 @@ public:
 
     void setPanelVisible(bool v) {
         m_visible = v;
-        if (m_panel) m_panel->setVisible(v);
+        // Always come back up on the main page; a hidden menu is also
+        // disabled so its (invisible) buttons can never swallow touches.
+        m_settingsOpen = false;
+        if (m_panel)         m_panel->setVisible(v);
+        if (m_settingsPanel) m_settingsPanel->setVisible(false);
+        if (m_mainMenu)      m_mainMenu->setEnabled(v);
+        if (m_settingsMenu)  m_settingsMenu->setEnabled(false);
 
         // Pause the level + show the cursor + pause music while open.
         BotManager::get().setGuiOpen(v);
@@ -2579,6 +2798,27 @@ public:
             bringToFront(); // sit above every other layer / GUI
             refreshAll();
         }
+    }
+
+    // Swap between the main page and the settings page. Both pages share the
+    // same footprint; positions are synced so a dragged panel doesn't jump.
+    void showSettings(bool open) {
+        m_settingsOpen = open;
+        if (m_panel && m_settingsPanel) {
+            if (open) m_settingsPanel->setPosition(m_panel->getPosition());
+            else      m_panel->setPosition(m_settingsPanel->getPosition());
+        }
+        if (m_panel)         m_panel->setVisible(m_visible && !open);
+        if (m_settingsPanel) m_settingsPanel->setVisible(m_visible && open);
+        if (m_mainMenu)      m_mainMenu->setEnabled(m_visible && !open);
+        if (m_settingsMenu)  m_settingsMenu->setEnabled(m_visible && open);
+        if (open) refreshAll();
+    }
+
+    // Whichever page is currently shown -- touch hit-testing and dragging
+    // operate on this.
+    cocos2d::CCNode* activePanel() const {
+        return (m_settingsOpen && m_settingsPanel) ? m_settingsPanel : m_panel;
     }
 
     // Re-parent ourselves to the very top of the current running scene so the
@@ -2606,9 +2846,10 @@ public:
     }
 
     bool ccTouchBegan(cocos2d::CCTouch* touch, cocos2d::CCEvent*) override {
-        if (!m_visible || !m_panel) return false;
-        auto local = m_panel->convertToNodeSpace(touch->getLocation());
-        auto size = m_panel->getContentSize();
+        auto panel = activePanel();
+        if (!m_visible || !panel) return false;
+        auto local = panel->convertToNodeSpace(touch->getLocation());
+        auto size = panel->getContentSize();
         bool inside = local.x >= 0 && local.y >= 0 &&
                       local.x <= size.width && local.y <= size.height;
         if (!inside) return false; // let clicks outside the panel pass through
@@ -2617,15 +2858,16 @@ public:
         if (local.y >= size.height - 32.f) {
             m_dragging   = true;
             m_dragStart  = touch->getLocation();
-            m_panelStart = m_panel->getPosition();
+            m_panelStart = panel->getPosition();
         }
         return true; // swallow: a click on the panel never reaches gameplay
     }
 
     void ccTouchMoved(cocos2d::CCTouch* touch, cocos2d::CCEvent*) override {
-        if (!m_dragging || !m_panel) return;
+        auto panel = activePanel();
+        if (!m_dragging || !panel) return;
         auto delta = touch->getLocation() - m_dragStart;
-        m_panel->setPosition(m_panelStart + delta);
+        panel->setPosition(m_panelStart + delta);
     }
 
     void ccTouchEnded(cocos2d::CCTouch*, cocos2d::CCEvent*) override {
@@ -2668,6 +2910,12 @@ public:
         if (m_nameInput) m_nameInput->setString(BotManager::get().macroName);
         if (m_speedInput) {
             m_speedInput->setString(fmt::format("{:g}", BotManager::get().speed));
+        }
+        if (m_seedInput) {
+            m_seedInput->setString(fmt::format("{}", BotManager::get().lockedSeed));
+        }
+        if (m_cpsInput) {
+            m_cpsInput->setString(fmt::format("{:g}", BotManager::get().autoClickCPS));
         }
     }
 
@@ -2735,6 +2983,11 @@ public:
         forceTogglerState(m_practiceToggle, bot.practiceFixEnabled);
         forceTogglerState(m_deadToggle,     bot.discardDeadInputs);
         forceTogglerState(m_autoSaveToggle, bot.autoSaveOnComplete);
+        forceTogglerState(m_mirrorToggle,    bot.mirrorEnabled);
+        forceTogglerState(m_invertToggle,    bot.mirrorInvert);
+        forceTogglerState(m_seedToggle,      bot.seedLockEnabled);
+        forceTogglerState(m_waveToggle,      bot.waveMaintainEnabled);
+        forceTogglerState(m_autoClickToggle, bot.autoClickEnabled);
     }
 
     void syncModeToggles() {
@@ -2815,21 +3068,39 @@ private:
         // though there is live gameplay underneath.
         menu->setTouchPriority(-1000);
         m_panel->addChild(menu);
+        m_mainMenu = menu;
+
+        // Settings gear in the top-left corner -> opens the settings page.
+        cocos2d::CCNode* gearSpr =
+            CCSprite::createWithSpriteFrameName("GJ_optionsBtn_001.png");
+        if (gearSpr) {
+            gearSpr->setScale(0.42f);
+        } else {
+            // Sprite sheet not loaded yet for some reason -- fall back to a
+            // plain labelled button rather than crashing.
+            auto bs = ButtonSprite::create("Cfg");
+            bs->setScale(0.5f);
+            gearSpr = bs;
+        }
+        auto gearBtn = CCMenuItemSpriteExtra::create(
+            gearSpr, this, menu_selector(BotUILayer::onSettings));
+        gearBtn->setPosition({ 24.f, H - 20.f });
+        menu->addChild(gearBtn);
 
         auto& bot = BotManager::get();
 
         float yRec = H - 130.f;
         // Record / Play togglers (driven by mode, not a saved bool).
-        m_recordToggle = makeToggle(menu, { 40.f, yRec },
+        m_recordToggle = makeToggle(menu, m_panel, { 40.f, yRec },
             menu_selector(BotUILayer::onRecord), "Record (V)",
             bot.mode == bot::Mode::Recording);
-        m_playToggle = makeToggle(menu, { 180.f, yRec },
+        m_playToggle = makeToggle(menu, m_panel, { 180.f, yRec },
             menu_selector(BotUILayer::onPlay), "Play (B)",
             bot.mode == bot::Mode::Playing);
 
         // Speedhack toggle + textbox.
         float ySpeed = yRec - 36.f;
-        m_speedToggle = makeToggle(menu, { 40.f, ySpeed },
+        m_speedToggle = makeToggle(menu, m_panel, { 40.f, ySpeed },
             menu_selector(BotUILayer::onSpeedToggle), "Speed", bot.speedhackEnabled);
         m_speedInput = geode::TextInput::create(120.f, "speed", "chatFont.fnt");
         m_speedInput->setCommonFilter(geode::CommonFilter::Float);
@@ -2861,14 +3132,14 @@ private:
         // checkmarks always start in sync (no manual offset / no 480fps snap -- the
         // snap is automatic and only applies under RobTop's CBS).
         float yOpt = yName - 36.f;
-        m_practiceToggle = makeToggle(menu, { 40.f, yOpt },
+        m_practiceToggle = makeToggle(menu, m_panel, { 40.f, yOpt },
             menu_selector(BotUILayer::onPracticeFix), "Practice fix",
             bot.practiceFixEnabled);
-        m_deadToggle = makeToggle(menu, { 180.f, yOpt },
+        m_deadToggle = makeToggle(menu, m_panel, { 180.f, yOpt },
             menu_selector(BotUILayer::onDeadInputs), "Discard dead",
             bot.discardDeadInputs);
         float yOpt2 = yOpt - 28.f;
-        m_autoSaveToggle = makeToggle(menu, { 40.f, yOpt2 },
+        m_autoSaveToggle = makeToggle(menu, m_panel, { 40.f, yOpt2 },
             menu_selector(BotUILayer::onAutoSave), "Auto-save on finish",
             bot.autoSaveOnComplete);
 
@@ -2894,7 +3165,112 @@ private:
         m_panel->addChild(hint);
     }
 
-    CCMenuItemToggler* makeToggle(CCMenu* menu, CCPoint pos,
+    // ----- settings page (gear button) -------------------------------------
+    void buildSettingsPanel() {
+        constexpr float W = 320.f, H = 396.f;
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+
+        m_settingsPanel = CCNode::create();
+        m_settingsPanel->setContentSize({ W, H });
+        m_settingsPanel->setAnchorPoint({ 0.5f, 0.5f });
+        m_settingsPanel->setScale(0.72f);
+        m_settingsPanel->setPosition({ winSize.width * 0.5f, winSize.height * 0.5f });
+        this->addChild(m_settingsPanel);
+
+        auto bg = cocos2d::extension::CCScale9Sprite::create("GJ_square01.png");
+        bg->setContentSize({ W, H });
+        bg->setPosition({ W * 0.5f, H * 0.5f });
+        m_settingsPanel->addChild(bg);
+
+        auto title = CCLabelBMFont::create("Settings", "goldFont.fnt");
+        title->setPosition({ W * 0.5f, H - 18.f });
+        title->setScale(0.72f);
+        m_settingsPanel->addChild(title);
+
+        m_settingsMenu = CCMenu::create();
+        m_settingsMenu->setPosition({ 0.f, 0.f });
+        m_settingsMenu->setTouchPriority(-1000);
+        m_settingsMenu->setEnabled(false); // main page is up first
+        m_settingsPanel->addChild(m_settingsMenu);
+
+        auto& bot = BotManager::get();
+
+        // Row 1: input mirroring + the upside-down "invert" variant.
+        float y = H - 70.f;
+        m_mirrorToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 40.f, y },
+            menu_selector(BotUILayer::onMirror), "Mirror inputs",
+            bot.mirrorEnabled);
+        m_invertToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 180.f, y },
+            menu_selector(BotUILayer::onInvert), "Invert P2",
+            bot.mirrorInvert);
+
+        // Row 2: random-seed lock + the seed value.
+        y -= 44.f;
+        m_seedToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 40.f, y },
+            menu_selector(BotUILayer::onSeedLock), "Lock seed",
+            bot.seedLockEnabled);
+        m_seedInput = geode::TextInput::create(110.f, "seed", "chatFont.fnt");
+        m_seedInput->setCommonFilter(geode::CommonFilter::Int);
+        m_seedInput->setString(fmt::format("{}", bot.lockedSeed));
+        m_seedInput->setPosition({ 240.f, y });
+        m_seedInput->setScale(0.9f);
+        m_seedInput->setCallback([](std::string const& s) {
+            BotManager::get().setSeedFromString(s);
+        });
+        m_settingsPanel->addChild(m_seedInput);
+
+        // Row 3: wave gravity maintain.
+        y -= 44.f;
+        m_waveToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 40.f, y },
+            menu_selector(BotUILayer::onWaveMaintain), "Maintain gravity (wave)",
+            bot.waveMaintainEnabled);
+
+        // Row 4: autoclicker + clicks-per-second.
+        y -= 44.f;
+        m_autoClickToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 40.f, y },
+            menu_selector(BotUILayer::onAutoClick), "Autoclick",
+            bot.autoClickEnabled);
+        auto cpsLbl = CCLabelBMFont::create("CPS", "chatFont.fnt");
+        cpsLbl->setAnchorPoint({ 1.f, 0.5f });
+        cpsLbl->setPosition({ 182.f, y });
+        cpsLbl->setScale(0.55f);
+        m_settingsPanel->addChild(cpsLbl);
+        m_cpsInput = geode::TextInput::create(110.f, "cps", "chatFont.fnt");
+        m_cpsInput->setCommonFilter(geode::CommonFilter::Float);
+        m_cpsInput->setString(fmt::format("{:g}", bot.autoClickCPS));
+        m_cpsInput->setPosition({ 240.f, y });
+        m_cpsInput->setScale(0.9f);
+        m_cpsInput->setCallback([](std::string const& s) {
+            BotManager::get().setAutoClickCPSFromString(s);
+        });
+        m_settingsPanel->addChild(m_cpsInput);
+
+        // One-line explanations so nobody has to guess.
+        const char* hints[] = {
+            "Mirror: live P1 inputs also drive P2 (and vice versa).",
+            "Invert P2: mirrored copy acts upside-down (jump flipped, L/R swapped).",
+            "Lock seed: reseeds the RNG with this value every attempt.",
+            "Maintain gravity: wave hold direction survives gravity portals.",
+            "Autoclick: clicks P1 jump at the given clicks per second.",
+        };
+        float hy = y - 38.f;
+        for (auto* h : hints) {
+            auto lbl = CCLabelBMFont::create(h, "chatFont.fnt");
+            lbl->setAnchorPoint({ 0.f, 0.5f });
+            lbl->setPosition({ 18.f, hy });
+            lbl->setScale(0.42f);
+            lbl->setOpacity(160);
+            m_settingsPanel->addChild(lbl);
+            hy -= 15.f;
+        }
+
+        makeButton(m_settingsMenu, { W * 0.5f, 26.f }, "Back",
+                   menu_selector(BotUILayer::onSettingsBack));
+
+        m_settingsPanel->setVisible(false);
+    }
+
+    CCMenuItemToggler* makeToggle(CCMenu* menu, cocos2d::CCNode* panel, CCPoint pos,
                                   cocos2d::SEL_MenuHandler sel, const char* label,
                                   bool initialState) {
         auto toggle = CCMenuItemToggler::createWithStandardSprites(this, sel, 0.6f);
@@ -2909,7 +3285,7 @@ private:
         lbl->setAnchorPoint({ 0.f, 0.5f });
         lbl->setPosition({ pos.x + 16.f, pos.y });
         lbl->setScale(0.55f);
-        m_panel->addChild(lbl);
+        panel->addChild(lbl);
         return toggle;
     }
 
@@ -2964,6 +3340,35 @@ private:
     void onAutoSave(CCObject*) {
         auto& bot = BotManager::get();
         bot.autoSaveOnComplete = !bot.autoSaveOnComplete;
+        bot.persist();
+    }
+
+    // ----- settings-page callbacks ------------------------------------------
+    void onSettings(CCObject*)     { showSettings(true); }
+    void onSettingsBack(CCObject*) { showSettings(false); }
+    void onMirror(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.mirrorEnabled = !bot.mirrorEnabled;
+        bot.persist();
+    }
+    void onInvert(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.mirrorInvert = !bot.mirrorInvert;
+        bot.persist();
+    }
+    void onSeedLock(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.seedLockEnabled = !bot.seedLockEnabled;
+        bot.persist();
+    }
+    void onWaveMaintain(CCObject*) {
+        auto& bot = BotManager::get();
+        // setWaveMaintain also re-syncs any phantom hold when turning off.
+        bot.setWaveMaintain(GJBaseGameLayer::get(), !bot.waveMaintainEnabled);
+    }
+    void onAutoClick(CCObject*) {
+        auto& bot = BotManager::get();
+        bot.autoClickEnabled = !bot.autoClickEnabled;
         bot.persist();
     }
     void onSave(CCObject*) {

@@ -81,16 +81,33 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // ---- input capture (recording) ---------------------------------------
     void handleButton(bool down, int button, bool isPlayer1) {
         auto& bot = BotManager::get();
+        bool play = isPlay(this);
+
+        // Wave "maintain gravity": may rewrite a live jump transition (so the
+        // hold direction survives gravity portals) or swallow it entirely if
+        // the rewritten transition is redundant. Only for raw user input --
+        // playback (injecting) and our own re-dispatches (selfDispatch) have
+        // already been through this.
+        if (play && !bot.injecting && !bot.selfDispatch && button == 1) {
+            if (!bot.filterLiveJump(down, isPlayer1)) return;
+        }
 
         // Record the *transition* (press/release) tagged with the current level
         // time. We deliberately do this before calling the original so the
         // timestamp matches the exact moment the engine is about to react to the
         // input -- and we skip anything we injected ourselves during playback.
-        if (!bot.injecting && isPlay(this)) {
+        if (!bot.injecting && play) {
             bot.recordInput(this, down, button, isPlayer1);
         }
 
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
+
+        // Input mirroring: forward a copy of every live input to the other
+        // player (inverted if that option is on). The copy is dispatched with
+        // selfDispatch set so it isn't mirrored back, but it IS recorded.
+        if (play && !bot.injecting && !bot.selfDispatch && bot.mirrorEnabled) {
+            bot.dispatchMirrored(this, down, button, isPlayer1);
+        }
     }
     
     void update(float dt) {
@@ -119,8 +136,23 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // button state, keyed on the same level-time clock inputs were recorded with.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        if (isPlay(this) && bot.mode == bot::Mode::Playing) {
-            bot.fireDueInputs(this, BotManager::levelTime(this));
+        if (isPlay(this)) {
+            double now = BotManager::levelTime(this);
+            if (bot.mode == bot::Mode::Playing) {
+                // ONE-STEP LOOKAHEAD -- the input/physics alignment fix.
+                // m_levelTime right now is the clock BEFORE this step runs;
+                // an input recorded mid-step at t=T influenced the step that
+                // *covered* T. Comparing recorded times against the pre-step
+                // clock replays every input one physics step late (the input
+                // only fires once the clock has moved past it). Firing
+                // everything due within [now, now + dt] instead lands each
+                // input on exactly the physics step it was recorded on.
+                bot.fireDueInputs(this, now + static_cast<double>(dt));
+            }
+            // Per-step feature ticks: autoclicker edges and wave gravity
+            // corrections happen on step boundaries, sub-frame with CBF.
+            bot.tickAutoClicker(this, now);
+            bot.tickWaveGravity(this);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         // NOTE: we deliberately do NOT call applyPhysicsPosition() here.
@@ -343,6 +375,14 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.discardDeadInputs    = Mod::get()->getSavedValue<bool>("discard-dead", true);
     bot.autoSaveOnComplete   = Mod::get()->getSavedValue<bool>("auto-save", true);
     bot.macroName            = Mod::get()->getSavedValue<std::string>("macro-name", "macro");
+    bot.mirrorEnabled        = Mod::get()->getSavedValue<bool>("mirror", false);
+    bot.mirrorInvert         = Mod::get()->getSavedValue<bool>("mirror-invert", false);
+    bot.seedLockEnabled      = Mod::get()->getSavedValue<bool>("seed-lock", false);
+    bot.lockedSeed           = static_cast<int>(
+                                   Mod::get()->getSavedValue<int64_t>("seed-value", 1337));
+    bot.waveMaintainEnabled  = Mod::get()->getSavedValue<bool>("wave-maintain", false);
+    bot.autoClickEnabled     = Mod::get()->getSavedValue<bool>("auto-click", false);
+    bot.autoClickCPS         = Mod::get()->getSavedValue<double>("auto-cps", 10.0);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
