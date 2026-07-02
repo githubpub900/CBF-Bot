@@ -12,7 +12,7 @@
  *  stays in one testable place.
  *
  *  The hooks, at a glance:
- *
+ 
  *    GJBaseGameLayer::handleButton    -> capture inputs at the lowest level
  *                                        (this is where CBF feeds clicks in)
  *    PlayerObject::update             -> per-SUBSTEP heartbeat: macro playback
