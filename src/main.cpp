@@ -143,18 +143,10 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     // button state, keyed on the same level-time clock inputs were recorded with.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
-        if (isPlay(this)) {
-            // Input firing / autoclick / wave correction all moved to the
-            // PlayerObject::update hook below -- per CBF's own source,
-            // processCommands runs once per rendered FRAME while the physics
-            // substeps (and CBF's input dispatch) happen inside the player
-            // update. Here we only guard the sub-step clock against drifting
-            // away from the engine clock across anything we didn't hook.
-            double now = BotManager::levelTime(this);
-            if (std::abs(bot.playClock() - now) > 0.5) {
-                bot.subClock = now;
-            }
-        }
+        // Input firing / autoclick / wave correction all live in the
+        // PlayerObject::update hook below -- per CBF's own source, that's
+        // where the physics substeps and CBF's input dispatch happen, one
+        // call per substep with the substep dt. Nothing to do here.
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         // NOTE: applyPhysicsPosition() below is DEBUG-ONLY (settings
         // checkbox, off by default). Teleporting the player to a recorded
@@ -227,13 +219,20 @@ class $modify(BotPlayerObject, PlayerObject) {
             PlayerObject::update(dt);
             return;
         }
-        auto& bot = BotManager::get();
+        // ONLY the real gameplay players count -- anything else (ghost
+        // trail, dual portal preview, spider secondary etc.) that shares
+        // this class must not double-drive our per-substep hooks. The
+        // reentrancy guard inside onSubStepBegin is a second belt.
         bool isP1 = (this == pl->m_player1);
         bool isP2 = (this == pl->m_player2);
-
-        if (isP1) bot.onSubStepBegin(pl, dt);
+        if (!isP1 && !isP2) {
+            PlayerObject::update(dt);
+            return;
+        }
+        auto& bot = BotManager::get();
+        bot.onSubStepBegin(pl, this, isP1);
         PlayerObject::update(dt);
-        if (isP1 || isP2) bot.onSubStepEnd(pl, this, isP1, dt);
+        bot.onSubStepEnd(pl, this, isP1);
     }
 };
 

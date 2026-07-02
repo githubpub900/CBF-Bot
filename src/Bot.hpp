@@ -1252,22 +1252,20 @@ public:
     // player fights GD's collision detection (documented below).
     bool      physicsDebugEnabled = false;
 
-    // ----- sub-step clock ----------------------------------------------------
-    // CBF's own source (theyareonit/Click-Between-Frames) dispatches queued
-    // inputs via handleButton at SUB-STEP boundaries inside the per-substep
-    // player update -- processCommands only runs once per rendered frame. So
-    // m_levelTime alone is too coarse to key a macro on: everything inside
-    // one frame collapses onto the same value. This clock accumulates the
-    // actual per-substep deltas from the PlayerObject::update hook, giving
-    // record and playback the SAME substep-resolution timeline by
-    // construction. It is re-synced to m_levelTime at every hard time jump
-    // (reset / checkpoint load / death) and guarded against drift per frame.
-    double    subClock = 0.0;
-
     // Internal feature state.
     bool                autoClickHeld = false; // current autoclick edge
+    long long           autoClickLastEdge = 0; // last emitted edge index
     std::array<bool, 2> waveRawHeld{};         // physical jump state  [p1, p2]
     std::array<bool, 2> waveEffectiveHeld{};   // dispatched jump state [p1, p2]
+    std::array<bool, 2> waveLastUpsideDown{};  // last-known gravity state
+
+    // Reentrancy guard for the per-substep hook. PlayerObject::update is
+    // legitimately called on other PlayerObjects (icon kit previews, ghost
+    // trails, spider-legs helper players, etc.) beyond just m_player1 /
+    // m_player2, and accumulating anything per-call was the cause of the
+    // 64x autoclick overshoot. This flag ensures we only run the substep
+    // hooks once per genuine physics substep.
+    bool      inSubStep = false;
 
     // PHYSICAL button state, updated for every non-injected transition that
     // reaches handleButton -- including ones that arrive while the player is
@@ -1355,18 +1353,14 @@ public:
 
     // ----- gui pause / cursor / music -------------------------------------
 
-    // Open/close the GUI: freeze the level, reveal the OS cursor, and pause the
-    // song. Closing reverses all three. The actual physics freeze is enforced by
-    // the GJBaseGameLayer hooks reading `guiPaused`.
+    // Open/close the GUI: reveal the OS cursor on open and LEAVE it visible
+    // on close. Hiding it back on close was annoying -- users routinely
+    // want the cursor around after closing the panel (queue up other UI,
+    // click GD's own menus, etc.), and re-opening always re-shows it, so
+    // there's no state we'd fail to recover from.
     void setGuiOpen(bool open) {
-        // Gameplay keeps running while the GUI is open -- no freeze, no music
-        // pause. We only toggle the OS cursor so the user can click the panel.
         guiPaused = false;
-        if (open) {
-            PlatformToolbox::showCursor();
-        } else {
-            if (PlayLayer::get()) PlatformToolbox::hideCursor();
-        }
+        if (open) PlatformToolbox::showCursor();
     }
 
 
@@ -1405,7 +1399,8 @@ public:
         playbackIndex = 0;
         physicsPlaybackIndex = 0;
         resetHeldState();
-        subClock = macro.recordStartTime;
+        autoClickLastEdge = static_cast<long long>(
+            std::floor(macro.recordStartTime * 2.0 * autoClickCPS));
         // If a button is physically held while arming, bake the hold into the
         // timeline so its eventual release has a matching press.
         reconcileTimelineWithLive(macro.recordStartTime);
@@ -1427,7 +1422,6 @@ public:
         mode = bot::Mode::Playing;
         validateAndRepair();
         double startT = levelTime(gl);
-        subClock = startT;
         seekPlaybackTo(startT);
         seekPhysicsPlayback(startT);
         applyHeldStateAt(gl, startT);
@@ -1621,20 +1615,23 @@ public:
         // just keep the timeline's own hold table in sync.
         heldState[pi][button] = down;
 
-        // Stamp with the sub-step clock, NOT m_levelTime. Per CBF's source,
-        // inputs are dispatched at sub-step boundaries inside the per-substep
-        // player update, while m_levelTime only moves once per rendered
-        // frame -- stamping with it collapses every input in a frame onto
-        // one timestamp. subClock advances with the exact same per-substep
-        // deltas during playback, so an event stamped at boundary K is
-        // re-fired before the substep that follows boundary K: record and
-        // playback share one timeline by construction. Full-precision double
-        // under Syzzi (any substep addressable); only RobTop's CBS snaps to
-        // its 480fps grid, the only grid that tier can reproduce a click on.
-        double t = subClock;
+        // Stamp with m_levelTime -- the game's own clock, which CBF advances
+        // to the correct sub-step before dispatching each queued input via
+        // handleButton (per theyareonit/Click-Between-Frames). Because
+        // playback reads the SAME clock from the SAME hook point, record
+        // and playback share one timeline by construction. Full-precision
+        // double under Syzzi (any substep addressable); only RobTop's CBS
+        // snaps to its 480fps grid, the only grid that tier can reproduce.
+        //
+        // When multiple inputs share one substep timestamp we nudge later
+        // ones forward by tiny epsilons -- doubles round-trip lossless, and
+        // it keeps the event stream strictly monotonic so playback fires
+        // them in their recorded order without any tie-breaking guesses.
+        double t = levelTime(gl);
         if (cbfState() == bot::CBFState::RobTop) t = quantizeRobTop(t);
-        if (!macro.events.empty() && t < macro.events.back().time) {
-            t = macro.events.back().time;
+        if (!macro.events.empty() && t <= macro.events.back().time) {
+            t = std::nextafter(macro.events.back().time,
+                               std::numeric_limits<double>::infinity());
         }
 
         InputEvent e(t, static_cast<uint8_t>(button), down, player2);
@@ -1763,6 +1760,7 @@ public:
         if (!waveMaintainEnabled || mode == bot::Mode::Playing || !gl) return;
         if (!p || p->m_isDead) return;
         int pi = isP1 ? 0 : 1;
+        waveLastUpsideDown[pi] = p->m_isUpsideDown;
         // Outside the wave the correction is a straight pass-through --
         // which also releases a phantom hold the moment a portal takes
         // the player out of wave mode.
@@ -1774,6 +1772,17 @@ public:
         selfDispatch = true;
         gl->handleButton(effective, 1, isP1);
         selfDispatch = false;
+        // Bulldoze the jump-buffer fields when releasing so the buffered
+        // press GD's own jump-buffer logic keeps around after handleButton
+        // cannot re-assert the hold on the next substep. This is what fixes
+        // "holding into an upside-down portal doesn't reverse direction" --
+        // the release was firing, but a stale buffered jump was silently
+        // re-pressing the button before the wave physics read it.
+        if (!effective && p) {
+            p->m_jumpBuffered = false;
+            p->m_wasJumpBuffered = false;
+            p->m_stateJumpBuffered = 0;
+        }
     }
 
     void setWaveMaintain(GJBaseGameLayer* gl, bool on) {
@@ -1841,82 +1850,86 @@ public:
     }
 
     // Autoclicker: a 50% duty-cycle click train on P1 jump at `autoClickCPS`
-    // clicks per second, phase-locked to the sub-step clock -- exactly
-    // reproducible, frame-rate independent, and speedhack-safe.
+    // clicks per second, phase-locked to the game clock so edges are
+    // exactly reproducible, frame-rate independent, and speedhack-safe.
     //
-    // Runs once per physics SUBSTEP and dispatches EVERY edge whose time
-    // falls inside [from, from + dt) -- not just one edge per call. One edge
-    // per call was the old behaviour, and since the caller used to run once
-    // per rendered frame it silently capped the rate around 40 CPS. Batching
-    // removes the cap entirely (10k CPS is ~83 edges per 240Hz substep; the
-    // engine buffers what it can't act on within one substep).
-    // Recording captures the clicks as normal transitions. Disabled during
-    // playback: the macro owns the buttons then.
-    void tickAutoClicker(GJBaseGameLayer* gl, double from, double dt) {
+    // KEY FIX: reads m_levelTime directly and tracks the LAST EMITTED EDGE
+    // INDEX (`autoClickLastEdge`), not a "how many edges in this dt" batch.
+    // Every call emits all edges from lastEdge+1 up to floor(now / half)
+    // and then advances lastEdge. This is robust against being called an
+    // unpredictable number of times per substep (the icon-kit / ghost /
+    // helper PlayerObject::update paths ALL used to accumulate dt on the
+    // old sub-step clock, which was the direct cause of the 64x overshoot
+    // when the user set 1000 CPS). Now every extra call is a no-op: the
+    // target index is already >= the last emitted index.
+    //
+    // Recording captures the clicks as normal transitions -- we do NOT set
+    // selfDispatch, so the hook's mirror + wave-gravity + record paths all
+    // run naturally, which is what makes the autoclicks visible to
+    // downstream tools (MegaHack's CPS counter, etc.) as real inputs.
+    // Disabled during playback: the macro owns the buttons then.
+    void tickAutoClicker(GJBaseGameLayer* gl, double now) {
         bool active = autoClickEnabled &&
                       mode != bot::Mode::Playing &&
                       !guiPaused &&
-                      std::isfinite(autoClickCPS) && autoClickCPS > 0.0;
-        if (!gl) return;
+                      std::isfinite(autoClickCPS) && autoClickCPS > 0.0 &&
+                      gl != nullptr;
         if (!active) {
-            if (autoClickHeld) {
+            if (autoClickHeld && gl) {
                 autoClickHeld = false;
-                selfDispatch = true;
                 gl->handleButton(false, 1, true);
-                if (mirrorEnabled) dispatchMirrored(gl, false, 1, true);
-                selfDispatch = false;
             }
             return;
         }
-        // Edge k sits at time k * halfPeriod; state after edge k is down when
-        // k is even (matches the old fmod(t*cps, 1) < 0.5 phase).
         double half = 0.5 / autoClickCPS;
-        auto i0 = static_cast<long long>(std::floor(from / half));
-        auto i1 = static_cast<long long>(std::floor((from + dt) / half));
-        // Runaway guard (huge dt after a lag spike): keep parity, skip spam.
-        if (i1 - i0 > 512) i0 = i1 - 512;
-        selfDispatch = true;
-        // Sync to the phase we're currently inside -- covers just-enabled,
-        // just-respawned, and just-left-playback states where the held flag
-        // doesn't match the clock's phase yet.
-        bool phaseDown = (i0 % 2) == 0;
-        if (autoClickHeld != phaseDown) {
-            gl->handleButton(phaseDown, 1, true);
-            if (mirrorEnabled) dispatchMirrored(gl, phaseDown, 1, true);
-            autoClickHeld = phaseDown;
-        }
-        for (long long i = i0 + 1; i <= i1; ++i) {
+        auto target = static_cast<long long>(std::floor(now / half));
+        if (target <= autoClickLastEdge) return;
+        // Runaway guard (a big time jump after e.g. loading a checkpoint):
+        // just snap the parity forward without spamming intermediate edges.
+        if (target - autoClickLastEdge > 200) autoClickLastEdge = target - 200;
+        for (long long i = autoClickLastEdge + 1; i <= target; ++i) {
             bool down = (i % 2) == 0;
             gl->handleButton(down, 1, true);
-            if (mirrorEnabled) dispatchMirrored(gl, down, 1, true);
             autoClickHeld = down;
         }
-        selfDispatch = false;
+        autoClickLastEdge = target;
     }
 
     // ----- sub-step driver ---------------------------------------------------
-    // Called from the PlayerObject::update hook. `begin` runs before player 1's
-    // physics substep: it replays every due macro event and emits autoclick
-    // edges for the substep window. `end` runs after EACH player's substep:
-    // it applies the wave gravity correction for that player and (for P1)
-    // advances the sub-step clock. This is the same cadence CBF itself uses
-    // to dispatch inputs, which is what makes playback sub-frame exact.
-    void onSubStepBegin(GJBaseGameLayer* gl, float dt) {
-        if (mode == bot::Mode::Playing) {
-            // Half-step tolerance absorbs float accumulation noise between
-            // the recorded clock and the replayed clock without ever
-            // slipping an event by a whole substep.
-            fireDueInputs(gl, subClock + static_cast<double>(dt) * 0.5);
-        }
-        tickAutoClicker(gl, subClock, static_cast<double>(dt));
-    }
-
-    void onSubStepEnd(GJBaseGameLayer* gl, PlayerObject* p, bool isP1, float dt) {
+    // Called from the PlayerObject::update hook. Reads m_levelTime directly
+    // (the game's own authoritative clock, which CBF advances to each
+    // substep's time before dispatching inputs there) so a hook call from
+    // any OTHER PlayerObject -- icon-kit previews, ghost trails, editor
+    // players -- is a NO-OP: the clock is unchanged, autoClickLastEdge
+    // catches up once and stays put. Accumulating our own clock was what
+    // let those extra calls inflate the rate 64x on high CPS settings.
+    //
+    // Wave gravity correction runs in both begin (catches a portal flipped
+    // last substep) and end (catches one flipped during this substep) so
+    // holding into a gravity portal in wave mode gets corrected within a
+    // single substep window instead of visibly moving the wrong direction.
+    void onSubStepBegin(GJBaseGameLayer* gl, PlayerObject* p, bool isP1) {
+        if (inSubStep) return;
+        inSubStep = true;
+        double now = levelTime(gl);
         tickWaveGravityFor(gl, p, isP1);
-        if (isP1) subClock += static_cast<double>(dt);
+        if (isP1) {
+            if (mode == bot::Mode::Playing) {
+                fireDueInputs(gl, now);
+            }
+            tickAutoClicker(gl, now);
+        }
+        inSubStep = false;
     }
 
-    double playClock() const { return subClock; }
+    void onSubStepEnd(GJBaseGameLayer* gl, PlayerObject* p, bool isP1) {
+        tickWaveGravityFor(gl, p, isP1);
+    }
+
+    double playClock() const {
+        auto gl = GJBaseGameLayer::get();
+        return gl ? levelTime(gl) : 0.0;
+    }
 
     void queueFrameStep() {
         pendingSteps = std::min(pendingSteps + 1, 240);
@@ -1977,13 +1990,12 @@ public:
     // Fire every recorded event whose timestamp falls at or before `time`.
     //
     // Called from onSubStepBegin -- i.e. once per physics SUBSTEP, right
-    // before player 1's update runs -- with `time` = subClock + dt/2. Events
-    // are stamped at substep boundaries by the same clock, so the half-step
-    // tolerance re-fires each event before exactly the substep it originally
-    // preceded while absorbing float accumulation noise between the recorded
-    // and replayed clocks. This holds at any FPS, any speedhack multiplier,
-    // and any CBF subdivision, because the clock advances by the very deltas
-    // the physics steps with.
+    // before player 1's update runs -- with `time` = m_levelTime. Recording
+    // stamps events with the SAME m_levelTime reading at handleButton call
+    // time (CBF has already advanced it to the substep boundary by then),
+    // so this fires each event before the very substep it originally
+    // preceded, at any FPS, any speedhack multiplier, and any CBF
+    // subdivision. Sub-frame-exact playback by construction.
     void fireDueInputs(GJBaseGameLayer* gl, double time) {
         if (mode != bot::Mode::Playing) return;
         if (!gl) return;
@@ -2094,9 +2106,8 @@ public:
         if (!pl) return;
         CheckpointFrame f;
         f.eventCount    = static_cast<int>(macro.events.size());
-        // Stamp with the sub-step clock -- the same clock every event is
-        // stamped with -- so truncation and playback seeks line up exactly.
-        f.levelTime     = subClock;
+        // Same clock every event is stamped with -- m_levelTime.
+        f.levelTime     = levelTime(pl);
         f.checkpointPtr = cpPtr;
         if (practiceFixEnabled) {
             f.p1.capture(pl->m_player1);
@@ -2128,9 +2139,11 @@ public:
             if (frame->p2.valid) frame->p2.apply(pl->m_player2);
         }
 
-        // Rewind the sub-step clock to the checkpoint stamp so both playback
-        // firing and new recording stamps stay on the shared timeline.
-        subClock = frame->levelTime;
+        // Re-anchor the autoclick edge counter to the resume time so the
+        // click train picks up in phase instead of firing a huge catch-up
+        // burst on the next substep.
+        autoClickLastEdge = static_cast<long long>(
+            std::floor(frame->levelTime * 2.0 * autoClickCPS));
 
         if (mode == bot::Mode::Playing) {
             seekPhysicsPlayback(frame->levelTime);
@@ -2150,7 +2163,11 @@ public:
     // checkpoint stack and rewind the playback cursor here.
     void onRestart(PlayLayer* pl, bool fromStart) {
         checkpoints.clear();
-        subClock = 0.0;
+        autoClickLastEdge = 0;
+        autoClickHeld = false;
+        waveRawHeld.fill(false);
+        waveEffectiveHeld.fill(false);
+        waveLastUpsideDown.fill(false);
         if (mode == bot::Mode::Playing) {
             releaseAll();
             playbackIndex = 0;
@@ -2174,17 +2191,18 @@ public:
     // Fresh level / resetLevel: reset transient state but keep the macro.
     // NOTE: in practice mode, resetLevel respawns at a checkpoint and the
     // original has already routed through loadFromCheckpoint -> our
-    // onCheckpointLoaded, which set subClock to the checkpoint stamp. Only
-    // hard-sync the clock here when this really is a from-scratch attempt.
+    // onCheckpointLoaded, which re-anchored the autoclick edge. Only do a
+    // full reset when this really is a from-scratch attempt.
     void onLevelReset(PlayLayer* pl) {
         checkpoints.clear();
         // New attempt: feature state from the previous one is stale.
         autoClickHeld = false;
         waveRawHeld.fill(false);
         waveEffectiveHeld.fill(false);
+        waveLastUpsideDown.fill(false);
         applySeedLock();
         if (pl && levelTime(pl) < 0.001) {
-            subClock = 0.0;
+            autoClickLastEdge = 0;
             if (mode == bot::Mode::Recording) {
                 // Death without a checkpoint restarts the attempt at t=0:
                 // superseded inputs go, and still-held buttons re-press at 0.
@@ -2213,7 +2231,7 @@ public:
             seekPhysicsPlayback(0.0);
         } else if (mode == bot::Mode::Recording) {
             // Truncate on the same clock the events are stamped with.
-            double t = subClock;
+            double t = levelTime(pl);
             truncateAfter(t);
             truncatePhysicsAfter(t);
             recomputeHeldState();
@@ -2887,10 +2905,11 @@ protected:
     bool                  m_settingsOpen = false;
 
     // Panel geometry: a wide, rectangular card that fills most of GD's
-    // ~569x320 design-resolution screen at full scale.
+    // ~569x320 design-resolution screen. Scale slightly under 1 so the UI
+    // feels sized-down without cramping.
     static constexpr float kPanelW     = 520.f;
-    static constexpr float kPanelH     = 300.f;
-    static constexpr float kPanelScale = 1.f;
+    static constexpr float kPanelH     = 296.f;
+    static constexpr float kPanelScale = 0.86f;
 
     // Drag state for the panel title bar.
     bool             m_dragging   = false;
@@ -3281,7 +3300,7 @@ private:
         m_panel->addChild(bg);
 
         // Title.
-        auto title = CCLabelBMFont::create("Time Macro Bot", "goldFont.fnt");
+        auto title = CCLabelBMFont::create("Polik Playback", "goldFont.fnt");
         title->setPosition({ W * 0.5f, H - 22.f });
         title->setScale(0.8f);
         m_panel->addChild(title);
@@ -3454,14 +3473,25 @@ private:
         auto& bot = BotManager::get();
 
         // Two columns: gameplay features on the left, tools on the right.
-        constexpr float xL = 45.f, xR = 330.f;
-        float y = H - 64.f;
+        // Each row has one toggle + label + (optional) inline textbox with
+        // a leading tag so the intent is obvious without hunting for a
+        // matching hint line below.
+        constexpr float xL = 40.f, xR = 300.f;
+        float y = H - 62.f;
+
+        auto addTag = [this](const char* text, float x, float ty) {
+            auto lbl = CCLabelBMFont::create(text, "chatFont.fnt");
+            lbl->setAnchorPoint({ 1.f, 0.5f });
+            lbl->setPosition({ x, ty });
+            lbl->setScale(0.6f);
+            m_settingsPanel->addChild(lbl);
+        };
 
         // Row 1: mirroring (left) + physics debug (right).
         m_mirrorToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onMirror), "Mirror inputs",
             bot.mirrorEnabled);
-        m_invertToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 190.f, y },
+        m_invertToggle = makeToggle(m_settingsMenu, m_settingsPanel, { 175.f, y },
             menu_selector(BotUILayer::onInvert), "Invert P2",
             bot.mirrorInvert);
         m_physToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xR, y },
@@ -3469,88 +3499,82 @@ private:
             bot.physicsDebugEnabled);
 
         // Row 2: random-seed lock + the seed value.
-        y -= 46.f;
+        y -= 44.f;
         m_seedToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onSeedLock), "Lock seed",
             bot.seedLockEnabled);
-        m_seedInput = geode::TextInput::create(120.f, "seed", "chatFont.fnt");
+        addTag("Seed", 158.f, y);
+        m_seedInput = geode::TextInput::create(90.f, "1337", "chatFont.fnt");
         m_seedInput->setCommonFilter(geode::CommonFilter::Int);
         m_seedInput->setString(fmt::format("{}", bot.lockedSeed));
-        m_seedInput->setPosition({ 245.f, y });
+        m_seedInput->setPosition({ 210.f, y });
         m_seedInput->setScale(0.9f);
         m_seedInput->setCallback([](std::string const& s) {
             BotManager::get().setSeedFromString(s);
         });
         m_settingsPanel->addChild(m_seedInput);
 
-        // Row 2, right: frame stepping toggle + the step grid FPS. Because
-        // CBF's input window is effectively infinite there is no natural
-        // "frame" to step by -- the user picks the grid, M advances a slice.
-        m_stepToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xR, y },
-            menu_selector(BotUILayer::onFrameStep), "Frame step (M)",
-            bot.frameStepEnabled);
-        auto fpsLbl = CCLabelBMFont::create("FPS", "chatFont.fnt");
-        fpsLbl->setAnchorPoint({ 1.f, 0.5f });
-        fpsLbl->setPosition({ xR + 70.f, y - 46.f });
-        fpsLbl->setScale(0.6f);
-        m_settingsPanel->addChild(fpsLbl);
-        m_stepFpsInput = geode::TextInput::create(100.f, "240", "chatFont.fnt");
-        m_stepFpsInput->setCommonFilter(geode::CommonFilter::Float);
-        m_stepFpsInput->setString(fmt::format("{:g}", bot.frameStepFps));
-        m_stepFpsInput->setPosition({ xR + 130.f, y - 46.f });
-        m_stepFpsInput->setScale(0.9f);
-        m_stepFpsInput->setCallback([](std::string const& s) {
-            BotManager::get().setFrameStepFpsFromString(s);
-        });
-        m_settingsPanel->addChild(m_stepFpsInput);
-
         // Row 3: wave gravity maintain.
-        y -= 46.f;
+        y -= 44.f;
         m_waveToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onWaveMaintain), "Maintain gravity (wave)",
             bot.waveMaintainEnabled);
 
         // Row 4: autoclicker + clicks-per-second.
-        y -= 46.f;
+        y -= 44.f;
         m_autoClickToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
             menu_selector(BotUILayer::onAutoClick), "Autoclick",
             bot.autoClickEnabled);
-        auto cpsLbl = CCLabelBMFont::create("CPS", "chatFont.fnt");
-        cpsLbl->setAnchorPoint({ 1.f, 0.5f });
-        cpsLbl->setPosition({ 200.f, y });
-        cpsLbl->setScale(0.6f);
-        m_settingsPanel->addChild(cpsLbl);
-        m_cpsInput = geode::TextInput::create(100.f, "cps", "chatFont.fnt");
+        addTag("CPS", 158.f, y);
+        m_cpsInput = geode::TextInput::create(90.f, "10", "chatFont.fnt");
         m_cpsInput->setCommonFilter(geode::CommonFilter::Float);
         m_cpsInput->setString(fmt::format("{:g}", bot.autoClickCPS));
-        m_cpsInput->setPosition({ 258.f, y });
+        m_cpsInput->setPosition({ 210.f, y });
         m_cpsInput->setScale(0.9f);
         m_cpsInput->setCallback([](std::string const& s) {
             BotManager::get().setAutoClickCPSFromString(s);
         });
         m_settingsPanel->addChild(m_cpsInput);
 
-        // One-line explanations so nobody has to guess.
-        const char* hints[] = {
-            "Mirror: live P1 inputs also drive P2 (needs a 2-player level). "
-            "Invert = mirrored copy acts upside-down.",
-            "Lock seed: pins random triggers per attempt.  "
-            "Maintain gravity: wave hold direction survives gravity portals.",
-            "Autoclick: up to 10000 CPS.  Frame step: M advances one 1/FPS "
-            "slice.  Physics debug: replay recorded positions.",
-        };
-        float hy = 62.f;
-        for (auto* h : hints) {
-            auto lbl = CCLabelBMFont::create(h, "chatFont.fnt");
-            lbl->setAnchorPoint({ 0.f, 0.5f });
-            lbl->setPosition({ 22.f, hy });
-            lbl->setScale(0.44f);
-            lbl->setOpacity(160);
-            m_settingsPanel->addChild(lbl);
-            hy -= 16.f;
-        }
+        // Row 5: frame stepping. Layout is unmistakable:
+        // [x] Frame step   [press M to step]   FPS [    240    ]
+        // The FPS box sits right next to the label so it's clear what the
+        // number is controlling.
+        y -= 44.f;
+        m_stepToggle = makeToggle(m_settingsMenu, m_settingsPanel, { xL, y },
+            menu_selector(BotUILayer::onFrameStep), "Frame step",
+            bot.frameStepEnabled);
+        auto keybindHint = CCLabelBMFont::create("press M to step", "chatFont.fnt");
+        keybindHint->setAnchorPoint({ 0.f, 0.5f });
+        keybindHint->setPosition({ 180.f, y });
+        keybindHint->setScale(0.5f);
+        keybindHint->setOpacity(200);
+        m_settingsPanel->addChild(keybindHint);
+        addTag("FPS", 330.f, y);
+        m_stepFpsInput = geode::TextInput::create(90.f, "240", "chatFont.fnt");
+        m_stepFpsInput->setCommonFilter(geode::CommonFilter::Float);
+        m_stepFpsInput->setString(fmt::format("{:g}", bot.frameStepFps));
+        m_stepFpsInput->setPosition({ 385.f, y });
+        m_stepFpsInput->setScale(0.9f);
+        m_stepFpsInput->setCallback([](std::string const& s) {
+            BotManager::get().setFrameStepFpsFromString(s);
+        });
+        m_settingsPanel->addChild(m_stepFpsInput);
 
-        makeButton(m_settingsMenu, { W - 55.f, 26.f }, "Back",
+        // Single hint line at the bottom -- the row labels + inline tags
+        // above already say what each control is; this is just the caveats
+        // that don't fit on a toggle label.
+        auto hint = CCLabelBMFont::create(
+            "Mirror needs 2P level. Autoclick up to 10000 CPS. "
+            "Physics debug replays recorded positions.",
+            "chatFont.fnt");
+        hint->setAnchorPoint({ 0.f, 0.5f });
+        hint->setPosition({ 22.f, 32.f });
+        hint->setScale(0.42f);
+        hint->setOpacity(160);
+        m_settingsPanel->addChild(hint);
+
+        makeButton(m_settingsMenu, { W - 55.f, 32.f }, "Back",
                    menu_selector(BotUILayer::onSettingsBack));
 
         m_settingsPanel->setVisible(false);
