@@ -15,9 +15,13 @@
  *
  *    GJBaseGameLayer::handleButton    -> capture inputs at the lowest level
  *                                        (this is where CBF feeds clicks in)
- *    GJBaseGameLayer::processCommands -> per-physics-step playback firing
+ *    PlayerObject::update             -> per-SUBSTEP heartbeat: macro playback
+ *                                        firing, sub-step clock, autoclicker,
+ *                                        wave gravity correction
+ *    GJBaseGameLayer::processCommands -> per-frame clock drift guard, physics
+ *                                        frame recording, debug position replay
  *    GJBaseGameLayer::update          -> per-frame backstop for playback
- *    GJBaseGameLayer::getModifiedDelta-> frame-rate independent speedhack
+ *    GJBaseGameLayer::getModifiedDelta-> speedhack + frame stepping
  *
  *    PlayLayer::init                  -> spawn the floating UI, reset state
  *    PlayLayer::resetLevel            -> rewind playback cursor
@@ -92,11 +96,14 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
             if (!bot.filterLiveJump(down, isPlayer1)) return;
         }
 
-        // Record the *transition* (press/release) tagged with the current level
-        // time. We deliberately do this before calling the original so the
-        // timestamp matches the exact moment the engine is about to react to the
-        // input -- and we skip anything we injected ourselves during playback.
-        if (!bot.injecting && play) {
+        // Track the PHYSICAL button state for every non-injected transition
+        // (even while dead / idle) and use it to collapse duplicates. Fresh
+        // transitions get recorded; duplicates still pass to the engine but
+        // never into the macro. See BotManager::noteLive for why this is
+        // separate from the recorded timeline's own hold table.
+        bool fresh = (play && !bot.injecting)
+                     ? bot.noteLive(down, button, isPlayer1) : false;
+        if (fresh) {
             bot.recordInput(this, down, button, isPlayer1);
         }
 
@@ -137,35 +144,33 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& bot = BotManager::get();
         if (isPlay(this)) {
+            // Input firing / autoclick / wave correction all moved to the
+            // PlayerObject::update hook below -- per CBF's own source,
+            // processCommands runs once per rendered FRAME while the physics
+            // substeps (and CBF's input dispatch) happen inside the player
+            // update. Here we only guard the sub-step clock against drifting
+            // away from the engine clock across anything we didn't hook.
             double now = BotManager::levelTime(this);
-            if (bot.mode == bot::Mode::Playing) {
-                // ONE-STEP LOOKAHEAD -- the input/physics alignment fix.
-                // m_levelTime right now is the clock BEFORE this step runs;
-                // an input recorded mid-step at t=T influenced the step that
-                // *covered* T. Comparing recorded times against the pre-step
-                // clock replays every input one physics step late (the input
-                // only fires once the clock has moved past it). Firing
-                // everything due within [now, now + dt] instead lands each
-                // input on exactly the physics step it was recorded on.
-                bot.fireDueInputs(this, now + static_cast<double>(dt));
+            if (std::abs(bot.playClock() - now) > 0.5) {
+                bot.subClock = now;
             }
-            // Per-step feature ticks: autoclicker edges and wave gravity
-            // corrections happen on step boundaries, sub-frame with CBF.
-            bot.tickAutoClicker(this, now);
-            bot.tickWaveGravity(this);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        // NOTE: we deliberately do NOT call applyPhysicsPosition() here.
-        // Teleporting the player to a recorded position every step fights
-        // GD's own continuous collision detection (a forced position jump can
-        // skip clean past -- or shove the player into -- a hazard edge that
-        // natural, input-driven movement would have handled correctly), and
-        // it can cause the engine to re-evaluate ground/landing state in a way
-        // that makes a queued input appear to fire twice. Pure input replay
-        // against an identical starting state and identical held-button
-        // timeline is already exactly reproducible on its own.
+        // NOTE: applyPhysicsPosition() below is DEBUG-ONLY (settings
+        // checkbox, off by default). Teleporting the player to a recorded
+        // position every step fights GD's own continuous collision detection
+        // (a forced position jump can skip clean past -- or shove the player
+        // into -- a hazard edge that natural, input-driven movement would
+        // have handled correctly), and it can cause the engine to re-evaluate
+        // ground/landing state in a way that makes a queued input appear to
+        // fire twice. Pure input replay against an identical starting state
+        // and identical held-button timeline is the real playback mechanism.
         if (isPlay(this) && bot.mode == bot::Mode::Recording) {
-            bot.recordPhysicsFrame(BotManager::levelTime(this));
+            bot.recordPhysicsFrame(bot.playClock());
+        }
+        if (isPlay(this) && bot.mode == bot::Mode::Playing &&
+            bot.physicsDebugEnabled) {
+            bot.applyPhysicsPosition(bot.playClock());
         }
     }
     // ---- frame-rate independent speedhack --------------------------------
@@ -178,11 +183,57 @@ class $modify(BotBaseGameLayer, GJBaseGameLayer) {
     double getModifiedDelta(float dt) {
         auto& bot = BotManager::get();
         if (isPlay(this) && bot.guiPaused) return 0.0;
+        // Frame stepping: freeze the level and dole out exactly one
+        // 1/frameStepFps slice per queued step (M key). Since the macro,
+        // the autoclicker and the sub-step clock are all driven by the
+        // delta this returns, everything stays perfectly consistent while
+        // single-stepping -- it's just very slow time, not a special mode.
+        if (isPlay(this) && bot.frameStepEnabled) {
+            if (bot.pendingSteps > 0) {
+                --bot.pendingSteps;
+                double fps = (std::isfinite(bot.frameStepFps) &&
+                              bot.frameStepFps >= 1.0)
+                             ? bot.frameStepFps : 240.0;
+                return 1.0 / fps;
+            }
+            return 0.0;
+        }
         double modified = GJBaseGameLayer::getModifiedDelta(dt);
         if (bot.speedhackEnabled && isPlay(this)) {
             modified *= bot.speedMultiplier();
         }
         return modified;
+    }
+};
+
+// ============================================================================
+//  PlayerObject hook  --  the per-SUBSTEP heartbeat of the bot
+// ============================================================================
+//
+//  Per CBF's own source (theyareonit/Click-Between-Frames), the physics
+//  substeps -- and CBF's dispatch of queued OS inputs via handleButton --
+//  happen inside the per-substep player update, NOT in processCommands
+//  (which runs once per rendered frame). So this is the only hook granular
+//  enough to (a) replay macro inputs on the exact substep they were recorded
+//  on, and (b) advance a clock with true substep resolution. Player 1 drives
+//  the clock and the input firing; the wave gravity correction runs for each
+//  player right after their own substep so a mid-frame portal flip is
+//  corrected before the next substep.
+//
+class $modify(BotPlayerObject, PlayerObject) {
+    void update(float dt) {
+        auto pl = PlayLayer::get();
+        if (!pl) {  // menus, editor preview, icon kit -- not our players
+            PlayerObject::update(dt);
+            return;
+        }
+        auto& bot = BotManager::get();
+        bool isP1 = (this == pl->m_player1);
+        bool isP2 = (this == pl->m_player2);
+
+        if (isP1) bot.onSubStepBegin(pl, dt);
+        PlayerObject::update(dt);
+        if (isP1 || isP2) bot.onSubStepEnd(pl, this, isP1, dt);
     }
 };
 
@@ -270,6 +321,15 @@ class $modify(BotPlayLayer, PlayLayer) {
 class $modify(BotKeyboardDispatcher, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(cocos2d::enumKeyCodes key, bool isKeyDown,
                              bool isKeyRepeat, double timestamp) {
+        // M -> advance one frame-step slice. Handled BEFORE the repeat gate
+        // on purpose: holding M scrubs forward continuously.
+        if (isKeyDown && key == cocos2d::enumKeyCodes::KEY_M) {
+            auto& bot = BotManager::get();
+            if (bot.frameStepEnabled && PlayLayer::get()) {
+                bot.queueFrameStep();
+                return true;
+            }
+        }
         if (isKeyDown && !isKeyRepeat) {  // ignore auto-repeat key holds
             auto& bot = BotManager::get();
 
@@ -383,6 +443,9 @@ class $modify(BotMenuLayer, MenuLayer) {
     bot.waveMaintainEnabled  = Mod::get()->getSavedValue<bool>("wave-maintain", false);
     bot.autoClickEnabled     = Mod::get()->getSavedValue<bool>("auto-click", false);
     bot.autoClickCPS         = Mod::get()->getSavedValue<double>("auto-cps", 10.0);
+    bot.frameStepEnabled     = Mod::get()->getSavedValue<bool>("frame-step", false);
+    bot.frameStepFps         = Mod::get()->getSavedValue<double>("step-fps", 240.0);
+    bot.physicsDebugEnabled  = Mod::get()->getSavedValue<bool>("physics-debug", false);
 
     switch (bot.cbfState()) {
         case bot::CBFState::Syzzi:
