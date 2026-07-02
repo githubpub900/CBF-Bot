@@ -1,11 +1,14 @@
-CBF Macro Bot
+POLIK PLAYBACK
+===============
 
-An advanced macro bot for Geometry Dash 2.2081 designed to support Click Between Frames (CBF) and Click Between Steps.
+A CBF BOT MADE BY RYLAN (AND WITH HELP FROM EVAN) THAT USES CBF FOR PLAYBACK!
 
-Features
+=============================================================================
 
-X-Position Based Recording: Records inputs based on the exact X position of the player object rather than the visual frame, allowing for infinite precision suitable for CBF.
+VIBECODED ENTIRELY WITH CLAUDE AND GLM 5.2!
 
-Practice Bug Fix Foundation: Saves exact player physics vectors (velocity, rotation) at checkpoints.
+=============================================================================
 
-Engine Speedhack: Detached from FPS, hooks directly into the Cocos2d scheduler for accurate speed manipulation.
+NOT GOING ON THE GEODE REPOSITORY!
+
+=============================================================================

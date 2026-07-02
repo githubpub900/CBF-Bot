@@ -6,11 +6,11 @@
         "android": "2.2081",
         "ios": "2.2081"
     },
-    "id": "cbf.macrobot",
-    "name": "CBF Macro Bot",
+    "id": "ry.polik",
+    "name": "Polik Playback",
     "version": "v1.0.0",
-    "developer": "Some random ass AI",
-    "description": "Vibecoded shit",
+    "developer": "Jared",
+    "description": "Vibecoded AI macro bot.",
     "repository": "",
     "dependencies": {
         "syzzi.click_between_frames": {
